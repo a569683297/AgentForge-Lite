@@ -1,0 +1,26 @@
+# ===== 安全：API key 等敏感配置绝不允许提交 =====
+.env
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ===== Node / 前端 =====
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ===== 运行时数据 =====
+data/uploads/
+*.log
+
+# ===== IDE / 系统 =====
+.idea/
+.vscode/
+.DS_Store

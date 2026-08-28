@@ -1,0 +1,46 @@
+# ============================================================
+# AgentForge docker-compose（草稿）
+# 阶段1 目标：pgvector + redis + langfuse + api + web 一键起
+# D1 只定义基础设施（pg/redis），api/web 在 D24/D32 补充
+# 使用：docker compose up -d db redis
+# ============================================================
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: agentforge-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentforge_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-agentforge}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentforge}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: agentforge-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---- 以下为占位，后续里程碑补充 ----
+  # langfuse:      # D4 起
+  #   image: langfuse/langfuse:latest
+  # api:           # D24 起（本地构建）
+  #   build: .
+  # web:           # D32 起（node 构建 + nginx）
+  #   build: ./frontend
+
+volumes:
+  pgdata:
