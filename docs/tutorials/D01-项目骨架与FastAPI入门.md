@@ -24,6 +24,7 @@
 
 **你已会的**：`app.get('/health', handler)` 注册一个 URL 处理器。
 **FastAPI 写法**：
+
 ```python
 @router.get("/health")        # 装饰器 = 注册路由，等价于 app.get('/health')
 async def health() -> dict:   # 处理函数，等价于 handler
@@ -31,6 +32,7 @@ async def health() -> dict:   # 处理函数，等价于 handler
 ```
 
 **关键差异**（要记）：
+
 - Python 用**装饰器**（`@`）注册路由，TS 用链式调用
 - FastAPI 用**类型注解**（`-> dict`）做响应校验和文档生成，TS 用 zod/interface
 - `async def` 表示异步函数——你写 TS 的 `async function` 一样，await 一个意思
@@ -58,6 +60,7 @@ FastAPI 把 dict 序列化成 JSON → 返回给 curl
 ### 2.3 配置中心（为什么集中读 .env）
 
 **问题**：如果每个文件都直接读 `os.environ.get("DEEPSEEK_API_KEY")`，会怎样？
+
 - 配置散落各文件，改一处漏一处
 - 没有类型检查，写错名字静默失败
 - 换环境（dev/prod）要改代码
@@ -118,6 +121,7 @@ model_config = SettingsConfigDict(
     extra="ignore",         # .env 里多出来的键不报错（容错）
 )
 ```
+
 > 这三行是"读 .env 的配置"：指定文件、编码、容错策略。
 
 ```python
@@ -126,6 +130,7 @@ def database_url(self) -> str:
     return (f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}")
 ```
+
 > `@property` 让方法像属性一样访问：`settings.database_url`。
 > 拼好了 SQLAlchemy 的异步连接串，D2 建数据库直接用。
 
@@ -134,11 +139,13 @@ def database_url(self) -> str:
 def get_settings() -> Settings:
     return Settings()
 ```
+
 > `lru_cache` = 缓存函数结果，只执行一次。整个应用共享同一个 Settings 实例。
 
 ```python
 settings = get_settings()
 ```
+
 > 模块级单例：业务代码 `from app.config import settings` 直接用。
 
 ### 3.2 app/main.py（应用入口）
@@ -146,6 +153,7 @@ settings = get_settings()
 ```python
 app = FastAPI(title="AgentForge API", ...)
 ```
+
 > 创建应用实例，title 会显示在自动生成的 API 文档里（/docs）。
 
 ```python
@@ -154,11 +162,13 @@ async def unhandled_exception_handler(request, exc):
     logger.exception("未处理异常 path=%s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 ```
+
 > 全局兜底：任何没捕获的异常 → 记日志 + 返回 JSON 500（不让裸堆栈泄漏给前端）。
 
 ```python
 app.include_router(health_router, prefix="/api")
 ```
+
 > 挂载子路由。`prefix="/api"` 意味着 health.py 里的 `/health` 实际访问是 `/api/health`。
 
 ```python
@@ -166,6 +176,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
 ```
+
 > 直接 `python app/main.py` 也能启动（开发模式，reload 自动热重载）。
 
 ### 3.3 app/api/health.py（健康检查）
@@ -177,6 +188,7 @@ router = APIRouter(tags=["health"])
 async def health() -> dict:
     return {"status": "ok", "version": "0.1.0", "deps": {"api": "ok"}}
 ```
+
 > `APIRouter` = 路由分组（可以多个文件各自建 router，再汇总挂载）。
 > `deps` 字段是留给以后数据库/Redis 连通性检查的（D2/D4 填充）。
 
@@ -184,16 +196,16 @@ async def health() -> dict:
 
 ## 4. 类比迁移表（新东西 ↔ 你已会的）
 
-| FastAPI / Python 概念 | 你已会的（TS/前端） | 对应关系 |
-|---|---|---|
-| `@router.get("/health")` 装饰器 | `app.get('/health', handler)` | 注册路由 |
-| `async def / await` | `async function / await` | 异步编程 |
-| `-> dict` 类型注解 | TS 返回类型 / zod schema | 类型声明 |
-| `BaseSettings` 读 .env | `process.env` + zod 校验 | 配置管理 |
-| `lifespan` | Next.js server 初始化 | 生命周期钩子 |
-| `uv` 管理依赖 | `pnpm` | 包管理器 |
-| `uvicorn` 服务器 | `next dev` / vite dev | 开发服务器 |
-| 装饰器（@） | 高阶函数 / 中间件 | 函数增强 |
+| FastAPI / Python 概念           | 你已会的（TS/前端）           | 对应关系     |
+| ------------------------------- | ----------------------------- | ------------ |
+| `@router.get("/health")` 装饰器 | `app.get('/health', handler)` | 注册路由     |
+| `async def / await`             | `async function / await`      | 异步编程     |
+| `-> dict` 类型注解              | TS 返回类型 / zod schema      | 类型声明     |
+| `BaseSettings` 读 .env          | `process.env` + zod 校验      | 配置管理     |
+| `lifespan`                      | Next.js server 初始化         | 生命周期钩子 |
+| `uv` 管理依赖                   | `pnpm`                        | 包管理器     |
+| `uvicorn` 服务器                | `next dev` / vite dev         | 开发服务器   |
+| 装饰器（@）                     | 高阶函数 / 中间件             | 函数增强     |
 
 ---
 
@@ -216,22 +228,31 @@ async def health() -> dict:
 ## 6. 自测题（不看资料能答出即掌握）
 
 1. 画出一次 GET /api/health 请求的完整生命周期（从 curl 到返回）。
+   ![alt text](image.png)
 2. `prefix="/api"` 的作用是什么？health.py 里写 `/health`，实际 URL 是什么？
+   给当前路由模块增加公共请求头，当前文件下所有接口都生效，实际的 URL 是 `/api/health`。
 3. 为什么配置文件不用 `os.environ.get()` 散落各处，而要集中到 Settings 类？
+   集中管理：一个类管理所有配置，避免散落各处，方便维护。
 4. `lru_cache` 在 get_settings 上有什么用？
+   缓存函数结果，只执行一次。整个应用共享同一个 Settings 实例。
 5. `.env` 和 `.env.example` 的区别和各自作用？
+   `.env` 是实际运行时的配置文件，`.env.example` 是模板，用于创建 `.env`。
+   `.env` 里可以设置 API key、数据库连接串、日志级别等。
+   `.env.example` 是一个示例，展示如何填写配置文件。
 6. lifespan 里 yield 前后的代码分别什么时候执行？
+   前：应用启动时执行，用于初始化资源。
+   后：应用关闭时执行，用于释放资源。
 
 ---
 
 ## 7. 踩坑记录
 
-| 坑 | 现象 | 解决 |
-|---|---|---|
-| Docker daemon 未启动 | `docker info` 报 Cannot connect | `open -a Docker` 启动 Desktop，轮询等待就绪 |
-| `.env` 可能被提交 | key 泄漏风险 | `.gitignore` 明确排除，`git ls-files` 验证跟踪数为 0 |
-| D1 跳过学原理环节 | 流程不符合约定 | 补复盘课 + 把"每日教程"写入 skill 铁律 8 防再犯 |
+| 坑                   | 现象                            | 解决                                                 |
+| -------------------- | ------------------------------- | ---------------------------------------------------- |
+| Docker daemon 未启动 | `docker info` 报 Cannot connect | `open -a Docker` 启动 Desktop，轮询等待就绪          |
+| `.env` 可能被提交    | key 泄漏风险                    | `.gitignore` 明确排除，`git ls-files` 验证跟踪数为 0 |
+| D1 跳过学原理环节    | 流程不符合约定                  | 补复盘课 + 把"每日教程"写入 skill 铁律 8 防再犯      |
 
 ---
 
-*D1 完 ｜ 下一篇：D2 SQLAlchemy ORM 与建表*
+_D1 完 ｜ 下一篇：D2 SQLAlchemy ORM 与建表_
