@@ -23,7 +23,15 @@ from app.core.logging import logger
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时执行一次，关闭时清理。"""
     logger.info("AgentForge 启动中 env=%s", settings.app_env)
-    # D2 起在这里初始化数据库连接池 / Redis
+
+    # Redis 启动自检：连不上只告警不崩溃（开发期容忍，D24 部署期可改为硬失败）
+    from app.core.redis import ping as redis_ping
+
+    if await redis_ping():
+        logger.info("Redis 连接正常")
+    else:
+        logger.warning("Redis 连接失败，请检查 redis 容器是否启动")
+
     yield
     logger.info("AgentForge 已关闭")
 

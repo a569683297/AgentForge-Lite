@@ -5,11 +5,13 @@ GET /api/health —— 返回服务状态及各依赖连接情况。
 
 设计说明：
 - Docker 编排（D24）用 /api/health 做容器健康检查探针
-- 当前只有 API 自身状态；D2/D4 接数据库、Redis 后，
-  在这里追加 pg/redis 连通性检查（依赖挂掉要能看出来）
+- 实时探测各依赖连通性（redis），依赖挂掉要能看出来
+- 注意：探活用超时保护（D25 起可加），避免健康检查本身卡死
 """
 
 from fastapi import APIRouter
+
+from app.core.redis import ping as redis_ping
 
 router = APIRouter(tags=["health"])
 
@@ -21,13 +23,18 @@ async def health() -> dict:
     {
       "status": "ok",
       "version": "0.1.0",
-      "deps": {"api": "ok"}   # D2+ 追加 pg/redis
+      "deps": {"api": "ok", "redis": "ok"}
     }
     """
+    redis_ok = await redis_ping()
+    deps = {
+        "api": "ok",
+        "redis": "ok" if redis_ok else "down",
+    }
+    # 整体状态：任一关键依赖挂了 → degraded（部分可用）
+    status = "ok" if redis_ok else "degraded"
     return {
-        "status": "ok",
+        "status": status,
         "version": "0.1.0",
-        "deps": {
-            "api": "ok",
-        },
+        "deps": deps,
     }
