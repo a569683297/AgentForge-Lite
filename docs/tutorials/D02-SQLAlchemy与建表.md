@@ -197,13 +197,22 @@ async with engine.begin() as conn:
 
 ---
 
-## 6. 自测题（不看资料能答出即掌握）
+## 6. 自测题（附参考答案，先自己做再看答案）
 
 1. ORM 对比手写 SQL 的 3 个好处？
+   **参考答案**：① 不用手写 SQL 字符串（防 SQL 注入）② 类型安全（IDE/检查器发现类型错误）③ 切换数据库不用改业务代码（只换驱动）。补充：代码可维护性（对象操作 vs 字符串拼接）。
+
 2. engine 和 Session 的关系？（谁管连接池，谁是一次操作）
+   **参考答案**：**engine 管连接池**（真正连数据库、复用连接）；**Session 是一次事务的工作区**（增删改查都在这）。Session 从 engine 的池子里拿连接，用完归还。类比：engine = axios 实例（连接复用），Session = 一次 API 请求的 context。
+
 3. `ondelete="CASCADE"` 是干嘛的？没有它会怎样？
+   **参考答案**：级联删除——删掉父记录（sessions）时，数据库自动删除所有关联子记录（messages）。没有它：删会话后消息变"孤儿数据"（指向不存在的会话），需要应用层手动清理，且应用崩溃时无法保证一致性。
+
 4. `server_default` 和 `default` 的区别？为什么时间戳用 server_default？
+   **参考答案**：`default` 是**应用侧**生成（Python 调用函数）；`server_default` 是**数据库侧**默认（INSERT 时 DB 自己填）。时间戳用 server_default：多实例部署时时间由数据库统一生成，避免各应用服务器时钟不一致；且不依赖应用代码。
+
 5. FastAPI 的 `Depends(get_session)` 里 `async with` 保证了什么？
+   **参考答案**：`async with async_session_factory() as session:` 保证 **Session 无论成功/异常都会被自动关闭**（连接归还连接池），防止连接泄漏。FastAPI 自动：请求进来 → 调 get_session 拿到 session → 传给接口 → 请求结束 → 执行 yield 之后的关闭逻辑。类比：try/finally 释放资源，但由框架自动管理。
 
 ---
 

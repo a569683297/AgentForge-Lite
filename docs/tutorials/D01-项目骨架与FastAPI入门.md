@@ -225,23 +225,29 @@ async def health() -> dict:
 
 ---
 
-## 6. 自测题（不看资料能答出即掌握）
+## 6. 自测题（附参考答案，先自己做再看答案）
 
 1. 画出一次 GET /api/health 请求的完整生命周期（从 curl 到返回）。
-   ![alt text](image.png)
+   ![请求生命周期图](未命名绘图.svg)
+   **参考答案**：`curl/浏览器 → uvicorn(HTTP服务器,监听8000) → FastAPI路由匹配(/api/health) → 执行health()函数 → return dict → FastAPI序列化成JSON → 返回前端`
+   **易错点**：① 端口是 8000 不是 8080 ② 先"路由匹配"再"执行函数"，顺序不能反
+
 2. `prefix="/api"` 的作用是什么？health.py 里写 `/health`，实际 URL 是什么？
-   给当前路由模块增加公共请求头，当前文件下所有接口都生效，实际的 URL 是 `/api/health`。
+   **（纠错记录）首次答错**：给当前路由模块增加公共请求头 ← ❌ 错误
+   **（纠正后正确答案）**：`prefix` 是**URL 路径前缀**，给通过该 router 注册的所有路由统一加前缀。health.py 写 `/health`，实际访问 `/api/health`。**它和 HTTP 请求头（headers）无关**。
+   **易错点**：`prefix` = 路径前缀（URL 的一部分），不是请求头（HTTP 元信息）。类比 Hono 的 `app.route('/api', subApp)`。
+
 3. 为什么配置文件不用 `os.environ.get()` 散落各处，而要集中到 Settings 类？
-   集中管理：一个类管理所有配置，避免散落各处，方便维护。
+   **参考答案**：集中管理——单一事实来源（改一处生效全项目）、类型安全（pydantic 校验，写错启动报错）、环境隔离（dev/prod 只改 .env）。散落各处会导致改一处漏一处、无类型检查、换环境要改代码。
+
 4. `lru_cache` 在 get_settings 上有什么用？
-   缓存函数结果，只执行一次。整个应用共享同一个 Settings 实例。
+   **参考答案**：缓存函数结果——`get_settings()` 只执行一次（创建 Settings 实例），之后每次调用直接返回缓存实例。保证整个应用共享同一个配置对象（模块级单例）。类比：`lru_cache` = 函数级 memoization。
+
 5. `.env` 和 `.env.example` 的区别和各自作用？
-   `.env` 是实际运行时的配置文件，`.env.example` 是模板，用于创建 `.env`。
-   `.env` 里可以设置 API key、数据库连接串、日志级别等。
-   `.env.example` 是一个示例，展示如何填写配置文件。
+   **参考答案**：`.env` 是真实运行时配置（含 API key/数据库密码，被 .gitignore 排除，绝不提交）；`.env.example` 是脱敏模板（key 留空），给他人参考配置格式，可以提交 git。
+
 6. lifespan 里 yield 前后的代码分别什么时候执行？
-   前：应用启动时执行，用于初始化资源。
-   后：应用关闭时执行，用于释放资源。
+   **参考答案**：yield 前 = 应用**启动时**执行一次（初始化资源：数据库连接池、Redis 连接）；yield 后 = 应用**关闭时**执行一次（释放资源）。`async with` 保证无论成功失败都执行关闭逻辑。
 
 ---
 
