@@ -104,3 +104,76 @@ async def chat(
             gen.update(level="ERROR", status_message=str(e))
             logger.error("LLM 调用失败: %s", e)
             raise
+
+
+async def chat_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    trace_name: str = "llm-tools",
+) -> dict:
+    """
+    发送对话到 LLM，支持官方 function calling（工具调用）。
+
+    与 chat() 的区别：请求带 tools schema，LLM 可返回结构化 tool_calls
+    （而不是文本 JSON）。这是 OpenAI 兼容 API 的标准工具调用协议。
+
+    Returns:
+        {"message": {role, content, tool_calls?}, "usage": {...}}
+        - 有工具调用时 message["tool_calls"] = [{id, function:{name, arguments}}]
+        - 无工具调用时 message["tool_calls"] 为 None
+    """
+    provider = settings.primary_llm
+    if not provider.get("api_key"):
+        raise ValueError("LLM API key 未配置，请检查 .env")
+
+    start = time.perf_counter()
+
+    with langfuse.start_as_current_observation(
+        name=trace_name,
+        as_type="generation",
+        model=provider["model"],
+        model_parameters={"temperature": 0.4, "tools": tools},
+        input={"messages": messages},
+    ) as gen:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{provider['base_url']}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {provider['api_key']}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": provider["model"],
+                        "messages": messages,
+                        "tools": tools,          # function calling schema
+                        "temperature": 0.4,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            msg = data["choices"][0]["message"]
+            usage = data.get("usage", {})
+
+            gen.update(
+                output={"message": msg},
+                usage_details={
+                    "input": usage.get("prompt_tokens", 0),
+                    "output": usage.get("completion_tokens", 0),
+                    "total": usage.get("total_tokens", 0),
+                },
+            )
+            logger.info(
+                "LLM 工具调用 model=%s tokens=%s tool_calls=%s",
+                provider["model"],
+                usage.get("total_tokens", 0),
+                len(msg.get("tool_calls") or []),
+            )
+            return {"message": msg, "usage": usage}
+
+        except Exception as e:
+            gen.update(level="ERROR", status_message=str(e))
+            logger.error("LLM 工具调用失败: %s", e)
+            raise
