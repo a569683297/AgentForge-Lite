@@ -191,6 +191,7 @@ return graph.compile()
 
 4. 官方 function calling 中，tool 消息为什么必须带 tool_call_id？
    **参考答案**：OpenAI 兼容协议要求 tool 结果用 id 关联 assistant 声明的 tool_calls，LLM 才能对应。缺失会 400（今天踩过）。
+   **（易错点：400 vs 404）**：缺 tool_call_id 是 **400 Bad Request**（请求存在但格式不合法），不是 404。400 = 内容格式错；404 = 路径/资源不存在。面试问"遇到过什么错"能区分两者是加分项。
 
 5. should_continue 怎么判断走 execute 还是 answer？
    **参考答案**：看最后一条 assistant 消息有没有 tool_calls 字段（结构化判断，不是解析文本）。
