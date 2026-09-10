@@ -22,36 +22,7 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.services.llm_gateway import chat, chat_with_tools
-from app.tools.current_time import current_time
-
-# ---- 工具表：name → (函数, 描述, 参数schema) ----
-# D9 升级为 ToolRegistry，这里先内联
-TOOLS = {
-    "current_time": {
-        "function": current_time,
-        "description": "获取当前日期和时间。当用户问'现在几点/今天几号/当前时间'时使用。",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    }
-}
-
-
-def _build_tools_schema() -> list[dict]:
-    """把 TOOLS 转成 OpenAI function calling 的 tools schema。"""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": meta["description"],
-                "parameters": meta["parameters"],
-            },
-        }
-        for name, meta in TOOLS.items()
-    ]
+from app.tools import execute_tool, get_tools_schema  # 注册表：工具能力集中管理
 
 
 # ---- State：所有节点共享的状态（类比 pinia store）----
@@ -67,7 +38,7 @@ async def plan_node(state: AgentState) -> AgentState:
     system = {"role": "system", "content": "你是一个 AI 助手。根据用户问题决定是否需要调用工具。"}
     result = await chat_with_tools(
         [system] + messages,
-        _build_tools_schema(),
+        get_tools_schema(),   # ← 从注册表取（D8：不再内联）
         trace_name="agent-plan",
     )
     # LLM 返回的完整 assistant 消息（可能含 tool_calls 数组）
@@ -77,7 +48,11 @@ async def plan_node(state: AgentState) -> AgentState:
 
 # ---- 节点 2：execute（执行工具）+ observe（结果写回）----
 async def execute_node(state: AgentState) -> AgentState:
-    """执行 assistant 消息里声明的 tool_calls，结果以 tool 消息写回。"""
+    """执行 assistant 消息里声明的 tool_calls，结果以 tool 消息写回。
+
+    D8 变化：不再直接查 TOOLS dict + 自己 try/except，
+    改为调注册表的 execute_tool（它内部处理未知工具/执行失败）。
+    """
     messages = state["messages"]
     last = messages[-1]  # plan 追加的 assistant 消息（含 tool_calls）
     tool_calls = last.get("tool_calls") or []
@@ -89,9 +64,10 @@ async def execute_node(state: AgentState) -> AgentState:
 
             fn_name = tc["function"]["name"]
             args = json.loads(tc["function"]["arguments"] or "{}")
-            result = TOOLS[fn_name]["function"](**args)
+            # 交给注册表执行（内部已处理未知工具/异常，返回字符串结果）
+            result = execute_tool(fn_name, args)
         except Exception as e:
-            result = f"工具执行失败: {e}"
+            result = f"工具调用解析失败: {e}"
         # tool 消息必须带 tool_call_id 关联（否则 400）
         tool_messages.append(
             {
@@ -155,3 +131,53 @@ def get_agent():
     if _agent is None:
         _agent = build_graph()
     return _agent
+
+
+# ============================================================
+# 带记忆的 Agent 入口（D8 新增）
+# ============================================================
+async def run_agent(session_id: str, user_input: str) -> str:
+    """
+    带记忆对话的完整入口：读历史 → 跑 Agent → 写回记忆 → 返回回答。
+
+    端到端流程：
+      ① get_window(session_id)      从 Redis 读最近 N 轮历史
+      ② messages = 历史 + [本次提问]
+      ③ agent.ainvoke(messages)     跑 LangGraph 的 ReAct 循环
+      ④ 取最终回答（最后一条有内容的 assistant 消息）
+      ⑤ append_turn(...)            写回 Redis（Upsert + 裁剪 + 刷新 TTL）
+      ⑥ 返回回答
+
+    Args:
+        session_id: 会话 ID（前端生成的 UUID，一个会话固定一个）
+        user_input: 用户本轮输入
+    Returns:
+        Agent 的回答文本
+    """
+    from app.services.memory_service import append_turn, get_window
+
+    # ① 读历史
+    history = await get_window(session_id)
+
+    # ② 组装状态（历史 + 本轮提问）
+    state: AgentState = {
+        "messages": history + [{"role": "user", "content": user_input}],
+        "step_count": 0,
+    }
+
+    # ③ 跑图
+    result = await get_agent().ainvoke(state)
+
+    # ④ 取最终回答
+    #   注意：中间会有带 tool_calls 的 assistant 消息（content 为空），
+    #   所以要从后往前找"第一条 content 非空的 assistant 消息"
+    final_answer = ""
+    for msg in reversed(result["messages"]):
+        if msg["role"] == "assistant" and msg.get("content"):
+            final_answer = msg["content"]
+            break
+
+    # ⑤ 写回记忆（只存 user + 最终回答，不存中间工具消息——见 memory_service 说明）
+    await append_turn(session_id, user_input, final_answer)
+
+    return final_answer
