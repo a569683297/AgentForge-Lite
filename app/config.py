@@ -33,12 +33,18 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_chat_model: str = "deepseek-chat"
-    deepseek_embed_model: str = "text-embedding-3-small"
 
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_chat_model: str = "gpt-4o-mini"
-    openai_embed_model: str = "text-embedding-3-small"
+
+    # ---- Embedding（向量化，D9 新增）----
+    # 注意：DeepSeek 没有 embeddings 接口（实测 /embeddings 返回 404），
+    # 所以 embedding 必须独立配置，与 chat 通道解耦。
+    embedding_provider: str = "local"       # local（fastembed 本地模型）| openai
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"   # 本地模型名
+    embedding_dim: int = 512                # 向量维度（必须与模型一致！切换模型时要重建索引）
+    openai_embed_model: str = "text-embedding-3-small"  # openai 方案的模型名
 
     # ---- 基础设施 ----
     postgres_host: str = "localhost"
@@ -94,6 +100,31 @@ class Settings(BaseSettings):
                 "model": self.openai_chat_model,
             }
         return None
+
+    @property
+    def embedding_config(self) -> dict:
+        """
+        返回当前 embedding 方案配置（D9 新增）。
+
+        设计意图：embedding 层可切换（本地模型 ↔ API），业务代码只读这里，
+        换 provider 只改 .env，代码零改动。
+
+        Returns:
+            {"provider": "local"|"openai", "model": 模型名, "dim": 维度, ...}
+        """
+        if self.embedding_provider == "openai":
+            return {
+                "provider": "openai",
+                "model": self.openai_embed_model,
+                "dim": 1536,                       # text-embedding-3-small 维度
+                "api_key": self.openai_api_key,
+                "base_url": self.openai_base_url,
+            }
+        return {
+            "provider": "local",
+            "model": self.embedding_model,
+            "dim": self.embedding_dim,
+        }
 
 
 @lru_cache

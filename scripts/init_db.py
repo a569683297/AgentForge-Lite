@@ -11,6 +11,8 @@
 
 import asyncio
 
+from sqlalchemy import text
+
 from app.core.db import Base, engine
 from app.core.logging import logger
 import app.models  # noqa: F401  确保模型注册到 Base.metadata
@@ -19,6 +21,11 @@ import app.models  # noqa: F401  确保模型注册到 Base.metadata
 async def init_db() -> None:
     """创建所有表。幂等：已存在的表跳过。"""
     async with engine.begin() as conn:
+        # ⚠️ 必须先启用 pgvector 扩展，否则 documents 表的 vector 列类型不存在
+        # （D1 的 docker-compose 用的就是 pgvector/pgvector:pg16 镜像，扩展可用）
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        logger.info("pgvector 扩展已启用")
+
         await conn.run_sync(Base.metadata.create_all)
     logger.info("数据库表创建完成")
 

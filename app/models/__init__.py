@@ -6,7 +6,8 @@ ORM 模型统一导出
 所以这里必须全部 import 到（否则表不会被创建）。
 """
 
+from app.models.document import Document
 from app.models.message import Message
 from app.models.session import Session
 
-__all__ = ["Session", "Message"]
+__all__ = ["Session", "Message", "Document"]
