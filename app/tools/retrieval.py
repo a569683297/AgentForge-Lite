@@ -13,8 +13,15 @@ D10 交付的是一个「工具」：LLM 通过 get_tools_schema() 看到它，�
 
 文件名注意：本文件是 app/tools/retrieval.py（工具层），
 底层实现是 app/services/retrieval_service.py（服务层），别搞混。
+
+D11 变化：工具返回值**仍是 str**（契约不变），
+但额外把原始结构化结果登记到请求级收集器（app/core/citation.py），
+让回答里的 [1] 能被映射回原文 —— 双通道：
+    文本通道  → 给 LLM 读（带 [n] 编号）
+    结构通道  → 给前端用（source / content / similarity 三个字段）
 """
 
+from app.core.citation import record_sources
 from app.services.retrieval_service import search
 from app.tools.registry import register
 
@@ -57,8 +64,14 @@ async def search_documents(query: str) -> str:
     if not results:
         return f"未在知识库中找到与「{query}」相关的内容。"
 
+    # ① 先登记结构化结果（D11 结构通道）。
+    #    必须写在格式化**之前**：一旦 return 出去，results 这个结构就出不了这个函数了。
+    #    返回的 offset 是本批之前的已有条数，用于让编号在多轮检索间全局递增。
+    offset = record_sources(results)
+
+    # ② 再格式化成文本（D11 文本通道，给 LLM 读）
     blocks: list[str] = []
-    for index, item in enumerate(results, start=1):
+    for index, item in enumerate(results, start=offset + 1):
         source = item.get("source") or "未知来源"
         blocks.append(
             f"[{index}] 来源：{source}（相关度 {item['similarity']}）\n{item['content']}"

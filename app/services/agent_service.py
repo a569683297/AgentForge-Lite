@@ -21,6 +21,9 @@ from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from app.core.citation import check_citations, get_sources, reset_sources
+from app.core.logging import logger
+from app.schemas.chat import ChatResult, SourceItem
 from app.services.llm_gateway import chat, chat_with_tools
 from app.tools import execute_tool, get_tools_schema  # 注册表：工具能力集中管理
 
@@ -82,11 +85,24 @@ async def execute_node(state: AgentState) -> AgentState:
 
 # ---- 节点 3：answer（生成最终回答）----
 async def answer_node(state: AgentState) -> AgentState:
-    """带着工具结果生成最终回答。"""
+    """带着工具结果生成最终回答。
+
+    D11 变化（引用通道 A：prompt）：明确要求 LLM 标注来源编号。
+    之前的 prompt 只说"基于结果回答"，LLM 的默认倾向是"综合材料用自己的话答"
+    ——结果就是 D10 那句话：上下文里有 [1]，但输出里没有。
+    ⚠ 上一版最后那句"不要提及内部工具调用细节"很可能还在**主动抑制**它，
+      所以这里改成"不要提技术细节，但必须标编号"，两件事分清。
+    """
     messages = state["messages"]
     system = (
-        "你是 AI 助手。如果上面有工具执行结果，请基于结果回答用户；"
-        "否则直接回答。不要提及内部工具调用细节。"
+        "你是 AI 助手。\n"
+        "如果上面有工具执行结果，请严格基于结果回答用户，"
+        "并在每条来自资料的论断后标注来源编号，格式为 [1]、[2]（对应工具结果里的 [n]）。\n"
+        "只允许使用工具结果中确实存在的编号，不要编造编号；"
+        "也不要写出工具结果里没有的内容。\n"
+        "如果工具结果不足以回答，就直接说明资料中没有相关信息，不要自行推测。\n"
+        "不要提及工具调用的技术细节（函数名、参数、数据库等）。\n"
+        "如果上面没有工具执行结果，直接回答用户。"
     )
     reply = await chat(
         [{"role": "system", "content": system}] + messages,
@@ -135,27 +151,40 @@ def get_agent():
 
 
 # ============================================================
-# 带记忆的 Agent 入口（D8 新增）
+# 带记忆的 Agent 入口（D8 新增，D11 改返回结构）
 # ============================================================
-async def run_agent(session_id: str, user_input: str) -> str:
+# 注：引用校验 check_citations 放在 app/core/citation.py
+#     （纯函数、不依赖 config，可与收集器一起单独测试）
+async def run_agent(session_id: str, user_input: str) -> ChatResult:
     """
-    带记忆对话的完整入口：读历史 → 跑 Agent → 写回记忆 → 返回回答。
+    带记忆对话的完整入口：读历史 → 跑 Agent → 写回记忆 → 返回回答 + 来源。
+
+    D11 变化：返回值从 str 变成 ChatResult（answer + sources + invalid_citations）。
+    这是破坏性改动，但调用方目前只有一个验证脚本，成本可控。
 
     端到端流程：
+      ⓪ reset_sources()             重新绑定本请求的引用收集器（并发隔离的关键）
       ① get_window(session_id)      从 Redis 读最近 N 轮历史
       ② messages = 历史 + [本次提问]
       ③ agent.ainvoke(messages)     跑 LangGraph 的 ReAct 循环
+          └─ 工具执行时把来源登记进收集器（结构通道）
       ④ 取最终回答（最后一条有内容的 assistant 消息）
-      ⑤ append_turn(...)            写回 Redis（Upsert + 裁剪 + 刷新 TTL）
-      ⑥ 返回回答
+      ⑤ get_sources()               取出本请求累计的来源
+      ⑥ check_citations()           校验回答里的 [n] 有没有越界
+      ⑦ append_turn(...)            写回 Redis（Upsert + 裁剪 + 刷新 TTL）
+      ⑧ 返回 ChatResult
 
     Args:
         session_id: 会话 ID（前端生成的 UUID，一个会话固定一个）
         user_input: 用户本轮输入
     Returns:
-        Agent 的回答文本
+        ChatResult：回答文本 + 来源映射表 + 越界引用编号
     """
     from app.services.memory_service import append_turn, get_window
+
+    # ⓪ 引用收集器必须在跑图之前重新绑定。
+    #    ContextVar 复制的是「绑定」不是「对象内容」，不重新绑定会读到上个请求的残留。
+    reset_sources()
 
     # ① 读历史
     history = await get_window(session_id)
@@ -178,7 +207,29 @@ async def run_agent(session_id: str, user_input: str) -> str:
             final_answer = msg["content"]
             break
 
-    # ⑤ 写回记忆（只存 user + 最终回答，不存中间工具消息——见 memory_service 说明）
+    # ⑤ 取出本请求累计的来源（结构通道）
+    raw_sources = get_sources()
+    sources = [SourceItem(**item) for item in raw_sources]
+
+    # ⑥ 校验引用编号有没有越界（幻觉引用检测）
+    invalid = check_citations(final_answer, len(sources))
+    if invalid:
+        logger.warning(
+            "回答引用了不存在的来源编号 session=%s 越界编号=%s 实际来源数=%d",
+            session_id,
+            invalid,
+            len(sources),
+        )
+
+    # ⑦ 写回记忆（只存 user + 最终回答，不存中间工具消息——见 memory_service 说明）
     await append_turn(session_id, user_input, final_answer)
 
-    return final_answer
+    # ⑧ 返回结构化结果
+    logger.info(
+        "Agent 完成 session=%s 回答长度=%d 来源数=%d 越界引用=%s",
+        session_id,
+        len(final_answer),
+        len(sources),
+        invalid or "无",
+    )
+    return ChatResult(answer=final_answer, sources=sources, invalid_citations=invalid)
