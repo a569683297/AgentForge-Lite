@@ -15,6 +15,7 @@
 类比前端：webpack/Vite 插件系统——插件自己注册，构建工具只管遍历注册表。
 """
 
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -71,9 +72,20 @@ def get_tools_schema() -> list[dict]:
     ]
 
 
-def execute_tool(name: str, arguments: dict[str, Any]) -> str:
+async def execute_tool(name: str, arguments: dict[str, Any]) -> str:
     """
     按名字执行工具，返回字符串结果。
+
+    D10 变化：改 async，并支持「同步/异步工具共存」。
+    原因：D9 的检索工具是 async def，同步注册表直接调用它只会拿到一个
+    coroutine 对象，str() 之后变成 "<coroutine object ...>" 喂给 LLM——
+    不报错，但结果是垃圾（Python 仅抛 RuntimeWarning，容易被忽略）。
+
+    设计取舍：注册表不假设工具是同步还是异步，改为运行时探测返回值
+    （inspect.isawaitable）。这样：
+    - 同步工具（current_time）原样返回，不为统一而多造 coroutine、多一次调度
+    - 异步工具（search_documents）自动 await
+    - 旧工具零改动，新工具不受限
 
     Args:
         name: 工具名（来自 LLM 的 tool_calls）
@@ -85,7 +97,10 @@ def execute_tool(name: str, arguments: dict[str, Any]) -> str:
     if name not in _registry:
         return f"未知工具：{name}（可用工具：{list(_registry.keys())}）"
     try:
-        return str(_registry[name]["function"](**arguments))
+        result = _registry[name]["function"](**arguments)
+        if inspect.isawaitable(result):   # 探测：是 coroutine 就 await 出来
+            result = await result
+        return str(result)
     except Exception as e:
         return f"工具 {name} 执行失败：{e}"
 

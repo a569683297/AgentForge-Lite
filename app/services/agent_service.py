@@ -65,7 +65,8 @@ async def execute_node(state: AgentState) -> AgentState:
             fn_name = tc["function"]["name"]
             args = json.loads(tc["function"]["arguments"] or "{}")
             # 交给注册表执行（内部已处理未知工具/异常，返回字符串结果）
-            result = execute_tool(fn_name, args)
+            # D10：注册表改 async 后，这里必须 await——否则拿到的是 coroutine 对象
+            result = await execute_tool(fn_name, args)
         except Exception as e:
             result = f"工具调用解析失败: {e}"
         # tool 消息必须带 tool_call_id 关联（否则 400）

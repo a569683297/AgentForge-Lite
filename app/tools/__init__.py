@@ -12,6 +12,7 @@
 """
 
 from app.tools import current_time  # noqa: F401  导入即注册（副作用导入）
+from app.tools import retrieval  # noqa: F401  D10：知识库检索工具
 from app.tools.registry import (
     execute_tool,
     get_tools_schema,
@@ -25,4 +26,5 @@ __all__ = [
     "execute_tool",
     "list_tools",
     "current_time",
+    "retrieval",
 ]
