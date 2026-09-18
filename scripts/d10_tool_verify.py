@@ -13,7 +13,7 @@ D10 验证脚本：检索工具化 + 同步/异步分流
 
 import asyncio
 
-from app.services.retrieval_service import add_documents, clear_documents
+from app.services.document_service import delete_all_documents, ingest_texts
 from app.tools import execute_tool, get_tools_schema, list_tools
 
 DOCS = [
@@ -79,8 +79,8 @@ async def main() -> None:
     await case_sync_tool()
 
     print(f"\n{'='*60}\n准备数据（清空并重新入库）\n{'='*60}")
-    await clear_documents()
-    n = await add_documents(DOCS, source="d10-verify")
+    await delete_all_documents()
+    _, n = await ingest_texts(DOCS, filename="d10-verify")
     print(f"✅ 入库 {len(DOCS)} 篇 → {n} 个切片")
 
     await case_async_tool()

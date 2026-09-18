@@ -1,24 +1,31 @@
 """
-检索服务（RAG 核心：切片 + 入库 + 向量检索）
-=============================================
-RAG 的两阶段都在这：
-- 离线建库：add_documents()  文本 → 切片 → 向量化 → 存 pgvector
-- 在线检索：search()          问题 → 向量化 → 相似度排序 → top-k 片段
+检索服务（RAG 在线检索）
+=========================
+D12 拆表后本文件只管**读**：
+
+    切片工具：split_text()   长文本 → 有重叠的片段（写路径也复用它）
+    向量检索：search()        问题 → 向量 → 相似度排序 → top-k
+
+入库（写）与文档状态管理已移到 app/services/document_service.py —— 按读写分职责。
 
 端到端流程（用户提问时）：
   search(问题)
-    → embed_query(问题)             问题变向量
-    → SQL: ORDER BY embedding <=> 问题向量   pgvector 算余弦距离并排序
-    → 取 top-k 片段返回
-    → 调用方把片段拼进 prompt 给 LLM
+    → embed_query(问题)                          问题变向量
+    → SQL: document_chunks JOIN documents
+             WHERE documents.status = 'ready'    只检索已就绪的文档
+             ORDER BY embedding <=> 问题向量       pgvector 余弦距离，越小越相似
+             LIMIT top_k
+    → 返回片段 + 文件名 + 页码                     供引用定位使用
+    → 调用方拼进 prompt 给 LLM
 """
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from app.core.db import async_session_factory
 from app.core.logging import logger
-from app.models.document import Document
-from app.services.embedding_service import embed_query, embed_texts
+from app.models.document import Document, DocumentStatus
+from app.models.document_chunk import DocumentChunk
+from app.services.embedding_service import embed_query
 
 # ---- 切片配置 ----
 CHUNK_SIZE = 300        # 每个切片的字符数
@@ -35,6 +42,10 @@ def split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
         "...北京是中国的" | "首都，人口众多..."
       两片单独看都语义不完整 → 检索到也帮不上 LLM
       重叠 50 字后，两片都包含完整句子
+
+    关键几何关系：重叠 = chunk_size - step
+      chunk_size 管「语义密度」，overlap 管「抗切断」，是两个独立的调优维度，
+      所以代码里先算 step（循环实际迈多大步），再进循环。
 
     Args:
         text: 原始文本
@@ -61,103 +72,55 @@ def split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
-async def add_documents(
-    texts: list[str],
-    source: str | None = None,
-    chunk: bool = True,
-) -> int:
-    """
-    文档入库：切片 → 向量化 → 存 pgvector。
-
-    Args:
-        texts: 原始文本列表（每个元素是一篇文档/一段话）
-        source: 来源标识（文件名等），便于按来源过滤或删除
-        chunk: 是否切片（短文本可传 False）
-    Returns:
-        实际入库的切片数
-    """
-    # ① 切片
-    chunks: list[str] = []
-    for text in texts:
-        chunks.extend(split_text(text) if chunk else [text])
-
-    if not chunks:
-        return 0
-
-    # ② 批量向量化（一次调用比逐条快得多）
-    vectors = await embed_texts(chunks)
-
-    # ③ 写入数据库
-    async with async_session_factory() as session:
-        for idx, (content, vec) in enumerate(zip(chunks, vectors, strict=True)):
-            session.add(
-                Document(
-                    content=content,
-                    embedding=vec,
-                    source=source,
-                    doc_metadata={"chunk_index": idx, "total": len(chunks)},
-                )
-            )
-        await session.commit()
-
-    logger.info("入库完成 source=%s 切片数=%d", source, len(chunks))
-    return len(chunks)
-
-
 async def search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     """
     向量检索：找与问题语义最相近的 top-k 片段。
 
     SQL 核心：ORDER BY embedding <=> query_vector
       <=> 是 pgvector 的**余弦距离**算子（值越小越相似）
-      相似度 = 1 - 距离（转成"越大越相似"更好理解）
+      相似度 = 1 - 距离（转成「越大越相似」，好理解也好展示）
+
+    为什么要 JOIN documents：
+      文件名和文档状态在 documents 表里，切片表只存 document_id。
+      顺带解决了「只检索已就绪文档」这件事 —— processing / failed 的文档
+      切片要么残缺、要么本就不该存在，不过滤就可能命中半截内容。
 
     Args:
         query: 用户问题
         top_k: 返回条数
     Returns:
-        [{"content": ..., "similarity": 0.83, "source": ...}, ...]（按相似度降序）
+        [{"content":..., "source":..., "page_ref":..., "similarity":...}, ...]（按相似度降序）
     """
+    # 两个阶段必须用同一个 embedding 模型：只有同一模型的向量才在同一语义空间
     query_vec = await embed_query(query)
 
-    async with async_session_factory() as session:
-        # 用 SQLAlchemy 表达 pgvector 的距离排序
-        distance = Document.embedding.cosine_distance(query_vec)
-        stmt = (
-            select(
-                Document.content,
-                Document.source,
-                distance.label("distance"),
-            )
-            .order_by(distance)          # 距离升序 = 相似度降序
-            .limit(top_k)
+    # 用 SQLAlchemy 表达 pgvector 的距离排序
+    distance = DocumentChunk.embedding.cosine_distance(query_vec)
+    stmt = (
+        select(
+            DocumentChunk.content,
+            DocumentChunk.page_ref,
+            Document.filename,
+            distance.label("distance"),
         )
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.status == DocumentStatus.READY)
+        .order_by(distance)          # 距离升序 = 相似度降序
+        .limit(top_k)
+    )
+
+    async with async_session_factory() as session:
         rows = (await session.execute(stmt)).all()
 
     results = [
         {
             "content": row.content,
-            "source": row.source,
+            # 沿用 "source" 这个键名：工具层与引用收集器都按它取来源展示名
+            "source": row.filename,
+            "page_ref": row.page_ref,
             "similarity": round(1 - row.distance, 4),   # 距离 → 相似度
         }
         for row in rows
     ]
     logger.info("检索完成 query=%r 命中=%d 条", query[:20], len(results))
     return results
-
-
-async def clear_documents(source: str | None = None) -> int:
-    """
-    清空文档（指定 source 则只清该来源）。
-
-    用途：换 embedding 模型后必须重建索引时，先清空再重新入库。
-    """
-    async with async_session_factory() as session:
-        stmt = delete(Document)
-        if source:
-            stmt = stmt.where(Document.source == source)
-        result = await session.execute(stmt)
-        await session.commit()
-    count = result.rowcount or 0
-    logger.info("已清空文档 source=%s 删除数=%d", source or "(全部)", count)
-    return count

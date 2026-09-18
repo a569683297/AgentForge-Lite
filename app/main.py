@@ -5,10 +5,13 @@ FastAPI 应用入口
 1. 加载配置（app.config.settings）
 2. 初始化日志（app.core.logging）
 3. 创建 FastAPI 实例，注册全局异常处理器
-4. 注册路由（health 健康检查 + chat 对话接口）
+4. 注册路由（health 健康检查 + chat 对话 + documents 文档管理）
 5. 启动 uvicorn 后：
-   - GET  http://localhost:8000/api/health
-   - POST http://localhost:8000/api/chat
+   - GET    http://localhost:8000/api/health
+   - POST   http://localhost:8000/api/chat
+   - POST   http://localhost:8000/api/documents        （上传）
+   - GET    http://localhost:8000/api/documents        （列表）
+   - DELETE http://localhost:8000/api/documents/{id}   （删除）
    - 交互式文档 http://localhost:8000/docs
 """
 
@@ -18,6 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.chat import router as chat_router
+from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.config import settings
 from app.core.logging import logger
@@ -61,6 +65,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # ---- 路由注册 ----
 app.include_router(health_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+app.include_router(documents_router, prefix="/api")
 
 
 if __name__ == "__main__":

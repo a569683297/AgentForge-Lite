@@ -14,13 +14,33 @@ D11 HTTP 层验证：POST /api/chat
 ⚠ 每个用例用独立 session_id（带 uuid 后缀），避免命中上一轮历史：
   这是 D11 踩过的坑——会话 ID 写死会让 LLM 直接从记忆作答、不再调工具，
   表现为 sources 为空，看起来像"收集器坏了"。
+
+⚠ 本脚本**自己播种知识库**（D12 补）：
+  之前它默默依赖「上一个脚本跑完留下的数据」，单独跑或换顺序跑就会失败 ——
+  典型的现象是 H1 报错却看不出原因。每个验证脚本都该能独立跑通。
 """
 
+import asyncio
 import uuid
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.document_service import delete_all_documents, ingest_texts
+
+# 与 d11_citation_verify 用同一批虚构事实，保证两个脚本对同一份知识库做验证
+DOCS = [
+    (
+        "d11-alpha.md",
+        "公司内部项目管理规定：代号为「琥珀」的项目由星河算法组负责，项目周期两年，"
+        "负责人为林工。该项目组直接向 CTO 汇报。",
+    ),
+    (
+        "d11-beta.md",
+        "公司内部项目管理规定：代号为「翡翠」的项目由山海基础组负责，项目周期一年，"
+        "负责人为周工。该项目组直接向 CTO 汇报。",
+    ),
+]
 
 
 def section(title: str) -> None:
@@ -158,7 +178,26 @@ def case_h4_response_shape(client: TestClient) -> bool:
     return ok
 
 
+async def prepare_kb() -> None:
+    """播种知识库，让本脚本可以独立运行。"""
+    section("准备知识库（本脚本自己播种）")
+    await delete_all_documents()
+    for filename, text in DOCS:
+        _, count = await ingest_texts([text], filename=filename)
+        print(f"  入库 {filename} → {count} 个切片")
+
+    # 关键：用完立刻清空连接池。
+    # 下面 TestClient 会在**另一个线程里另起一个事件循环**，
+    # 池里残留的连接绑定在刚才那个已关闭的 loop 上，复用会直接报
+    # "attached to a different loop"。dispose 掉，让新 loop 建新连接。
+    from app.core.db import engine
+
+    await engine.dispose()
+
+
 def main() -> None:
+    asyncio.run(prepare_kb())
+
     results: list[tuple[str, bool]] = []
 
     # TestClient 作为上下文管理器使用 → 触发 lifespan（Redis 自检等）

@@ -73,8 +73,10 @@ async def search_documents(query: str) -> str:
     blocks: list[str] = []
     for index, item in enumerate(results, start=offset + 1):
         source = item.get("source") or "未知来源"
+        # D12：PDF 类文档带上页码，LLM 写引用时能写到「第几页」这一级
+        page = f" {item['page_ref']}" if item.get("page_ref") else ""
         blocks.append(
-            f"[{index}] 来源：{source}（相关度 {item['similarity']}）\n{item['content']}"
+            f"[{index}] 来源：{source}{page}（相关度 {item['similarity']}）\n{item['content']}"
         )
 
     # 空行分隔，LLM 更容易分清"片段的边界"

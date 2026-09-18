@@ -25,6 +25,10 @@ class SourceItem(BaseModel):
     source: str = Field(description="来源文档标识（文件名/标题）")
     content: str = Field(description="命中的原文片段")
     similarity: float | None = Field(default=None, description="余弦相似度，越大越相似")
+    page_ref: str | None = Field(
+        default=None,
+        description="页码引用（如 p.3）；仅 PDF 类文档有，其他格式为 null（D12 新增）",
+    )
 
 
 class ChatResult(BaseModel):

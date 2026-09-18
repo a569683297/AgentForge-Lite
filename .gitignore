@@ -26,4 +26,7 @@ data/uploads/
 .DS_Store
 
 # embedding 模型缓存（fastembed 下载，90MB+，不入库）
-models/
+# ⚠️ 必须锚定到仓库根目录（前导 /）：
+#   写 `models/` 会匹配**任意层级**的 models 目录，把 app/models/ 一起吞掉——
+#   实测踩过：app/models/document.py 因此从未进入 git（D9 创建，D12 才发现）。
+/models/

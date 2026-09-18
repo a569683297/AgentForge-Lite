@@ -136,13 +136,12 @@ DOCS = [
 
 async def prepare_kb() -> None:
     section("准备知识库")
-    from app.services.retrieval_service import add_documents, clear_documents
+    from app.services.document_service import delete_all_documents, ingest_texts
 
-    await clear_documents(source="d11-alpha.md")
-    await clear_documents(source="d11-beta.md")
-    for source, text in DOCS:
-        n = await add_documents([text], source=source)
-        print(f"  入库 {source} → {n} 个切片")
+    await delete_all_documents()
+    for filename, text in DOCS:
+        _, n = await ingest_texts([text], filename=filename)
+        print(f"  入库 {filename} → {n} 个切片")
 
 
 async def case_b1_answer_with_citation() -> bool:

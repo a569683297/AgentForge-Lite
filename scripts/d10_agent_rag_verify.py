@@ -16,7 +16,7 @@ import asyncio
 
 import app.services.agent_service as agent_module
 from app.services.agent_service import run_agent
-from app.services.retrieval_service import add_documents, clear_documents
+from app.services.document_service import delete_all_documents, ingest_texts
 
 # 刻意使用「模型不可能知道的虚构事实」：
 # 回答正确 = 确实查了文档，而不是模型编的。
@@ -50,15 +50,17 @@ agent_module.execute_tool = _spy_execute_tool
 
 async def main() -> None:
     print(f"{'='*64}\n准备知识库\n{'='*64}")
-    await clear_documents()
-    n = await add_documents(DOCS, source="d10-e2e")
+    await delete_all_documents()
+    _, n = await ingest_texts(DOCS, filename="d10-e2e")
     print(f"✅ 入库 {len(DOCS)} 篇 → {n} 个切片\n")
 
     for index, (question, keyword, expect_tool) in enumerate(CASES, start=1):
         calls.clear()
         print(f"{'='*64}\n用例 {index}：{question}\n{'='*64}")
 
-        answer = await run_agent(session_id=f"d10-e2e-{index}", user_input=question)
+        # D11 起 run_agent 返回 ChatResult（answer + sources），不再是裸字符串
+        result = await run_agent(session_id=f"d10-e2e-{index}", user_input=question)
+        answer = result.answer
 
         called = [name for name, _ in calls]
         if calls:

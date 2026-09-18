@@ -81,6 +81,9 @@ def record_sources(results: list[dict[str, Any]]) -> int:
                 "source": item.get("source") or "未知来源",
                 "content": item.get("content") or "",
                 "similarity": item.get("similarity"),
+                # D12：页码（PDF 才有，其他格式为 None）。
+                # 有了它，前端才能把 [1] 定位到「员工手册.pdf 第 3 页」而不只是文件名。
+                "page_ref": item.get("page_ref"),
             }
         )
     return offset

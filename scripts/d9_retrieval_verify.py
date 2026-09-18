@@ -11,9 +11,8 @@ D9 验证脚本：向量检索（RAG 基础）
 import asyncio
 
 from app.core.logging import logger
+from app.services.document_service import delete_all_documents, ingest_texts
 from app.services.retrieval_service import (
-    add_documents,
-    clear_documents,
     search,
     split_text,
 )
@@ -42,8 +41,8 @@ async def case_chunk() -> None:
 async def case_retrieval() -> None:
     """用例 1-2：入库 + 语义检索。"""
     print(f"\n{'='*58}\n用例 1：文档入库\n{'='*58}")
-    await clear_documents()          # 先清空，保证验证干净
-    n = await add_documents(DOCS, source="test-docs")
+    await delete_all_documents()          # 先清空，保证验证干净
+    _, n = await ingest_texts(DOCS, filename="test-docs")
     print(f"✅ 入库 {len(DOCS)} 篇文档 → {n} 个切片")
 
     # 关键验证：query 用词与文档完全不同，但语义相关
