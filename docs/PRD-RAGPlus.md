@@ -51,7 +51,7 @@
 |---|---|---|
 | F1 | 对话接口（SSE 流式） | POST /api/chat，流式返回 |
 | F2 | LangGraph ReAct Agent | 规划→工具→观察→回答，5 步上限 |
-| F3 | RAG 混合检索 | BM25（pg tsvector）+ 向量（pgvector）双路召回 |
+| F3 | RAG 混合检索 | BM25 关键词（倒排走 tsvector/GIN，打分自算）+ 向量（pgvector）双路召回 |
 | F4 | 重排 | Cross-Encoder（bge-reranker-base）重排 top5 |
 | F5 | **评测体系** | 50 条评测集 + LLM-as-judge 评分 + 消融实验 + 报告生成 |
 | F6 | **MCP 工具接入** | 官方 MCP Python SDK，接入 ≥1 个真实外部工具 |
@@ -146,7 +146,7 @@
 | 解析 | pypdf / python-docx / markdown | 同 |
 | 切片 | 512 token + 10% 重叠，中文按字符近似 | 同 |
 | 向量化 | text-embedding 系列（经 Gateway） | 同 |
-| **混合检索** | **BM25（pg tsvector）+ 向量（pgvector cosine）→ RRF 融合** | ⭐ 新增 |
+| **混合检索** | **BM25 关键词（倒排走 tsvector/GIN，打分自算）+ 向量（pgvector cosine）→ RRF 融合** | ⭐ 新增 |
 | **重排** | **bge-reranker-base（本地 ONNX 或 API）对 top20→top5 重排** | ⭐ 新增 |
 | 生成 | 知识片段+问题，强制引用编号 [1][2] | 同 |
 | **消融开关** | 配置项控制检索策略（纯向量/混合/混合+重排），供评测复用 | ⭐ 新增 |

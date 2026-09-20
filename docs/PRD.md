@@ -141,7 +141,7 @@
 - **F3.1** 文档解析：PDF（pypdf）/ DOCX（python-docx）/ MD / TXT，按类型分发
 - **F3.2** 切片：512 token + 10% 重叠；中文按字符近似；保留元信息（页码/标题路径）
 - **F3.3** 向量化：embedding 模型经 LLM Gateway 统一调用，pgvector 存储
-- **F3.4** 混合检索：BM25（PostgreSQL tsvector）+ 向量（cosine）→ **RRF 融合**（k=60）
+- **F3.4** 混合检索：BM25 关键词检索（**倒排索引用** PostgreSQL `tsvector` + GIN，**BM25 打分在应用层自算**）+ 向量（cosine）→ **RRF 融合**（k=60）
 - **F3.5** 重排：bge-reranker-base（本地 ONNX 或 API），top20 → top5
 - **F3.6** 检索策略可配置（`pure_vector` / `hybrid` / `hybrid_rerank`），供评测复用
 - **F3.7** 引用定位：返回片段带 document_id + 页码/标题，答案生成强制标注 [n]
@@ -367,7 +367,7 @@ AgentForge-Lite/
 | Agent | LangGraph | 状态机图、checkpoint、stream、可演进 |
 | LLM 接入 | DeepSeek + OpenAI | 双通道降级；JD 高频 |
 | 向量库 | pgvector | 少一个中间件，Docker 一条命令 |
-| BM25 | PostgreSQL tsvector | 免 ES 重量级组件，够用 |
+| BM25 | 自算打分（倒排索引用 PostgreSQL `tsvector` + GIN） | 免 ES 重量级组件。前提：PG 内建 `ts_rank` **不是** BM25（无 IDF、默认无长度归一化），打分须自己实现 |
 | 重排 | bge-reranker-base | 中文效果好，可本地/API |
 | 缓存 | Redis | 会话热窗口、后续缓存 |
 | 可观测 | Langfuse | 海外远程岗点名；开源自托管 |
@@ -425,13 +425,20 @@ graph.add_edge("answer", END)
 **检索流程**：
 ```
 query → 向量检索（pgvector cosine top20）
-      → BM25 检索（pg tsvector top20）
+      → BM25 关键词检索（倒排走 tsvector/GIN，BM25 分在应用层自算；top20）
       → RRF 融合（k=60）→ top20
       → bge-reranker 重排 → top5
       → 组装 prompt（片段+引用编号）
 ```
 
 **RRF 公式**：`score(d) = Σ 1/(k + rank_i(d))`，k=60
+
+**术语澄清（面试话术的源头，别混用）**：
+
+- `tsvector` 是**索引结构**（倒排表的物理形态），BM25 是**打分公式** —— 两者不是一回事，不能写成「BM25（PostgreSQL tsvector）」。
+- PG 内建 `ts_rank(tsvector, tsquery)` **不是 BM25**：它只接收这两个入参，拿不到 `df` / `N` / `avgdl`，**IDF 在数学上就无法计算**；且默认参数下没有文档长度归一化（实测：同 TF 下 3 词短文档与 16 词长文档得分完全相同 `0.060793`）。
+- 本项目做法：**倒排索引用 `tsvector` + GIN，BM25 打分在应用层自算**（`N` / `df` / `avgdl` 用 CTE 现算，量大时改维护统计表）。已在 PG16 实测可行，参考实现见 `scripts/d13_probe_retrieval.py`。
+- **中文分词**：PG 内置分词器对中文无效（整句退化成一个 token，实测查「智能」不命中），故采用**应用层 jieba 分词 + `simple` 配置**；⚠️ 索引侧与查询侧**必须用同一分词器**，否则 token 对不上、检索静默变差（需加一致性自检断言兜底）。
 
 **切片策略**：512 token + 10% 重叠；中文按字符（~750 字符）近似；保留 `page_ref` 与标题路径用于引用定位。
 
@@ -561,8 +568,11 @@ CREATE INDEX idx_chunks_embedding ON document_chunks
     USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX idx_chunks_doc ON document_chunks(document_id);
 
--- 全文检索（BM25 用）
-ALTER TABLE document_chunks ADD COLUMN content_tsv tsvector;
+-- 关键词检索：分词列 + tsvector 倒排行
+-- 注意：tsvector 提供的是「倒排索引」；BM25 打分在应用层自算（PG 内建 ts_rank 不是 BM25）
+ALTER TABLE document_chunks ADD COLUMN content_tokens TEXT;   -- jieba 分词后空格连接
+ALTER TABLE document_chunks ADD COLUMN content_tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('simple', content_tokens)) STORED;  -- 两参版是 immutable，可用生成列
 CREATE INDEX idx_chunks_tsv ON document_chunks USING gin(content_tsv);
 
 -- 评测用例
