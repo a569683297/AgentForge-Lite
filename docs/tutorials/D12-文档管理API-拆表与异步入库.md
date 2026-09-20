@@ -79,11 +79,22 @@ T+8s      embed_texts(40 片) → 40 个向量
 T+8.2s    INSERT 40 行 chunks + UPDATE status='ready', chunk_count=40（同一事务）
 ```
 
-**三个实现上必须做对的地方**：
+**两个实现上必须做对的地方**：
 
 1. **`error_message` 不能省** —— 只置 failed 不记原因，这个状态就只是个开天窗的标记
-2. **失败不能留半截数据** —— 40 片里第 35 片报错，前 34 片不能留在库里
-3. **ready 与 chunks 同一事务提交** —— 不能出现「切片写了但状态还是 processing」的中间态
+
+2. **「全有或全无」—— `ready` 与 chunks 必须在同一个事务里提交**
+
+   **目标**：库里永远不存在「切片写了一半」或「切片写了但状态还是 processing」的中间态。
+
+   **手段**：40 片的向量在**事务之外**一次算完 → 进事务后只 `session.add()`
+   （只进内存队列，一条 SQL 都不发）→ 最后一次 `commit()` 把 40 条 INSERT + 状态更新一起提交。
+   中途任何异常 → 整个事务丢弃，数据库里**0 行**
+   （注意：不是「写进去再删掉」，是**压根没写** —— `add()` 相当于 `git add`，`commit()` 才相当于 `git commit`）。
+
+   **代价（要主动交代）**：失败时已算完的向量会白算一次。
+   这是刻意的取舍 —— 白算是一次性的、可重试的、有日志的；
+   留半截数据是持续性的，而且不一定看得出来（见 §7 坑 8 那 10 条孤儿切片）。
 
 ### 2.4 为什么上传必须异步（面试会把这条追问到底）
 
@@ -726,6 +737,94 @@ app/models/session.py
 ```
 
 **教训**：`.gitignore` 里的目录名模式**默认是「任意层级」**。忽略某个特定目录时一律加前导 `/`；改完 `.gitignore` 用 `git status --ignored` 扫一眼，确认没有顺手吞掉源码目录。这类问题不会报错，只会安静地把文件挡在版本控制之外。
+
+### 坑 8（2026-09-18 收尾后暴露；性质：数据永久泄漏）：表根本**没有外键**，级联删除从未生效
+
+**现象**：重跑验证脚本，V1-V11 全过，V12-V13 报红。而且失败得很有迷惑性 —— 删除接口是成功的：
+
+```
+删除前：文档 ac3c5e52-... 有 1 个切片
+[✅] DELETE → HTTP=204
+[❌] 切片被级联删除：1 → 1        ← 文档没了，切片还在
+[✅] 列表里已不含该文档
+```
+
+**第一反应一定是怀疑代码，但代码是对的**：`document_chunk.py:44` 明明写着
+
+```python
+ForeignKey("documents.id", ondelete="CASCADE")
+```
+
+**根因在数据库，不在模型。** 查 `pg_constraint`：
+
+```sql
+SELECT conname, contype, pg_get_constraintdef(oid)
+FROM pg_constraint WHERE conrelid = 'document_chunks'::regclass;
+```
+
+```
+document_chunks_pkey  type=b'p'  PRIMARY KEY (id)     ← 只有主键，零外键
+```
+
+**ORM 模型写对了，不代表库里建出来了。** 数据库不知道「切片的爸爸是谁」，删文档自然不连坐。
+
+**它是怎么坏掉的**（这段最有价值）：
+
+旧版 `d12_migrate.py` 的 drop 只写了一张表：
+
+```python
+await conn.execute(text("DROP TABLE IF EXISTS documents CASCADE"))
+await conn.run_sync(Base.metadata.create_all)      # checkfirst 默认 True
+```
+
+三步形成死循环：
+
+1. 某个时刻 `document_chunks` 处于「无外键」状态（D12 开发早期表先建、外键后加进模型，很常见的顺序）
+2. 跑 migrate：`DROP TABLE documents CASCADE` 想连带清掉依赖对象 —— **但"没有外键"的表算不上依赖对象**，chunks 表活了下来
+3. `create_all` 看到表已存在 → **`checkfirst=True` 直接整张跳过**，不会补约束
+
+于是**再跑一百次 migrate 也修不好**：每次都是「删 documents、重建 documents、放过坏掉的 chunks」。
+
+**后果（比 V12 报红严重得多）**：
+- **删文档永久泄漏切片** —— 看起来删干净了，其实只删了半份
+- **`delete_all_documents()` 同样清不干净**，而它是「换 embedding 模型后全量 reindex」的前置步骤 → 旧向量永远清不掉，新旧向量混在一张表里，检索排序直接乱掉（`embedding_service.py` 开头那段注释讲的物理约束）
+- 库里已经躺了 **10 条孤儿切片**。它们检索不到（`search` 是 `JOIN documents ... WHERE status='ready'`，JOIN 不上）→ **不污染答案，但属于「看不见的存储泄漏」**
+
+这正是 §2.3 第 2 条「全有或全无」要防的局面 —— 只不过制造这些残留的不是"失败"，而是"约束没生效"。
+
+**修法**（两处，都在 `d12_migrate.py`）：
+
+① drop 按依赖顺序**显式列出两张表**，不依赖「前任的外键状态」：
+
+```python
+await conn.execute(text("DROP TABLE IF EXISTS document_chunks CASCADE"))   # 先子表
+await conn.execute(text("DROP TABLE IF EXISTS documents CASCADE"))         # 再父表
+```
+
+② 建完表**立刻自查结构**，不自查就是又一次静默失败：
+
+```python
+fk_defs = [...从 pg_constraint 查 document_chunks 的外键定义...]
+if not [d for d in fk_defs if "ON DELETE CASCADE" in d]:
+    raise RuntimeError("结构自检失败：document_chunks 没有带 ON DELETE CASCADE 的外键，删文档会留下孤儿切片")
+```
+
+抛异常 → `engine.begin()` 的整个事务回滚，库里不会留下半成品结构。
+
+修复后：
+
+```
+✅ 结构自检通过： FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+[✅] 切片被级联删除：1 → 0
+孤儿切片：10 → 0
+```
+
+**教训（三条）**：
+1. **`create_all` 不是迁移工具**。默认 `checkfirst=True` —— **表存在就整张跳过**：不补外键、不加列、不改类型、不建索引。模型改了它一声不吭。**改结构只能靠 Alembic（保数据）或「显式 drop + 重建」（练习期）**。
+2. **`DROP ... CASCADE` 连带不了"坏掉的那张表"**。它只连带有外键关系的对象，而「坏掉的那张表恰好就是没有外键的表」—— 这是个完美的悖论式陷阱。重建表时，**把要 drop 的表一张张写出来**。
+3. **排查「删了却没删干净」「约束没生效」这类问题时，先查数据库实际结构**（`pg_constraint` / `information_schema`），不要对着 ORM 模型猜。**模型写对了，不等于库里建出来了。**
+
+**这个坑和坑 7 是同一类**：`.gitignore` 的 `models/` 你以为只匹配根目录，`create_all` 你以为会把模型改动同步进库 —— 都是**「你以为这个操作是精确的、幂等的，实际它的判断标准不是你以为的那个」**。这类坑的共同点是**不报错**，安安静静地把系统留在错误状态，直到某天以一个看似无关的断言失败暴露出来。
 
 ---
 
