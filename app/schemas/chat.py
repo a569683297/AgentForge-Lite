@@ -13,7 +13,17 @@ D11 要给回答配一张「来源映射表」，让回答里的 [1] 能定位�
 D11 补充（HTTP 层）：新增 ChatRequest / ChatResponse，
 把服务层的结果搬上 HTTP 边界。校验交给 pydantic —— 请求体不合法时
 FastAPI 直接返回 422，路由函数里一行校验代码都不用写。
+
+D14 变化：session_id 的类型从 str（正则宽松匹配）收口为 uuid.UUID。
+为什么必须收口：sessions.id 是 PG 的 uuid 类型，它会把自己看到的值
+规范化成带横杠的标准格式；而 D8 起服务端生成的是 32 位无横杠 hex，
+两者拼出来的 Redis key 不是同一个字符串 —— 从 /api/sessions 拿到 id
+再回来对话，热窗口会读不到（静默退化成走兜底）。
+把类型交给 uuid.UUID 还有个附带好处：非法值在 pydantic 层直接 422，
+不用自己写正则（旧正则 ^[A-Za-z0-9_-]{1,64}$ 会放行 "abc" 这种非 uuid 值）。
 """
+
+import uuid
 
 from pydantic import BaseModel, Field
 
@@ -57,11 +67,11 @@ class ChatRequest(BaseModel):
         max_length=2000,
         description="用户本轮的输入文本",
     )
-    session_id: str | None = Field(
+    session_id: uuid.UUID | None = Field(
         default=None,
-        pattern=r"^[A-Za-z0-9_-]{1,64}$",
         description=(
-            "会话 ID。同一会话的多轮对话必须传同一个值；"
+            "会话 ID（标准 UUID；也接受无横杠的 32 位写法，pydantic 会归一化）。"
+            "同一会话的多轮对话必须传同一个值；"
             "不传则由服务端新建并在响应里返回，后续轮次带上即可延续上下文。"
         ),
     )
@@ -78,5 +88,8 @@ class ChatResponse(ChatResult):
     """
 
     session_id: str = Field(
-        description="本次会话 ID；前端保存后，后续轮次通过请求体回传以延续上下文",
+        description=(
+            "本次会话 ID（D14 起为标准 UUID 格式：36 位、带横杠）。"
+            "前端保存后，后续轮次通过请求体回传即可延续上下文"
+        ),
     )

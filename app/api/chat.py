@@ -13,8 +13,11 @@ JSON 把「Agent 服务层 → HTTP 出口」这段接通——好处是能用 c
 不构成额外的技术债。
 
 端点约定：
-    请求  {"message": "问题", "session_id": "可选"}
+    请求  {"message": "问题", "session_id": "可选（标准 UUID / 32 位无横杠均接受）"}
     响应  {"session_id": "...", "answer": "...", "sources": [...], "invalid_citations": [...]}
+
+D14 变化：session_id 在进程内是 uuid.UUID 对象（请求侧由 pydantic 校验并转换），
+只在响应边界转成字符串。会话的持久化（落库）由服务层负责，这一层仍然不碰数据库。
 
 职责边界（这一层只做三件事）：
     1. 补全 session_id（不传就新建）
@@ -46,7 +49,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
     """
     # 不传 session_id → 服务端新建。这样 curl 裸测一个请求也能跑通；
     # 前端要延续上下文时，把响应里的 session_id 存下来、下一轮回传即可。
-    session_id = req.session_id or uuid.uuid4().hex
+    # D14：不再用 uuid4().hex —— 会话内一律用 uuid.UUID 对象，
+    # 只在响应边界转成字符串，保证「一个会话 = 一个 Redis key = 一行 sessions 记录」。
+    session_id = req.session_id or uuid.uuid4()
 
     logger.info("对话请求 session=%s 输入长度=%d", session_id, len(req.message))
 
@@ -61,7 +66,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     )
 
     return ChatResponse(
-        session_id=session_id,
+        session_id=str(session_id),
         answer=result.answer,
         sources=result.sources,
         invalid_citations=result.invalid_citations,

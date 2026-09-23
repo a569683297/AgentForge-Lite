@@ -49,8 +49,15 @@ def section(title: str) -> None:
     print("=" * 64)
 
 
-def new_session(prefix: str) -> str:
-    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+def new_session() -> str:
+    """
+    新的会话 ID。
+
+    D14：改成标准 UUID 字符串（36 位带横杠）。服务端的 session_id 类型收口成
+    uuid.UUID 了，像 "d11-http-3f2a1b9c" 这种自造字符串会被 pydantic 直接 422。
+    HTTP 层传的仍是字符串（JSON 里没有 uuid 类型），所以这里返回 str。
+    """
+    return str(uuid.uuid4())
 
 
 # ============================================================
@@ -75,7 +82,7 @@ def case_h1_new_session(client: TestClient) -> bool:
 
     ok = (
         resp.status_code == 200
-        and len(sid) == 32                      # uuid4().hex 是 32 位
+        and len(sid) == 36                      # D14 起是标准 UUID：36 位带横杠
         and len(data.get("sources", [])) > 0    # 来源表非空，[n] 才能映射
         and "星河" in data.get("answer", "")     # 答案来自文档而非模型编造
     )
@@ -90,7 +97,7 @@ def case_h2_reuse_session(client: TestClient) -> bool:
     """服务端原样沿用传入的 session_id，两轮都返回 200"""
     section("H2. 传 session_id → 沿用同一会话")
 
-    sid = new_session("d11-http")
+    sid = new_session()
 
     r1 = client.post(
         "/api/chat",
@@ -110,14 +117,30 @@ def case_h2_reuse_session(client: TestClient) -> bool:
     print(f"          sources={len(d2.get('sources', []))} 条"
           "（第二轮若直接沿用历史作答，这里会是 0 —— D11 已知缺陷，见教程 §9 坑 5）")
 
+    # D14 新增：用「无横杠的 32 位」写法传同一个会话。
+    # 这验证的是本次改动的核心保证 —— 两种写法归一化到同一个 id，
+    # 也就是同一个 Redis key、同一行 sessions 记录（不会再分裂成两个会话）。
+    r3 = client.post(
+        "/api/chat",
+        json={"message": "它的负责人是谁？", "session_id": sid.replace("-", "")},
+    )
+    d3 = r3.json()
+    print(f"  第 3 轮（无横杠写法）状态={r3.status_code}  回传 session_id={d3.get('session_id')}")
+    print(f"          归一化后与原 id 相等：{d3.get('session_id') == sid}")
+
     ok = (
         r1.status_code == 200
         and r2.status_code == 200
+        and r3.status_code == 200
         and d1.get("session_id") == sid
         and d2.get("session_id") == sid
+        and d3.get("session_id") == sid        # ← 无横杠写法必须归一化回带横杠
         and bool(d2.get("answer"))
     )
-    print(f"  [判定] {'✅ session_id 原样沿用，多轮均 200' if ok else '❌ 未达预期'}")
+    print(
+        f"  [判定] "
+        f"{'✅ session_id 原样沿用，无横杠写法归一化到同一会话' if ok else '❌ 未达预期'}"
+    )
     return ok
 
 
@@ -133,6 +156,9 @@ def case_h3_validation(client: TestClient) -> bool:
         ("缺 message", {}),
         ("message 超长(2001)", {"message": "x" * 2001}),
         ("session_id 非法字符", {"message": "你好", "session_id": "bad id!"}),
+        # D14：session_id 类型收口为 uuid.UUID —— 非 uuid 字符串一律 422
+        #（旧正则 ^[A-Za-z0-9_-]{1,64}$ 会把 "abc" 这种值放行，属于漏网）
+        ("session_id 非 UUID", {"message": "你好", "session_id": "abc"}),
         ("session_id 超长(65)", {"message": "你好", "session_id": "a" * 65}),
     ]
 
@@ -161,7 +187,7 @@ def case_h4_response_shape(client: TestClient) -> bool:
 
     r = client.post(
         "/api/chat",
-        json={"message": "你好", "session_id": new_session("d11-shape")},
+        json={"message": "你好", "session_id": new_session()},
     )
     data = r.json()
     expected = {"session_id", "answer", "sources", "invalid_citations"}

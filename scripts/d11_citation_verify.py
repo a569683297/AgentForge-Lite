@@ -23,15 +23,19 @@ import uuid
 from app.core.citation import check_citations, get_sources, record_sources, reset_sources
 
 
-def new_session(prefix: str) -> str:
+def new_session() -> uuid.UUID:
     """
     每次运行都用一个全新会话 ID。
 
     ⚠ 这里踩过一次坑：会话 ID 写死（如 "d11-e2e-1"）会让第二次运行读到
     Redis 里上一轮的问答历史，LLM 直接从历史里回答、**不再调用工具**，
     于是 sources 为空 —— 看起来像"收集器坏了"，其实是记忆层的影响。
+
+    D14：返回类型从「前缀 + hex 字符串」改为 uuid.UUID —— run_agent 现在要求
+    与 PG 的 uuid 列同类型。原来那种 "d11-e2e-3f2a1b9c" 不是合法 UUID，
+    传给 asyncpg 会在绑定参数时就失败，走 HTTP 也会被 pydantic 挡成 422。
     """
-    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+    return uuid.uuid4()
 
 
 def section(title: str) -> None:
@@ -149,7 +153,7 @@ async def case_b1_answer_with_citation() -> bool:
     section("B1. 端到端问答：回答带 [1]，且可定位原文")
     from app.services.agent_service import run_agent
 
-    result = await run_agent(new_session("d11-e2e"), "「琥珀」这个项目是哪个组负责的？")
+    result = await run_agent(new_session(), "「琥珀」这个项目是哪个组负责的？")
 
     print(f"  回答：{result.answer}")
     print(f"  越界引用：{result.invalid_citations or '无'}")
@@ -204,8 +208,8 @@ async def case_b3_concurrent_sessions() -> bool:
     from app.services.agent_service import run_agent
 
     a, b = await asyncio.gather(
-        run_agent(new_session("d11-conc-a"), "「琥珀」这个项目是哪个组负责的？"),
-        run_agent(new_session("d11-conc-b"), "「翡翠」这个项目是哪个组负责的？"),
+        run_agent(new_session(), "「琥珀」这个项目是哪个组负责的？"),
+        run_agent(new_session(), "「翡翠」这个项目是哪个组负责的？"),
     )
 
     a_idx = [s.index for s in a.sources]
@@ -243,7 +247,7 @@ async def case_b4_repeat_question() -> bool:
     section("B4. 边界观察：同一会话重复提问")
     from app.services.agent_service import run_agent
 
-    sid = new_session("d11-repeat")
+    sid = new_session()
     q = "「琥珀」这个项目是哪个组负责的？"
 
     first = await run_agent(sid, q)

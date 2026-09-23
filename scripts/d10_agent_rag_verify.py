@@ -13,6 +13,7 @@ D10 端到端验证：Agent 是否自己决定调用检索工具
 """
 
 import asyncio
+import uuid
 
 import app.services.agent_service as agent_module
 from app.services.agent_service import run_agent
@@ -59,7 +60,8 @@ async def main() -> None:
         print(f"{'='*64}\n用例 {index}：{question}\n{'='*64}")
 
         # D11 起 run_agent 返回 ChatResult（answer + sources），不再是裸字符串
-        result = await run_agent(session_id=f"d10-e2e-{index}", user_input=question)
+        # D14 起 session_id 要求 uuid.UUID（与 sessions.id / messages.session_id 同类型）
+        result = await run_agent(session_id=uuid.uuid4(), user_input=question)
         answer = result.answer
 
         called = [name for name, _ in calls]

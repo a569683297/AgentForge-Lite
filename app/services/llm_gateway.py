@@ -34,6 +34,13 @@ langfuse = Langfuse(
 )
 
 
+# ---- 采样温度 ----
+# PRD §8.4「场景参数」：规划 temp=0.2、回答 temp=0.4、摘要 temp=0.1、评测 judge temp=0。
+# D14 把 temperature 从硬编码改成可传参数 —— 不改的话摘要会被迫用 0.4 这个
+# "创作档"去压缩历史，容易加戏、改事实；摘要本身要的是"忠实压缩"，所以要用 0.1。
+DEFAULT_TEMPERATURE = 0.4
+
+
 # ============================================================
 # 内部：单通道调用（主备共用）
 # ============================================================
@@ -44,6 +51,7 @@ async def _call_once(
     tools: list[dict] | None = None,
     trace_name: str,
     gen: Any,  # langfuse observation 对象
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> dict:
     """
     用指定 provider 调用一次 LLM，返回解析后的响应数据。
@@ -52,6 +60,7 @@ async def _call_once(
         provider: {"api_key", "base_url", "model"} 通道配置
         tools: 传了就走 function calling，否则普通 chat
         gen: Langfuse observation（由调用方创建，这里只负责 update）
+        temperature: 采样温度，默认走 DEFAULT_TEMPERATURE（回答场景）
     Returns:
         {"reply": str} 或 {"message": dict}（取决于是否带 tools）
     """
@@ -59,7 +68,7 @@ async def _call_once(
     payload: dict[str, Any] = {
         "model": provider["model"],
         "messages": messages,
-        "temperature": 0.4,
+        "temperature": temperature,
     }
     if tools:
         payload["tools"] = tools
@@ -111,6 +120,7 @@ async def _call_with_failover(
     *,
     tools: list[dict] | None = None,
     trace_name: str,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> dict:
     """带降级的调用。返回 {"data": ..., "usage": ..., "provider": 实际使用的通道}。"""
     providers = [settings.primary_llm]
@@ -130,13 +140,18 @@ async def _call_with_failover(
             name=trace_name,
             as_type="generation",
             model=provider["model"],
-            model_parameters={"temperature": 0.4, **({"tools": tools} if tools else {})},
+            model_parameters={"temperature": temperature, **({"tools": tools} if tools else {})},
             input={"messages": messages},
             metadata={"provider": provider_label},
         ) as gen:
             try:
                 result = await _call_once(
-                    provider, messages, tools=tools, trace_name=trace_name, gen=gen
+                    provider,
+                    messages,
+                    tools=tools,
+                    trace_name=trace_name,
+                    gen=gen,
+                    temperature=temperature,
                 )
                 result["provider"] = provider_label
                 return result
@@ -161,9 +176,15 @@ async def chat(
     *,
     trace_name: str = "llm-chat",
     user_id: str | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> str:
-    """发送对话到 LLM（自动降级）。返回回复文本。"""
-    result = await _call_with_failover(messages, trace_name=trace_name)
+    """发送对话到 LLM（自动降级）。返回回复文本。
+
+    D14：新增 temperature 参数（默认 0.4 = 回答场景），调用方不传即旧行为。
+    """
+    result = await _call_with_failover(
+        messages, trace_name=trace_name, temperature=temperature
+    )
     return result["data"]["choices"][0]["message"]["content"]
 
 
@@ -172,11 +193,14 @@ async def chat_with_tools(
     tools: list[dict],
     *,
     trace_name: str = "llm-tools",
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> dict:
     """发送对话到 LLM，支持 function calling（自动降级）。
 
     Returns:
         {"message": {role, content, tool_calls?}, "usage": {...}}
     """
-    result = await _call_with_failover(messages, tools=tools, trace_name=trace_name)
+    result = await _call_with_failover(
+        messages, tools=tools, trace_name=trace_name, temperature=temperature
+    )
     return {"message": result["data"]["choices"][0]["message"], "usage": result["usage"]}

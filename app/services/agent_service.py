@@ -17,6 +17,7 @@ assistant 消息带 tool_calls → tool 消息带 tool_call_id 关联返回
 Edge=固定路由 / 条件边=动态路由
 """
 
+import uuid
 from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -155,12 +156,12 @@ def get_agent():
 # ============================================================
 # 注：引用校验 check_citations 放在 app/core/citation.py
 #     （纯函数、不依赖 config，可与收集器一起单独测试）
-async def run_agent(session_id: str, user_input: str) -> ChatResult:
+async def run_agent(session_id: uuid.UUID, user_input: str) -> ChatResult:
     """
-    带记忆对话的完整入口：读历史 → 跑 Agent → 写回记忆 → 返回回答 + 来源。
+    带记忆对话的完整入口：读历史 → 跑 Agent → 双层写回 → 返回回答 + 来源。
 
     D11 变化：返回值从 str 变成 ChatResult（answer + sources + invalid_citations）。
-    这是破坏性改动，但调用方目前只有一个验证脚本，成本可控。
+    D14 变化：① session_id 从 str 改为 uuid.UUID；② 新增 PG 全量落库（第 ⑧ 步）。
 
     端到端流程：
       ⓪ reset_sources()             重新绑定本请求的引用收集器（并发隔离的关键）
@@ -171,16 +172,18 @@ async def run_agent(session_id: str, user_input: str) -> ChatResult:
       ④ 取最终回答（最后一条有内容的 assistant 消息）
       ⑤ get_sources()               取出本请求累计的来源
       ⑥ check_citations()           校验回答里的 [n] 有没有越界
-      ⑦ append_turn(...)            写回 Redis（Upsert + 裁剪 + 刷新 TTL）
-      ⑧ 返回 ChatResult
+      ⑦ append_turn(...)            写回 Redis 热窗口（只 user + assistant）
+      ⑧ append_messages(...)        写回 PG 全量（含 tool 行）← D14 新增
+      ⑨ 返回 ChatResult
 
     Args:
-        session_id: 会话 ID（前端生成的 UUID，一个会话固定一个）
+        session_id: 会话 ID（uuid.UUID —— 与 sessions.id / messages.session_id 同类型）
         user_input: 用户本轮输入
     Returns:
         ChatResult：回答文本 + 来源映射表 + 越界引用编号
     """
     from app.services.memory_service import append_turn, get_window
+    from app.services.session_service import append_messages
 
     # ⓪ 引用收集器必须在跑图之前重新绑定。
     #    ContextVar 复制的是「绑定」不是「对象内容」，不重新绑定会读到上个请求的残留。
@@ -221,10 +224,24 @@ async def run_agent(session_id: str, user_input: str) -> ChatResult:
             len(sources),
         )
 
-    # ⑦ 写回记忆（只存 user + 最终回答，不存中间工具消息——见 memory_service 说明）
+    # ⑦ 写回 Redis 热窗口（只存 user + 最终回答，不存中间工具消息——见 memory_service 说明）
     await append_turn(session_id, user_input, final_answer)
 
-    # ⑧ 返回结构化结果
+    # ⑧ 写回 PG 全量（D14 新增）：含中间的 assistant(tool_calls) 与 tool 消息。
+    #    「本轮新增了哪些消息」= 跑完图后的完整消息列表，减去进图之前的那一段。
+    #    为什么可以直接按长度切：history 是进图前的全部内容，图只会在后面追加，
+    #    所以 result["messages"][len(history):] 恰好是本轮新增
+    #    （① 用户提问 → ② 若干中间步骤 → ③ 最终回答）。
+    new_messages = result["messages"][len(history):]
+    try:
+        await append_messages(session_id, new_messages, title_hint=user_input)
+    except Exception:
+        # 落库失败不阻断对话：用户已经等到回答了，此时抛 500 只会让这一轮白跑，
+        # 而且历史仍在 Redis 里（下一轮上下文不丢）。但必须留下 ERROR 日志 ——
+        # 静默失败才是真正的坑：D12 的孤儿切片就是这么攒出来的。
+        logger.exception("PG 落库失败（对话结果仍已返回）session=%s", session_id)
+
+    # ⑨ 返回结构化结果
     logger.info(
         "Agent 完成 session=%s 回答长度=%d 来源数=%d 越界引用=%s",
         session_id,
