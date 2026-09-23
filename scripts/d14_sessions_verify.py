@@ -1,12 +1,21 @@
 """
-D14 验证：会话与消息落库（session_service 层）
-===============================================
+D14 验证：会话与消息落库（session_service 层 + HTTP 链路 + 落库形态）
+====================================================================
 跑法（项目根目录）：uv run python -m scripts.d14_sessions_verify
+
+三段各管一件事：
+    A 数据层  —— session_service 的五个出口本身对不对（不碰 LLM，秒级）
+    B HTTP 层 —— /api/chat 这条链路上真的调了落库吗（真跑两轮对话，会调 LLM）
+    C 回库核对 —— 表里到底存成了什么样（本轮修的两个缺陷只有回库才看得见）
 
 为什么单独写脚本而不是手点 API：
 这一步要验证的是「落库行为」——有没有真的写进去、外键级联有没有生效。
 这类问题在 HTTP 层看起来一切正常（照样返回 200），只有回库里查行数才暴露。
 D12 那次「删文档留下孤儿切片」就是这么漏掉的：接口返回 204，表里却还有数据。
+
+C 段守的是两个已修缺陷，属于回归断言（改回去就会红）：
+    ① plan 抢答：一轮里"没有 tool_calls 的 assistant"必须恰好 1 条（修复前恒为 2 条）
+    ② tool_calls 语义：非工具消息的 tool_calls 必须是 SQL NULL（修复前是 JSON null）
 
 断言设计原则（铁律 9）：每条断言都要能回答"什么情况下它会假通过"。
 本脚本的写法是「先确认非空、再确认变化」，避免空数据恒满足。
@@ -172,13 +181,44 @@ async def run_service_layer() -> None:
 # B. HTTP 层：真跑一轮对话，验证「落库 → 查询接口」这条链路
 # ============================================================
 HTTP_USER_MSG = "请记住：我们公司今年的营收目标是 1.2 亿元。"
+# 第二轮用"必须查文档"的问题：专门覆盖「有工具路径」——
+# 修复前这条路一轮落 3 条 assistant（plan 调工具 + plan 抢答 + answer）
+RAG_USER_MSG = "「琥珀」这个项目是哪个组负责的？"
+# 该问题的答案只存在于下面这篇语料里（刻意用模型不可能知道的虚构事实：
+# 回答正确 = 确实查了文档，而不是模型编的。沿用 D10/D11 的语料）
+RAG_DOCS = [
+    "公司内部项目管理规定：代号为「琥珀」的项目由星河算法组负责，"
+    "代号为「翡翠」的项目由山海基础组负责，两个项目组均直接向 CTO 汇报。",
+    "公司团建经费标准：每人每季度上限为 800 元，"
+    "由部门助理统一申请，需附活动签到表与消费明细。",
+]
 
 
-def run_http_layer() -> None:
+async def prepare_corpus() -> None:
+    """把 B 段要用的知识库语料准备好。
+
+    为什么要在脚本里做：B 段的「有工具路径」依赖检索能真的命中，
+    而知识库内容会随别的验证脚本（d10/d11/d12）跑动而变 ——
+    靠"跑之前库里恰好有什么"就是隐性依赖，会变成随机假失败。
     """
-    走真实 HTTP 边界跑一轮对话，再用两个查询接口把它读回来。
+    from app.core.db import engine
+    from app.services.document_service import delete_all_documents, ingest_texts
 
-    ⚠ 这一部分会**真的调用 LLM**（约 10-30 秒）。为什么非要真跑：
+    try:
+        await delete_all_documents()
+        _, n = await ingest_texts(RAG_DOCS, filename="d14-verify")
+        print(f"[准备] 知识库语料已更新 → {n} 个切片")
+    finally:
+        # 与 A 段同理：本 loop 用完就把连接池关掉，
+        # 否则 B 段 TestClient 的另一个 loop 会拿到绑在死 loop 上的连接
+        await engine.dispose()
+
+
+def run_http_layer() -> list[dict]:
+    """
+    走真实 HTTP 边界跑两轮对话，再用查询接口把它读回来。
+
+    ⚠ 这一部分会**真的调用 LLM**（两轮，约 20-60 秒）。为什么非要真跑：
     只测 session_service 只能证明「函数本身能用」，证明不了
     「/api/chat 这条链路上真的调了它」—— 这正是 D12 那次教训的形态
     （接口返回正常，数据却没落下去）。断言必须打在端到端行为上。
@@ -186,13 +226,18 @@ def run_http_layer() -> None:
     ⚠ 本部分产生的会话**不清理**（HTTP 层没有删除接口）。
     要清可用：
         docker exec agentforge-db psql -U agentforge -d agentforge \\
-          -c "DELETE FROM sessions WHERE title LIKE '请记住%';"
+          -c "TRUNCATE TABLE messages, sessions RESTART IDENTITY CASCADE;"
+
+    Returns:
+        本轮跑出的会话清单（交给 C 部分回库核对落库形态）
     """
     from fastapi.testclient import TestClient
 
     from app.main import app
 
-    print("\n=== D14 验证 B：HTTP 层（真实跑一轮对话）===\n")
+    print("\n=== D14 验证 B：HTTP 层（真实跑两轮对话）===\n")
+
+    records: list[dict] = []
 
     with TestClient(app) as client:
         # ---- B1：发一轮对话，拿到 session_id ----
@@ -254,14 +299,110 @@ def run_http_layer() -> None:
             f"{len(msgs5)} 条 vs B3 的 {len(msgs)} 条",
         )
 
+        records.append({"label": "轮1·无需工具", "session_id": sid})
+
+        # ---- B6：再跑一轮"必须检索"的对话，供 C 部分验证有工具路径 ----
+        r6 = client.post("/api/chat", json={"message": RAG_USER_MSG})
+        d6 = r6.json() if r6.status_code == 200 else {}
+        sid6 = d6.get("session_id", "")
+        n_src = len(d6.get("sources", []))
+        print(f"[B6] RAG 轮 → HTTP {r6.status_code}  session_id={sid6}  来源数={n_src}")
+        check("RAG 轮返回 200", r6.status_code == 200, f"实际 {r6.status_code}")
+        check("RAG 轮拿到了来源（检索链路通）", n_src > 0, f"sources={n_src}")
+        if sid6:
+            records.append({"label": "轮2·有工具", "session_id": sid6})
+
+        # 关键：在 TestClient **自己的 loop 内**把连接池关掉。
+        # TestClient 另起线程、另起 loop，池里的连接都绑在那个 loop 上；
+        # 等它退出、loop 关闭之后再由 C 段去 dispose，就等于在**别人的 loop 里关连接**，
+        # 日志会冒出一段 "Exception closing connection / Event loop is closed" 的红字
+        # （实测过：不影响断言结果，但会掩盖真问题）。portal 是它的阻塞式 portal，
+        # 用它把 dispose 送回那个 loop 执行。
+        from app.core.db import engine
+
+        client.portal.call(engine.dispose)
+
+    return records
+
+
+# ============================================================
+# C. 回库核对：HTTP 层跑完之后，直接查表验证「落库形态」
+# ============================================================
+async def run_db_layer(records: list[dict]) -> None:
+    """
+    B 部分的断言只看到「接口返回了什么」，看不到「表里到底存成了什么样」。
+    本轮修的两个缺陷，恰好都只有回库才看得见：
+
+      ① **plan 抢答**（刚修）→ 一轮里"没有 tool_calls 的 assistant"必须**恰好 1 条**。
+         修复前是 2 条（plan 抢答 + answer 各一条），不管这一轮有没有用工具。
+      ② **tool_calls 存成 JSON null**（刚修）→ 非工具消息的 tool_calls 必须是
+         **SQL NULL**，`IS NULL` 判定要为真。修复前这里恒为假。
+    """
+    from sqlalchemy import text as sql_text
+
+    from app.core.db import engine
+
+    # 正常情况：B 段结束前已经在**它自己的 loop 内**把连接池关干净了（见那里注释）。
+    # 这里再 dispose 一次是兜底 —— 池为空时它是无副作用的空操作。
+    await engine.dispose()
+
+    print("\n=== D14 验证 C：回库核对落库形态 ===\n")
+
+    for rec in records:
+        sid = uuid.UUID(rec["session_id"])
+        async with async_session_factory() as db:
+            rows = (
+                await db.execute(
+                    sql_text(
+                        "SELECT role, (tool_calls IS NULL) AS tc_is_null, "
+                        "coalesce(length(content), 0) AS clen "
+                        "FROM messages WHERE session_id = :sid ORDER BY id"
+                    ),
+                    {"sid": sid},
+                )
+            ).all()
+
+        roles = [r.role for r in rows]
+        finals = [r for r in rows if r.role == "assistant" and r.tc_is_null]
+        tool_rows = [r for r in rows if r.role == "tool"]
+        path = "有工具路径" if tool_rows else "无工具路径"
+        print(f"\n[C] {rec['label']}（{path}）roles={roles}")
+
+        check(
+            f"{rec['label']}：最终回答恰好 1 条",
+            len(finals) == 1,
+            f"实际 {len(finals)} 条无 tool_calls 的 assistant —— 修复前这里恒为 2 条",
+        )
+        check(
+            f"{rec['label']}：非 assistant 消息的 tool_calls 是 SQL NULL",
+            all(r.tc_is_null for r in rows if r.role != "assistant"),
+            f"涉及 {sum(1 for r in rows if r.role != 'assistant')} 行 user/tool 消息",
+        )
+        check(
+            f"{rec['label']}：最终回答内容非空",
+            bool(finals) and finals[0].clen > 0,
+            f"长度 {finals[0].clen if finals else 0}",
+        )
+        # 这一条是"补充证据"，不作断言：LLM 偶尔可能判断该轮不需要检索，
+        # 那属于模型决策差异、不是代码缺陷，硬断言会造成假失败。
+        print(f"     └ 该轮工具调用 {len(tool_rows)} 次；"
+              f"assistant 总计 {sum(1 for r in rows if r.role == 'assistant')} 条"
+              f"（修复前无工具轮 2 条 / 有工具轮 3 条）")
+
 
 def main() -> None:
     # A 部分自己管一个事件循环，并且**在这个循环结束前**关掉连接池
     #（dispose 写在 run_service_layer 末尾，不在这里 —— 原因见那里的注释）。
     asyncio.run(run_service_layer())
 
+    # B 段要用的知识库语料：脚本自包含准备，不依赖"跑之前库里恰好有什么"
+    asyncio.run(prepare_corpus())
+
     # B 部分用 TestClient（另一个线程 + 新的 loop），此时连接池是干净的。
-    run_http_layer()
+    records = run_http_layer()
+
+    # C 部分再开一个 loop 回库核对（内部会先 dispose 掉 B 留下的死连接）。
+    asyncio.run(run_db_layer(records))
 
     print(f"\n=== 结果：{len(passed)} 通过 / {len(failed)} 失败 ===")
     if failed:

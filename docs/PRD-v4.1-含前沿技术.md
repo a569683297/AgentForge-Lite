@@ -325,6 +325,17 @@ v4.0 只写了对照流程，没写**怎么比才公平**。v4.1 补入四条前
 
 > **v4.0 补充（F2.6）**：**多步分析的支持**——`step` 上限从"够用即可"改为**至少 5 步**，以满足场景 F 的"查指标 → 判断 → 再下钻"两步以上链式调用。工具结果需保留在 `tool_results[]` 中供后续步骤引用。
 
+> **实施修订（2026-09-23，D14）——answer 节点已合并进 plan**：
+> F2.1 / F2.4 写的"无工具调用时直接走 answer"在实测中有一处浪费：plan 的 LLM 在不需要工具时
+> **已经把答案生成完了**，条件边再走 answer 又调一次 LLM 重新生成 —— 一轮白烧一次调用，
+> PG 里留下两条内容相近的 assistant（实测 `messages` 表每轮都成对出现）。
+> 现改为：**plan 同时承担"决策"与"回答"**，无 `tool_calls` 时直接 END，answer 节点移除。
+> LLM 调用数降到理论最少（无工具轮 1 次／有工具轮 2 次）；D11 的引用规范（`[n]` 标注）
+> 已整体并入 plan 的 system prompt，未退化。
+> 验收证据：`scripts/d14_sessions_verify.py` C 段 —— 两种路径下"无 tool_calls 的 assistant"均恰好 1 条。
+> 另两点如实记录：实现里**没有独立的 `observe` 节点**，工具结果由 `execute` 直接写成 `tool` 消息；
+> `recursion_limit` 已显式设为 **12**（原先只在注释写"10"、代码从未传给 LangGraph，实际生效的是库默认值 25）。
+
 ### F3 RAG 引擎（P0）— 不变
 - **F3.1** 文档解析：PDF（pypdf）/ DOCX（python-docx）/ MD / TXT，按类型分发
 - **F3.2** 切片：512 token + 10% 重叠；中文按字符近似；保留元信息（页码/标题路径）
@@ -734,6 +745,9 @@ class AgentState(TypedDict):
 ```
 
 图结构不变，但 `should_answer` 的判定条件放宽：**当 agent 处于"分析型任务"且已获得部分结论时，允许主动再发起一轮工具调用**（场景 F 的下钻）。
+
+> ⚠ **2026-09-23（D14）已改动此处**：`answer` 节点合并进 `plan`（原因与证据见 F2 段的"实施修订"）。
+> 现在的图是 `START → plan →（有 tool_calls）execute → plan → … → END`，节点只有 plan 与 execute 两个。
 
 - `recursion_limit` = **12**（plan 最多跑 **5** 次）
   - **🆕v4.1 为什么上调**：场景 F 的归因链是 **4 跳下钻**，共 9 个节点（plan/observe ×4 + answer）。v4.0 的 `recursion_limit = 10` 只剩 1 个余量，Agent 多想查一次就会抛 `GraphRecursionError`。**上调到 12 给出 3 个余量**，同时把"最多下钻 4 轮"写进 prompt 约束（不能只靠 limit 兜底）。

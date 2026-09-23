@@ -34,6 +34,6 @@ class MessageItem(BaseModel):
     )
     tool_calls: list | None = Field(
         default=None,
-        description="该消息声明的工具调用（原样存的 JSON）；非工具调用消息为 null",
+        description="该消息声明的工具调用（JSONB 数组原样返回）；非工具调用消息为 null",
     )
     created_at: datetime = Field(description="落库时间")

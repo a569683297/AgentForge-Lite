@@ -10,10 +10,9 @@ id、session_id（外键→sessions.id）、role、content、tool_calls、create
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import Integer
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.core.db import Base
 
@@ -47,9 +46,15 @@ class Message(Base):
         comment="消息内容",
     )
     tool_calls: Mapped[list | None] = mapped_column(
-        JSON,
+        # ⚠ 必须是 JSONB + none_as_null=True，两个都不能省：
+        #   ① JSONB 对齐 PRD §10 的定义（库里原先建成 json，类型不一致）；
+        #   ② SQLAlchemy 的 JSON/JSONB 默认 none_as_null=False —— Python 的 None 会被
+        #      序列化成 **JSON 字面量 null** 存进去，而不是 SQL NULL。实测后果：
+        #      `WHERE tool_calls IS NULL` 永远查不到行，等于把"这条消息到底有没有工具调用"
+        #      的判断整个毁掉（D15 的 PG 回填正是靠它筛消息）。
+        JSONB(none_as_null=True),
         nullable=True,
-        comment="工具调用记录（JSON 数组），非工具消息为 NULL",
+        comment="工具调用记录（JSONB 数组），非工具消息为 SQL NULL",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

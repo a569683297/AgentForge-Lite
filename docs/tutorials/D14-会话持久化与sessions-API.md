@@ -13,8 +13,11 @@
 4. 补出 PRD §11 的两个查询接口：`GET /api/sessions`、`GET /api/sessions/{id}/messages`
 5. 给 LLM Gateway 加上 `temperature` 参数（为 D15 的摘要用 0.1 做准备）
 
-**验收标准**：见表末附录 A —— 数据层 14 项 + HTTP 层 10 项断言全绿，且受契约变更影响的
-4 个历史脚本回归通过。
+**验收标准**：见表末附录 A —— 数据层 14 项 + HTTP 层 12 项 + 回库核对 6 项，共 **32 项**断言全绿；
+并且受本次改动影响的历史脚本回归通过。
+
+> 📌 附录 B 记录了本轮修掉的 **3 个缺陷**（plan 抢答 / `tool_calls` 存成 JSON null /
+> `recursion_limit` 注释与行为不符）—— 都已修复，并已转成可重跑的回归断言。
 
 ---
 
@@ -102,7 +105,8 @@ PG 那一层从来没建起来，所以「超 20 轮摘要」这件事也就无�
   ↓
 ③ 组装：history + [本轮提问] → 喂给 LangGraph
   ↓
-④ 跑 Agent（plan → execute → observe → answer；D6 已通，未改动）
+④ 跑 Agent（plan 决策 + 回答；需要工具时经 execute 回 plan；D6 已通）
+   ⚠ 补账 Day 1 收尾时又把 `answer` 节点合并进了 `plan` —— 见附录 B.1
   ↓
 ⑤ 取最终回答 + 校验引用编号（D11 已通）
   ↓
@@ -338,6 +342,8 @@ ORM 的 `onupdate=func.now()` 只在**通过 ORM 更新这一行**时触发。�
 3. 为什么 `get_messages` 的排序要带上 `id`，只按 `created_at` 会怎样？
 4. Redis 窗口里不放 `tool` 消息、PG 里放，这两件事各自服务什么目的？
 5. 落库抛异常时为什么选择"不阻断对话"？如果改成阻断，代价是什么？
+6. 把 `answer` 节点合并进 `plan` 时，**不能**只做"删节点 + 改条件边"两步 —— 还漏了什么？漏了会怎样？
+7. 想让"非工具消息的 `tool_calls` 是 NULL"，`mapped_column(JSON, nullable=True)` + 传 `None` 为什么办不到？
 
 <details>
 <summary>参考答案</summary>
@@ -354,6 +360,14 @@ ORM 的 `onupdate=func.now()` 只在**通过 ORM 更新这一行**时触发。�
    PG 那份是**留痕与兜底**，工具调用的参数与返回是排查问题的关键线索，必须全量保留。
 5. 因为回答已经产出、Redis 里历史也在，落库只是"补充"。阻断的话用户白等一轮 LLM 时间，
    体验更差。代价是可能**长期积累缺口**，所以必须配 ERROR 日志 + 监控，不能静默。
+6. 漏了把 `answer` 的 system prompt（D11 的引用规范：必须标注 `[1] [2]`、只许用存在的编号）
+   **搬进 `plan` 的 prompt**。漏了的话回答里不会再有编号 —— sources 照样收集了一堆，
+   但没人引用，D11 的引用定位链路**静默退化**。（`check_citations` 拦不住：它只检测
+   "引用了不存在的编号"，不检测"一个引用都没有"。）回归里的 `d11_citation` B1 就是守这条的。
+7. 办不到。SQLAlchemy 的 `JSON`/`JSONB` 默认 `none_as_null=False` —— 传 `None` 时它会把值
+   序列化成 **JSON 字面量 `null`** 存进去，而不是 SQL NULL。于是 `IS NULL` 恒为假，
+   所有"靠有没有 `tool_calls` 判断消息类型"的逻辑全部失效。
+   正确写法是 `JSONB(none_as_null=True)`（顺带把列类型对齐 PRD §10 的 `JSONB`）。
 
 </details>
 
@@ -396,13 +410,35 @@ ORM 的 `onupdate=func.now()` 只在**通过 ORM 更新这一行**时触发。�
 → 脚本验证统一用绝对路径：`~/.local/bin/uv run python -m scripts.d14_sessions_verify`，
 且必须**在项目根目录**执行。
 
+**坑 6：`JSON` 列把 `None` 存成了 JSON `null`（不是 SQL NULL）**
+`mapped_column(JSON, nullable=True)` 传 `None`，以为写进去的是 SQL NULL —— 不是。
+SQLAlchemy 的 `JSON`/`JSONB` 默认 `none_as_null=False`，`None` 会被序列化成
+**JSON 字面量 `null`**。实测 `(tool_calls IS NULL)` 对 user 行返回 `f`，
+80 行里 **70 行**都是这种脏值（数据本身能存进去，所以一路都没报错）。
+→ ① 模型换 `JSONB(none_as_null=True)`（同时对齐 PRD §10 的类型）；
+② 迁移脚本 `scripts/d14_fix_tool_calls.py`：清洗脏值 + `ALTER TYPE json → jsonb`，带双自检。
+**教训**：列类型选错不会报错，它只是"存得和你以为的不一样"。
+
+**坑 7：`answer` 节点不是"多一层保险"，而是把同一件事做了两遍**
+原以为 `plan → answer` 是"先决策、再作答"的清晰分工。实测发现：不需要工具时，
+plan 的 LLM **已经把答案生成完了**；工具路径下第二次 plan 也一样。answer 只是再做一遍。
+代价是白烧一次 LLM 调用 + PG 里落两条内容相近的 assistant。
+→ 把 answer 的引用规范并进 plan 的 prompt，无 `tool_calls` 时直接 END。
+**教训**：节点多 ≠ 职责清晰。判断依据是**实测的调用序列**（`tokens=494` + `tokens=262`），
+不是图看起来的样子。
+
+**坑 8：`recursion_limit` 从来没传给 LangGraph**
+注释里写着 `recursion_limit=10 → plan 最多跑 5 次`，但 `compile()` 与 `ainvoke()` 都没传它 ——
+**实际生效的是库默认值 25**。注释和真实行为差了 2.5 倍，且没有任何提示。
+→ 显式设常量 `RECURSION_LIMIT = 12`（依据 v4.1 §9.2）。关键上限不能跟着库的默认值漂。
+
 ---
 
 ## 附录 A：验证与回归实测结果
 
-### A.1 `scripts/d14_sessions_verify.py`（今天新增，24 项断言）
+### A.1 `scripts/d14_sessions_verify.py`（共 32 项断言）
 
-**A 部分 · 数据层**（`session_service` 五个出口）
+**A 部分 · 数据层**（`session_service` 的出口，不调 LLM，秒级）
 
 | 用例 | 断言要点 | 结果 |
 |---|---|---|
@@ -412,7 +448,7 @@ ORM 的 `onupdate=func.now()` 只在**通过 ORM 更新这一行**时触发。�
 | V3 `updated_at` | 用**对照会话**做相对位置断言：刚写入的排在更早活跃的之前 | ✅ |
 | V4 级联删除 | 删除前 **> 0**（防空集假通过）→ 删除后 = 0 | ✅ |
 
-**B 部分 · HTTP 层**（真实跑一轮对话，会调用 LLM）
+**B 部分 · HTTP 层**（真实跑两轮对话，会调 LLM）
 
 | 用例 | 断言要点 | 结果 |
 |---|---|---|
@@ -421,49 +457,133 @@ ORM 的 `onupdate=func.now()` 只在**通过 ORM 更新这一行**时触发。�
 | B3 | `GET /api/sessions/{id}/messages` 非空；首条 `user`、末条 `assistant`；内容逐字一致 | ✅ |
 | B4 | 不存在的会话 → **404**（与"空会话"区分） | ✅ |
 | B5 | **无横杠写法**归一化到同一会话（查到同一批消息） | ✅ |
+| B6 | 第二轮换成"必须查文档"的问题：200 且 `sources` 非空（**覆盖有工具路径**） | ✅ |
 
-**实测输出**：`24 通过 / 0 失败`
+**C 部分 · 回库核对**（B 段跑完直接查表 —— 本轮修的两个缺陷只有这里看得见）
 
-### A.2 回归（受契约变更影响的 4 个历史脚本）
+| 用例 | 断言要点 | 结果 |
+|---|---|---|
+| C·轮1（无工具） | 恰好 1 条无 `tool_calls` 的 assistant（修复前恒为 2 条）；非 assistant 行的 `tool_calls` 是 **SQL NULL**；回答非空 | ✅ |
+| C·轮2（有工具） | 同样"恰好 1 条最终回答"（修复前 assistant 总数恒为 3）；`tool_calls` 为 SQL NULL | ✅ |
 
-| 脚本 | 结果 |
-|---|---|
-| `d11_http_verify` | 4/4 ✅（H1 断言 32→36 位；H2 新增"无横杠写法归一化"一轮） |
-| `d8_memory_verify` | 2/2 ✅（**首次跑通**，此前已损坏，见坑 4） |
-| `d11_citation_verify` | 7/7 ✅ |
-| `d10_agent_rag_verify` | 5/5 ✅ |
+**实测输出**：`32 通过 / 0 失败`。两轮的实际角色序列：
+
+```
+轮1（无工具）：['user', 'assistant']
+轮2（有工具）：['user', 'assistant', 'tool', 'tool', 'assistant']
+      └ 该轮工具调用 2 次：LLM 自己决定多查一次，多轮下钻能力正常
+```
+
+### A.2 回归（全部 13 个历史脚本）
+
+图结构与表结构都动了，所以按铁律 10 跑**全量**回归，而不是只跑受契约影响的几个：
+
+| 脚本 | 结果 | 备注 |
+|---|---|---|
+| `d5_langfuse_verify` | ✅ | |
+| `d6_agent_verify` | ✅ | ⭐「直答」用例消息条数 = **2**（修复前是 3）—— 抢答消失的又一实证 |
+| `d7_gateway_verify` | ✅ | 主备降级正常 |
+| `d8_memory_verify` | 2/2 ✅ | ⭐ 多轮记忆仍生效 → plan 兼任回答**没有**破坏历史上下文 |
+| `d9_retrieval_verify` / `d9_zip_order_verify` | ✅ | |
+| `d10_tool_verify` | ✅ | |
+| `d10_agent_rag_verify` | 5/5 ✅ | 含"闲聊不调工具"用例 |
+| `d11_citation_verify` | 7/7 ✅ | ⭐ **B1 引用可定位通过 → `[1]` 标注未退化**（prompt 合并的关键验收） |
+| `d11_http_verify` | 4/4 ✅ | |
+| `d12_documents_verify` | 全部通过 ✅ | |
+| `d13_probe_retrieval` | ✅ | BM25 与 ts_rank 排序仍不同 |
+| `d14_sessions_verify` | 32/32 ✅ | 本脚本 |
 
 ---
 
-## 附录 B：已知缺陷与下一步
+## 附录 B：缺陷清单与修复记录
 
-### B.1 本轮发现的新缺陷：plan 节点"抢答"，一轮落 3 条消息
+### B.1 plan 节点"抢答"（2026-09-23 已修）
 
-B3 实测返回 `roles = ['user', 'assistant', 'assistant']` —— **两条 assistant**。
+**现象**：B3 实测返回 `roles = ['user', 'assistant', 'assistant']` —— 两条 assistant。
+回库看更明显：`messages` 表 80 行里，**每一轮都是成对的 assistant**。
 
-原因在 D6 的图结构：无工具调用时，`plan` 节点的 LLM **已经把答案说出来了**，
-条件边再走 `answer` 节点，`answer` 又调一次 LLM 生成最终回答。日志印证了这一点
-（一轮里两次 LLM 调用：`tokens=494` + `tokens=262`）。
+**根因**在 D6 的图结构：`plan → (execute | answer)`。不需要工具时，`plan` 的 LLM
+**已经把答案生成完了**，条件边再走 `answer` 节点又调一次 LLM 重新生成一遍。
+日志印证：一轮里两次 LLM 调用（`tokens=494` + `tokens=262`）。
 
-影响：
-1. 无工具场景下**白烧一次 LLM 调用**（延迟翻倍、成本翻倍）
-2. PG 里留下两条内容相近的 assistant 消息，`GET /api/sessions/{id}/messages` 会重复展示
-3. **D15 做"从 PG 回填窗口"时必须处理它** —— 否则回填出重复回答
+**影响**（三条，比"浪费"更要紧的是第 3 条）：
+1. 白烧一次 LLM 调用（延迟与成本都翻倍）
+2. PG 里留下两条内容相近的 assistant，`GET /api/sessions/{id}/messages` 重复展示
+3. **D15 做"从 PG 回填窗口"时会回填出重复回答** —— 必须在 D15 之前修掉
 
-**未在本轮修改**：它属于 Agent 引擎（D6）的行为，会影响已验收的链路，
-按铁律不擅自改。候选修法是"plan 无 `tool_calls` 且从未调过工具时直接 END"。
-→ 需用户决定是现在修、还是并入 D15。
+**修法**：把 `answer` 节点的引用规范**整体搬进 `plan` 的 system prompt**
+（`PLAN_SYSTEM_PROMPT`，逐条搬、一字未删 —— 漏了 D11 的 `[n]` 标注就会退化），
+条件边改成"无 `tool_calls` → END"，`answer` 节点从图中移除。
 
-### B.2 明确不做的事
+| 场景 | 修复前 LLM 调用 | 修复后 |
+|---|---|---|
+| 无工具轮 | 2 次（plan + answer） | **1 次** |
+| 有工具轮 | 3 次（plan 调工具 + plan 抢答 + answer） | **2 次** |
+
+**验收证据**（脚本 C 段，回库核对）：
+```
+[C] 轮1·无需工具（无工具路径）roles=['user', 'assistant']
+    ✅ 最终回答恰好 1 条  —— 修复前这里恒为 2 条
+[C] 轮2·有工具（有工具路径）roles=['user', 'assistant', 'tool', 'tool', 'assistant']
+    ✅ 最终回答恰好 1 条  —— 修复前 assistant 总数恒为 3
+    └ 该轮工具调用 2 次（LLM 自己决定多查一次，多轮下钻能力正常）
+```
+
+> 有意思的是 **D10 教程第 370 行早就写下了这个猜想**："plan #2 和 answer 是两次独立的
+> 生成……D11 可以评估是否合并这两步"。这次修复就是把它兑现 ——
+> 从"看出成本结构不合理"到"动手合并"隔了 6 天，中间它一直以缺陷形态留在库里。
+
+### B.2 `tool_calls` 存成了 JSON `null`（2026-09-23 已修）
+
+**现象**：`SELECT (tool_calls IS NULL) FROM messages WHERE role='user'` 返回 `f`
+—— user 消息的 `tool_calls` 竟然"不为 NULL"。
+
+**根因**：SQLAlchemy 的 `JSON`/`JSONB` 默认 `none_as_null=False`，Python 的 `None`
+会被序列化成 **JSON 字面量 `null`** 存进去，而不是 SQL NULL。实测 80 行里 **70 行**是这种脏值。
+
+**影响**：`WHERE tool_calls IS NULL` 永远查不到行 —— 一切"靠有没有 tool_calls 判断
+消息类型"的逻辑全部失效。**D15 的 PG 回填正是靠它筛消息**，所以同样是前置。
+另外 PRD §10 定义的是 `JSONB`，库里实建成 `json`，类型也不符。
+
+**修法**：① 模型改 `JSONB(none_as_null=True)`；② 迁移脚本
+`scripts/d14_fix_tool_calls.py` —— 清洗脏值 + `ALTER TYPE json → jsonb`，
+幂等（已是 jsonb 且无脏值就直接返回），带结构与数据双自检。
+
+**验收证据**：
+```
+迁移前：列类型=json  总行数=80  JSON null 脏值=70  真工具调用=10
+✅ 修复完成：json → jsonb，清洗 70 行 JSON null
+✅ 数据自检通过：真工具调用 10 行原样保留，JSON null 残留 0
+```
+
+> 讽刺的是 **D09 教程第 144 行就写过**："为什么用 JSONB 不用 JSON —— JSONB 支持索引
+> 和字段查询"。原则当时就懂了，只是建 `messages` 表时没贯彻到 `tool_calls` 上，
+> 而且一直没暴露 —— 因为这一列在 D14 之前**从未写入过任何数据**。
+
+### B.3 顺带发现：`recursion_limit` 注释与行为不符（已修）
+
+代码注释写着 `recursion_limit=10 → plan 最多跑 5 次`，但 `graph.compile()` 与
+`ainvoke()` **都没传过这个参数** —— 实际生效的是 LangGraph 的库默认值 **25**。
+
+现在显式设为 **12**（依据 v4.1 §9.2：四跳下钻共 9 个节点，留 3 个余量），抽成模块常量
+`RECURSION_LIMIT`。理由是**不让关键上限跟着库的默认值漂** —— 库升级改了默认值，
+行为会静默变化，而注释还停在旧数字上。
+
+### B.4 明确不做的事
 
 - **不补 `messages.tool_results` 列**：`role='tool'` 的行本身就装着工具结果，
   再加一列是同一份数据的第二份拷贝。真要改，改 PRD §10 的文字比改库便宜。
 - **不重构 `agent_service` 里已有的两个硬编码 system prompt**：那是已验收代码，
   与本日目标（补账）无关，回归风险大于收益。
+  （注：B.1 把 `answer` 的 prompt 并进了 `plan` —— 那是**修缺陷的必要动作**，
+  不是"顺手重构"。合并后 system prompt 反而只剩一处，更好维护。）
 
-### B.3 下一步（教程 D15）
+### B.5 下一步（教程 D15）
 
 1. `get_window` 未命中 → 从 PG 取最近 8 轮 → 回填 Redis（PG 兜底链路）
 2. 摘要压缩：轮数 > 20 触发；`summarizer` prompt（已就位）+ 游标（存 Redis）
 3. 摘要注入位置：`system(人设 + 摘要) + 窗口消息`
-4. 处理 B.1 的重复 assistant 问题（需用户决定）
+4. 摘要用 `temperature=0.1`（参数已就位）
+
+⚠ 回填时必须**只挑 `user` / `assistant` 进窗口**（跳过 `tool` 消息与带 `tool_calls` 的
+中间消息），理由见 §2.3 —— 而 `tool_calls IS NULL` 正是筛这两类消息的依据（B.2 修的就是它）。

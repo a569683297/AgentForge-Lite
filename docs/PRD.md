@@ -398,6 +398,12 @@ class LLMClient:
 
 ### 9.2 Agent 引擎（LangGraph）
 
+> ⚠ **本节代码示例已过时（2026-09-23 起）**：本文件是 v3.0 历史版本，
+> 现行计划见 `docs/PRD-v4.1-含前沿技术.md`，实际实现见 `app/services/agent_service.py`。
+> 两处差异：① 没有独立的 `observe` 节点 —— 工具结果由 `execute` 节点直接写成 `tool` 消息；
+> ② `answer` 节点已合并进 `plan`（无 `tool_calls` 时直接 END，避免重复生成）。
+> 下面这段代码保留原样，只作历史对照。
+
 ```
 class AgentState(TypedDict):
     messages: list[dict]        # 完整对话（含工具消息）
