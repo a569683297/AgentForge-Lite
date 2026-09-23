@@ -16,13 +16,17 @@ D8 起对话记忆只有 Redis 一层（8 轮 + TTL 24h）——超 8 轮、超 
     喂 LLM 只留 user+assistant —— function calling 要求 tool_calls 与 tool
     消息成对出现，窗口里只留一半下一轮请求必 400，所以干脆两者都不进窗口
 
-本模块只有六个出口（会话数据只从这里进库，其余模块不许直接写）：
+本模块只有十个出口（会话数据只从这里进库，其余模块不许直接写）：
     ensure_session()     会话不存在则创建（PRD F1.3）
     append_messages()    本轮消息全量落库 + 刷新 updated_at（PRD F1.4）
     list_sessions()      会话列表（PRD §11 GET /api/sessions）
     get_session()        单个会话（用于区分 404 与"空会话"）
     get_messages()       某会话历史消息（PRD §11 GET /api/sessions/{id}/messages）
-    get_recent_dialogue() 最近 N 轮"对话语义"消息（D15：供 Redis 热窗口回填）
+    get_recent_dialogue() 最近 N 轮"对话语义"消息（D15-1：供 Redis 热窗口回填）
+    get_summary()         读长期摘要（D15-2：PRD §9.4 注入 system）
+    save_summary()        写长期摘要（D15-2：PRD F5.2）
+    get_dialogue_stats()  干净对话消息总数 + 热窗口下界（D15-2：摘要触发判据）
+    get_dialogue_range()  取一段干净对话消息（D15-2：摘要的输入区间）
 
 事务约定（承接 D12 的教训）：
     session.add() 只把对象放进内存队列，commit() 才真正写库；
@@ -240,11 +244,7 @@ async def get_recent_dialogue(
     limit = max(1, turns) * 2
     stmt = (
         select(Message)
-        .where(
-            Message.session_id == session_id,
-            Message.role.in_(("user", "assistant")),
-            Message.tool_calls.is_(None),
-        )
+        .where(*_clean_dialogue_filter(session_id))
         .order_by(Message.id.desc())
         .limit(limit)
     )
@@ -253,3 +253,146 @@ async def get_recent_dialogue(
 
     # reversed：把「倒序取出的最近 N 条」还原成时间正序
     return [{"role": m.role, "content": m.content} for m in reversed(rows)]
+
+
+# ============================================================
+# D15 第二段：摘要压缩需要的四个出口
+# ============================================================
+CLEAN_ROLES = ("user", "assistant")
+
+
+def _clean_dialogue_filter(session_id: uuid.UUID) -> tuple:
+    """
+    「对话语义」的过滤条件 —— 所有按"轮"来数的查询都从这取，规则只写一遍。
+
+    两个条件必须**成对**使用：
+      ① role IN ('user','assistant')  → 排掉 role='tool' 的行
+      ② tool_calls IS NULL            → 排掉 plan 的"纯决策" assistant 行
+    它们是配对产生的一对（带 tool_calls 的 assistant ↔ 它触发的 tool 消息）。
+    只留其中一半，下一轮请求必 400 —— 所以要么都留、要么都排，不能只排一半。
+
+    历史教训（为什么这里要写一行警告）：②依赖「None 真的写成 SQL NULL」。
+    D14 缺陷 ③ 之前 JSONB 列存的是 JSON 字面量 null，`IS NULL` 恒为假 ——
+    这些查询会**静默返回 0 行**，页面一切正常，只是"历史不见了"。
+    """
+    return (
+        Message.session_id == session_id,
+        Message.role.in_(CLEAN_ROLES),
+        Message.tool_calls.is_(None),
+    )
+
+
+async def get_summary(session_id: uuid.UUID) -> str | None:
+    """
+    读会话的长期摘要（PRD §9.4：组装上下文时作为 system 前缀）。
+
+    找不到会话、或会话还没摘过 → 返回 None（调用方据此决定"拼不拼这一段"）。
+    """
+    async with async_session_factory() as db:
+        value = (
+            await db.execute(select(Session.summary).where(Session.id == session_id))
+        ).scalar_one_or_none()
+    return value or None
+
+
+async def save_summary(session_id: uuid.UUID, summary: str) -> None:
+    """
+    写长期摘要（PRD F5.2）。
+
+    两个刻意的选择：
+      ① **空摘要直接拒绝**：宁可留着上一版摘要，也不要用一个空字符串把已有记忆抹掉。
+         触发场景是真实的 —— LLM 偶发返回空串/只有空白。
+      ② ⚠ 这个 UPDATE 会**连带刷新 updated_at**：ORM 的 onupdate 对任何针对该表的
+         UPDATE 语句生效，我们只想改 summary，却动了时间戳。
+         实际影响可以忽略（它就发生在同一请求内、紧跟 append_messages 的那次刷新），
+         但写在这里是因为它反直觉 —— 别以为"没写 updated_at 就没动它"。
+    """
+    if not summary.strip():
+        return
+    async with async_session_factory() as db:
+        await db.execute(
+            update(Session).where(Session.id == session_id).values(summary=summary)
+        )
+        await db.commit()
+    logger.info("长期摘要已更新 session=%s 长度=%d", session_id, len(summary))
+
+
+async def get_dialogue_stats(session_id: uuid.UUID, *, window_size: int) -> dict:
+    """
+    摘要的触发判据：干净对话消息总数 + 热窗口下界 id（D15-2）。
+
+    Returns:
+        {
+          "total": 干净对话消息条数（user + 最终 assistant，不含 tool 与决策行）,
+          "window_lower_id": 最近 window_size 条里最早那条的 id；
+                             条数不足 window_size 时为 None（= 还没有消息滑出窗口）
+        }
+
+    为什么"轮数"必须从 PG 数，不能从 Redis 窗口数（面试高频）：
+        Redis 窗口最多 16 条（8 轮），**永远数不出 20 轮** —— 用它当判据，
+        摘要永远不会触发。而且 Redis 有 TTL、会重启，只有 PG 是权威源（F5.3）。
+
+    为什么两个查询放同一个数据库会话里：它们是同一时刻的一致视图。
+    分开查的话，两次查询之间若有并发写入，算出的边界会互相矛盾。
+    """
+    conds = _clean_dialogue_filter(session_id)
+    async with async_session_factory() as db:
+        total = (
+            await db.execute(select(func.count()).select_from(Message).where(*conds))
+        ).scalar_one()
+        ids = (
+            (
+                await db.execute(
+                    select(Message.id)
+                    .where(*conds)
+                    .order_by(Message.id.desc())
+                    .limit(max(1, window_size))
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    # ids 是倒序的，所以最后一个是"最近 window_size 条里最早的一条"= 窗口下界。
+    # total <= window_size 说明没有任何消息滑出窗口，此时没有可摘要的区间 → None。
+    lower = ids[-1] if (total > window_size and ids) else None
+    return {"total": total, "window_lower_id": lower}
+
+
+async def get_dialogue_range(
+    session_id: uuid.UUID,
+    *,
+    after_id: int | None = None,
+    before_id: int | None = None,
+    limit: int = 40,
+) -> list[dict]:
+    """
+    取一段干净对话消息（时间正序，含 id），作为摘要压缩的输入（D15-2）。
+
+    区间是**左开右开** `(after_id, before_id)`：
+        after_id  = 上次摘要的游标（None = 从最早开始）
+        before_id = 热窗口下界（None = 一直到最新）
+
+    右开的原因：窗口里的消息还在 Redis 活着、每轮都完整喂给 LLM，
+    再摘要一遍就是重复烧 token。这正是「摘要只覆盖已滑出窗口那段」的由来。
+
+    返回带 id 是关键：调用方要用**本批最后一条的 id** 推进游标，
+    记录"下次从哪继续"。少了它，增量摘要就退化成每轮全量重摘。
+    """
+    conds = list(_clean_dialogue_filter(session_id))
+    if after_id is not None:
+        conds.append(Message.id > after_id)
+    if before_id is not None:
+        # 严格小于：窗口下界那条消息本身还在 Redis 窗口里，不归摘要管
+        conds.append(Message.id < before_id)
+
+    stmt = (
+        select(Message)
+        .where(*conds)
+        .order_by(Message.id.asc())
+        .limit(max(1, limit))
+    )
+    async with async_session_factory() as db:
+        rows = (await db.execute(stmt)).scalars().all()
+
+    return [{"id": m.id, "role": m.role, "content": m.content} for m in rows]

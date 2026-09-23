@@ -26,7 +26,7 @@ Edge=固定路由 / 条件边=动态路由
 """
 
 import uuid
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -49,6 +49,10 @@ RECURSION_LIMIT = 12
 class AgentState(TypedDict):
     messages: list[dict]        # 完整对话（user/assistant/tool 消息）
     step_count: int             # 已循环步数
+    # D15：长期摘要（PRD §9.4），由 run_agent 从 PG 读入，plan_node 拼进 system。
+    # NotRequired：其它调用方（历史验证脚本）构造 state 时不传它也不会报错 ——
+    # plan_node 用 state.get("summary") 取值，缺了就是"没有更早的记忆"。
+    summary: NotRequired[str | None]
 
 
 # ---- 节点 1：plan（LLM 决策 + 最终回答）----
@@ -71,6 +75,28 @@ PLAN_SYSTEM_PROMPT = (
 )
 
 
+def build_system_prompt(summary: str | None = None) -> str:
+    """
+    拼 plan 节点的 system prompt（D15：PRD §9.4 的「组装顺序」）。
+
+    顺序：人设（PLAN_SYSTEM_PROMPT）在前、**摘要**在后。
+
+    摘要为什么放 system，而不是往 messages 里插一条：
+      ① 插进 messages 会**伪装成一条真实对话轮次** —— LLM 会以为"我说过这句话"，
+         干扰它对轮次和引用编号的判断
+      ② 会产生**多条 system 消息**，而各家厂商对多 system 的兼容性参差
+
+    摘要为什么放在人设**之后**（而不是最前面）：它是"更早的记忆"，
+    越靠近当前对话的上下文越容易被用上；人设是指令，排最前更稳。
+    """
+    if not summary:
+        return PLAN_SYSTEM_PROMPT
+    return (
+        f"{PLAN_SYSTEM_PROMPT}\n\n"
+        f"【更早对话的摘要】（本次会话更早期的内容，供参考）\n{summary}"
+    )
+
+
 async def plan_node(state: AgentState) -> AgentState:
     """LLM 看当前对话，决定下一步：调工具，还是直接给出最终回答。
 
@@ -86,7 +112,8 @@ async def plan_node(state: AgentState) -> AgentState:
         else "agent-plan"
     )
     result = await chat_with_tools(
-        [{"role": "system", "content": PLAN_SYSTEM_PROMPT}] + messages,
+        [{"role": "system", "content": build_system_prompt(state.get("summary"))}]
+        + messages,
         get_tools_schema(),   # ← 从注册表取（D8：不再内联）
         trace_name=trace_name,
     )
@@ -182,8 +209,9 @@ async def run_agent(session_id: uuid.UUID, user_input: str) -> ChatResult:
 
     端到端流程：
       ⓪ reset_sources()             重新绑定本请求的引用收集器（并发隔离的关键）
-      ① get_window(session_id)      从 Redis 读最近 N 轮历史
-      ② messages = 历史 + [本次提问]
+      ① get_window(session_id)      从 Redis 读最近 N 轮历史（未命中/不可用 → PG 兜底）
+      ①.5 get_summary(session_id)   从 PG 读长期摘要 ← D15 新增
+      ② messages = 历史 + [本次提问]（摘要进 state，不进 messages）
       ③ agent.ainvoke(messages)     跑 LangGraph 的 ReAct 循环（plan 节点兼任"决策+回答"）
           └─ 工具执行时把来源登记进收集器（结构通道）
       ④ 取最终回答（plan 给出的那条；D14 修复后不再有"两份并列答案"要从里面挑）
@@ -191,7 +219,12 @@ async def run_agent(session_id: uuid.UUID, user_input: str) -> ChatResult:
       ⑥ check_citations()           校验回答里的 [n] 有没有越界
       ⑦ append_turn(...)            写回 Redis 热窗口（只 user + assistant）
       ⑧ append_messages(...)        写回 PG 全量（含 tool 行）← D14 新增
+      ⑧.5 maybe_summarize(...)      轮数够就压缩已滑出窗口的那段 ← D15 新增
       ⑨ 返回 ChatResult
+
+    ⚠ ⑧.5 是"为下一轮准备"的：跑它的时候本轮回答早已生成完，它影响不到本轮
+      （这轮用的摘要是 ①.5 读进来的）。所以摘要失败只意味着"下一轮少一份背景"，
+      不是"本轮出错" —— 这是它敢被 try 吞掉的依据。
 
     Args:
         session_id: 会话 ID（uuid.UUID —— 与 sessions.id / messages.session_id 同类型）
@@ -199,20 +232,25 @@ async def run_agent(session_id: uuid.UUID, user_input: str) -> ChatResult:
     Returns:
         ChatResult：回答文本 + 来源映射表 + 越界引用编号
     """
-    from app.services.memory_service import append_turn, get_window
-    from app.services.session_service import append_messages
+    from app.services.memory_service import append_turn, get_window, maybe_summarize
+    from app.services.session_service import append_messages, get_summary
 
     # ⓪ 引用收集器必须在跑图之前重新绑定。
     #    ContextVar 复制的是「绑定」不是「对象内容」，不重新绑定会读到上个请求的残留。
     reset_sources()
 
-    # ① 读历史
+    # ① 读历史（Redis 优先，未命中/不可用走 PG 兜底）
     history = await get_window(session_id)
 
-    # ② 组装状态（历史 + 本轮提问）
+    # ①.5 读长期摘要（D15）。首次对话时 sessions 行还没建 → 返回 None，
+    #     build_system_prompt 会据此跳过这一段，不会多出一条空的"摘要"。
+    summary = await get_summary(session_id)
+
+    # ② 组装状态（历史 + 本轮提问；摘要单独走 state.summary 进 system）
     state: AgentState = {
         "messages": history + [{"role": "user", "content": user_input}],
         "step_count": 0,
+        "summary": summary,
     }
 
     # ③ 跑图（recursion_limit 见文件顶部常量说明）
@@ -261,6 +299,19 @@ async def run_agent(session_id: uuid.UUID, user_input: str) -> ChatResult:
         # 而且历史仍在 Redis 里（下一轮上下文不丢）。但必须留下 ERROR 日志 ——
         # 静默失败才是真正的坑：D12 的孤儿切片就是这么攒出来的。
         logger.exception("PG 落库失败（对话结果仍已返回）session=%s", session_id)
+
+    # ⑧.5 摘要压缩检查（D15 新增 / PRD F5.1 后半 + F5.2）：
+    #      排在 ⑧ 之后，是因为它的触发判据要从 PG 数轮数 ——
+    #      必须等本轮的 user/assistant 先落库，否则永远差一轮。
+    #      排在 ⑨ 之前（同步执行）：换来可预测的行为与可断言的结果；
+    #      将来若要降延迟，可换成 asyncio.create_task，函数本身不用改。
+    try:
+        await maybe_summarize(session_id)
+    except Exception:
+        # 同上：摘要失败不影响本轮（回答已产出、记忆已写）。
+        # maybe_summarize 内部已经把 LLM 失败/空输出都收敛成返回值了，
+        # 这里兜的是"它自己崩了"（比如 PG 查询异常）—— 一样不该让对话 500。
+        logger.exception("摘要压缩检查失败（对话不受影响）session=%s", session_id)
 
     # ⑨ 返回结构化结果
     logger.info(
