@@ -16,12 +16,13 @@ D8 起对话记忆只有 Redis 一层（8 轮 + TTL 24h）——超 8 轮、超 
     喂 LLM 只留 user+assistant —— function calling 要求 tool_calls 与 tool
     消息成对出现，窗口里只留一半下一轮请求必 400，所以干脆两者都不进窗口
 
-本模块只有五个出口（会话数据只从这里进库，其余模块不许直接写）：
-    ensure_session()    会话不存在则创建（PRD F1.3）
-    append_messages()   本轮消息全量落库 + 刷新 updated_at（PRD F1.4）
-    list_sessions()     会话列表（PRD §11 GET /api/sessions）
-    get_session()       单个会话（用于区分 404 与"空会话"）
-    get_messages()      某会话历史消息（PRD §11 GET /api/sessions/{id}/messages）
+本模块只有六个出口（会话数据只从这里进库，其余模块不许直接写）：
+    ensure_session()     会话不存在则创建（PRD F1.3）
+    append_messages()    本轮消息全量落库 + 刷新 updated_at（PRD F1.4）
+    list_sessions()      会话列表（PRD §11 GET /api/sessions）
+    get_session()        单个会话（用于区分 404 与"空会话"）
+    get_messages()       某会话历史消息（PRD §11 GET /api/sessions/{id}/messages）
+    get_recent_dialogue() 最近 N 轮"对话语义"消息（D15：供 Redis 热窗口回填）
 
 事务约定（承接 D12 的教训）：
     session.add() 只把对象放进内存队列，commit() 才真正写库；
@@ -208,3 +209,47 @@ async def get_messages(
         }
         for m in rows
     ]
+
+
+async def get_recent_dialogue(
+    session_id: uuid.UUID,
+    turns: int = 8,
+) -> list[dict]:
+    """
+    取最近 N 轮「对话语义」消息（时间正序），供 Redis 热窗口回填使用（D15）。
+
+    与 get_messages 的区别（别混用）：
+        get_messages()         → 给 API 用：**全量**、含 tool 行、含 created_at
+        get_recent_dialogue()  → 给记忆层用：**最近 N 轮**、只留对话语义、结构精简
+
+    过滤条件的两个依据（缺一条都会出事）：
+      ① role IN ('user','assistant')
+         排除 role='tool' 的行。
+      ② tool_calls IS NULL
+         排除「纯决策」的那条 assistant（它带 tool_calls、content 常为空）。
+         为什么必须连它一起排掉：function calling 协议要求 tool_calls 与 tool
+         消息**成对**出现，只留下其中一半，下一轮请求必 400。
+         ⚠ 这个条件能生效的前提是「None 真的写成了 SQL NULL」——
+           D14 缺陷 ③ 之前 JSONB 列存的是 JSON 字面量 null，`IS NULL` 恒为假，
+           本查询会静默返回 0 行（回填变成空回填，页面却一切正常）。
+
+    为什么倒序取再反转：要的是「最近」N 轮，SQL 只能按 id 倒序 + LIMIT 拿到；
+    但喂给 LLM 必须是时间正序，所以在 Python 侧反转回来。
+    一轮固定产出 2 条干净消息（user + 最终 assistant），所以 limit = turns × 2。
+    """
+    limit = max(1, turns) * 2
+    stmt = (
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.role.in_(("user", "assistant")),
+            Message.tool_calls.is_(None),
+        )
+        .order_by(Message.id.desc())
+        .limit(limit)
+    )
+    async with async_session_factory() as db:
+        rows = (await db.execute(stmt)).scalars().all()
+
+    # reversed：把「倒序取出的最近 N 条」还原成时间正序
+    return [{"role": m.role, "content": m.content} for m in reversed(rows)]
