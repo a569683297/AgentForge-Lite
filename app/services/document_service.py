@@ -36,6 +36,7 @@ from app.models.document_chunk import DocumentChunk
 from app.services.document_parser import ParsedSegment, parse_file
 from app.services.embedding_service import embed_texts
 from app.services.retrieval_service import split_text
+from app.services.tokenizer import tokenize_to_string
 
 # 失败原因写入数据库前的截断长度：错误堆栈可能很长，别把列撑爆
 _MAX_ERROR_LEN = 500
@@ -116,6 +117,11 @@ async def _ingest_segments(document_id: uuid.UUID, segments: list[ParsedSegment]
                         document_id=document_id,
                         chunk_index=index,
                         content=text,
+                        # D16：入库时就把分词结果算好（索引侧的"索引"部分）。
+                        # 这里必须和查询侧调**同一个** tokenize —— 否则两侧 token 对不上，
+                        # 检索会静默失效（不报错，只是永远查不到）。
+                        # content_tsv 那列不用管：数据库会从 content_tokens 自动派生。
+                        content_tokens=tokenize_to_string(text),
                         embedding=vec,
                         page_ref=page_ref,
                     )
