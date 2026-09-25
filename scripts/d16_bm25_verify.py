@@ -280,8 +280,18 @@ async def section_c(ck: Checker) -> None:
     hits2 = await search_keywords("灰度回滚", top_k=10)
     sources2 = [h["source"] for h in hits2]
     print(f"  查「灰度回滚」→ {sources2}")
-    ck.check(sources2 and all("other" in s for s in sources2),
-             "C2 只命中运维文档，员工手册三篇全部落选")
+    # D17 修正：原断言是 all("other" in s for s in sources2)，
+    # 隐含前提是「全库只有本脚本的测试文档」—— 库里一旦有别的文档
+    # （哪怕它确实含"灰度/回滚"、本该被召回），断言就会红，
+    # 而那是断言脆弱、不是代码坏了。
+    # 修法：把范围限定到本脚本自己的语料，排除性照旧（other 命中、其余三篇落选）。
+    own_sources2 = [s for s in sources2 if s.startswith(VERIFY_PREFIX)]
+    others2 = [s for s in sources2 if not s.startswith(VERIFY_PREFIX)]
+    ck.check(own_sources2 == [f"{VERIFY_PREFIX}-other"],
+             "C2 本脚本语料里只命中运维文档，员工手册三篇全部落选",
+             f"本脚本命中 {own_sources2}")
+    if others2:
+        print(f"  （库中另有 {len(others2)} 条外部文档命中，非本脚本语料，不计入断言：{others2[:3]}）")
 
     # ---- C3 长度归一化：tf 相同、长度不同 → 短的必须赢 ----
     short = next((h for h in hits if h["source"] == f"{VERIFY_PREFIX}-short"), None)
@@ -313,10 +323,14 @@ async def section_c(ck: Checker) -> None:
     # ---- C5 返回契约 ----
     if hits:
         keys = set(hits[0].keys())
-        expect_keys = {"content", "source", "page_ref", "score", "retriever"}
+        # D17 起多一个 chunk_id：融合（RRF）要靠主键判断"两路是不是同一片"，
+        # 精确集合断言的价值就在这里 —— 返回结构一变它立刻红，不会静默漏掉。
+        expect_keys = {"chunk_id", "content", "source", "page_ref", "score", "retriever"}
         print(f"\n  返回字段：{sorted(keys)}")
         ck.check(keys == expect_keys, "C5a 返回字段完整且不含 similarity",
                  f"实际 {keys}")
+        ck.check(all(isinstance(h["chunk_id"], str) and h["chunk_id"] for h in hits),
+                 "C5a2 每条的 chunk_id 都是非空字符串（D17 融合的身份键）")
         ck.check(all(h["retriever"] == "bm25" for h in hits),
                  "C5b 每条的 retriever 都标为 bm25（供 D17 融合时区分来源）")
         ck.check(all(h["score"] > 0 for h in hits),
