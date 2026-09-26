@@ -19,10 +19,14 @@ D11 变化：工具返回值**仍是 str**（契约不变），
 让回答里的 [1] 能被映射回原文 —— 双通道：
     文本通道  → 给 LLM 读（带 [n] 编号）
     结构通道  → 给前端用（source / content / similarity 三个字段）
+
+D19 变化：底层从 `search`（向量单路）换成 `retrieve`（三配置可切，含重排）。
+工具层因此**不知道**当前用的是哪条检索链路 —— 它只认"一个有序的结果列表"。
+这是刻意的：策略切换不该让工具层、引用收集器、前端任何一处改代码。
 """
 
 from app.core.citation import record_sources
-from app.services.retrieval_service import search
+from app.services.retrieval_service import retrieve
 from app.tools.registry import register
 
 
@@ -57,7 +61,7 @@ async def search_documents(query: str) -> str:
       LLM 看到编号才能在回答里写"根据 [1]"，
       前端才能把 [1] 映射回原文来源。
     """
-    results = await search(query)
+    results = await retrieve(query)
 
     # 检索为空时返回明确说明，不能返回空字符串——
     # 空字符串会让 LLM 以为"查了但没结果"而开始编造答案。
@@ -75,9 +79,17 @@ async def search_documents(query: str) -> str:
         source = item.get("source") or "未知来源"
         # D12：PDF 类文档带上页码，LLM 写引用时能写到「第几页」这一级
         page = f" {item['page_ref']}" if item.get("page_ref") else ""
-        blocks.append(
-            f"[{index}] 来源：{source}{page}（相关度 {item['similarity']}）\n{item['content']}"
-        )
+
+        # D19：similarity 可能为 None —— 当某片段**只被 BM25 命中**（向量路没召回到它）时
+        # 就是这种情况。此时**整段括号一起省略**，而不是渲染出"相关度 None"：
+        # 让 LLM 读到 None 只会让它困惑，甚至据此判断"这条不相关"。
+        # ⚠ 也刻意**不**把 BM25 分或重排分填进来：
+        #   它们是另外两个量纲（BM25 无上界、重排分是 logit 且不可跨 query 比较，D18 实测），
+        #   塞进"相关度"这个位置会让 LLM 拿不同尺子的数字互相比较。
+        similarity = item.get("similarity")
+        score = f"（相关度 {similarity}）" if similarity is not None else ""
+
+        blocks.append(f"[{index}] 来源：{source}{page}{score}\n{item['content']}")
 
     # 空行分隔，LLM 更容易分清"片段的边界"
     return "\n\n".join(blocks)

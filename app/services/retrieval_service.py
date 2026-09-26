@@ -40,26 +40,47 @@ D17 新增第三条腿 —— 融合（RRF）：
     → 返回 [{chunk_id, content, source, page_ref, rrf_score,
              vector_rank, bm25_rank, similarity, bm25_score, retriever}, ...]
 
-  今天的边界：`app/tools/retrieval.py`（Agent 的工具层）**仍只走向量路**，
-  检索策略配置化（pure_vector / hybrid / hybrid_rerank 三态可切）在 D19。
-  所以本日交付的是"一条能被抽样对比的第二条管线"，Agent 行为不变。
+D19：把三条腿收进**一个可切入口** `retrieve()`，并接上重排。
+
+  retrieve(问题)                              ← 全项目检索的唯一对外入口
+    → 读 settings.retriever_config（或调用方显式传 config）
+        pure_vector   → search(top5)                    无融合、无重排
+        hybrid        → hybrid_search(top5)             融合后直接取 5
+        hybrid_rerank → hybrid_search(top20) → rerank → top5
+                                 ↑ 注意：这里融合窗口是 **20**，不是 5
+    → 返回结构三态一致（同样的键名），上层不用写三个 if
+
+  为什么要有这个入口（不是为了"上线时切配置"）：
+    PRD §9.5 的消融矩阵 A/B/C 要求**同一个评测集跑三遍**
+    （S2 验收点：混合+重排 vs 纯向量 ≥ +10%）。
+    如果直接拿重排替换掉 search()，B 配置就永久消失了 ——
+    "重排到底有没有用"这个问题以后再也答不出来。
+
+  ⚠ B 与 C 的融合窗口不同（top5 vs top20），这是最容易写错的一处：
+    C 要重排，所以必须让 RRF 多吐一些候选出来（20 进 → 5 出）。
 """
 
 import asyncio
 
 from sqlalchemy import select, text
 
+from app.config import RETRIEVER_CONFIGS, settings
 from app.core.db import async_session_factory
 from app.core.logging import logger
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.services.embedding_service import embed_query
+from app.services.rerank_service import rerank
 from app.services.tokenizer import build_or_tsquery, tokenize
 
 # ---- 切片配置 ----
 CHUNK_SIZE = 300        # 每个切片的字符数
 CHUNK_OVERLAP = 50      # 相邻切片重叠字符数（防止把一句话从中间切断）
-DEFAULT_TOP_K = 3       # 默认检索返回条数
+
+# 默认检索返回条数。
+# D19 从 3 改成 5：PRD §9.5 的消融矩阵 A/B/C 写的都是 top5，
+# 三条链路口径必须一致，否则"A 用 3 条、C 用 5 条"的对比没有意义。
+DEFAULT_TOP_K = 5
 
 
 def split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -153,6 +174,10 @@ async def search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
             "source": row.filename,
             "page_ref": row.page_ref,
             "similarity": round(1 - row.distance, 4),   # 距离 → 相似度
+            # D19：标明这条是谁产的。
+            # D17 只给 BM25 与融合打了标记，向量路**漏了** —— 于是 A 配置
+            # （pure_vector）在消融实验里无法归因。三配置都要能自报家门。
+            "retriever": "pure_vector",
         }
         for row in rows
     ]
@@ -492,3 +517,91 @@ async def hybrid_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
         # 结果仍可用 —— 只是失去了关键词那一路的仲裁。
         logger.info("混合检索降级：BM25 路无结果，本次等效纯向量检索 query=%r", query[:20])
     return fused
+
+
+# ============================================================
+# D19：重排（精排）+ 三配置统一入口
+# ============================================================
+
+# 送进重排的候选数 = 融合窗口。PRD §9.3 的链路是 "RRF top20 → rerank → top5"。
+# 为什么是 20 而不是 5：重排的价值在于"从一批候选里挑出更好的 5 条"，
+# 只给它 5 条就等于让它在融合已经砍剩下的结果里重排，能纠正的空间几乎为零。
+# ⚠ 代价是实打实的：20 条 @300 字 ≈ 750~820ms（D18 实测），
+#   而 top10 约为一半 —— 这个数字就是 D19 唯一的延迟旋钮。
+RERANK_CANDIDATE_K = 20
+
+
+async def retrieve(
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    config: str | None = None,
+) -> list[dict]:
+    """
+    检索统一入口：按配置走三条链路之一（D19 的验收点）。
+
+    端到端（入口 → 步骤 → 返回）：
+
+        retrieve("年假有几天")                      # 默认读 settings.retriever_config
+          → 定配置名（调用方显式传入优先）
+          │
+          ├─ pure_vector    → search(query, top_k)                     向量单路
+          ├─ hybrid         → hybrid_search(query, top_k)              两路融合（窗口=top_k）
+          └─ hybrid_rerank  → hybrid_search(query, RERANK_CANDIDATE_K) ← 窗口 20
+                              → rerank(query, fused, top_n=top_k)      ← 精排取 5
+          → 返回 list[dict]（三条路**键名一致**）
+
+    返回结构三态一致（这是"配置化"能成立的前提）：
+      公共键：chunk_id / content / source / page_ref / similarity / retriever
+      各自附加：
+        pure_vector   无附加
+        hybrid        rrf_score / vector_rank / bm25_rank / bm25_score
+        hybrid_rerank 以上全部 + rerank_score（降级时为 None）
+      只读 `similarity` 的上层消费者（工具层的引用标注、citation 收集器）
+      因此对三条链路都不用改代码。
+
+    降级可归因（本函数最容易被忽略的一段）：
+      `retriever` 字段由**实际走通的路径**决定，不是由配置名决定 ——
+      重排失败时全部标 "hybrid"。评测脚本只要 `group by retriever`
+      就能看出"这次跑 C 配置时有多少条其实是融合序"，
+      不会把降级样本算成重排的成绩。
+
+    Args:
+        query: 用户问题
+        top_k: 返回条数（默认 5，与 PRD §9.5 消融矩阵的 top5 对齐）
+        config: 显式指定策略（评测脚本做消融时用）；None 则读 settings
+    Returns:
+        结果列表，按该策略的相关度降序。
+    Raises:
+        ValueError: config 取值非法（只有 settings 那条路径会被 pydantic 提前拦住，
+                    评测脚本显式传参的路径需要在这里拦 —— 否则一次手滑会把
+                    某一行实验数据悄悄记成另一个配置的）。
+    """
+    name = (config or settings.retriever_config).strip().lower()
+    if name not in RETRIEVER_CONFIGS:
+        raise ValueError(f"未知检索配置：{name!r}，可选 {RETRIEVER_CONFIGS}")
+
+    reranked = False
+
+    if name == "pure_vector":
+        results = await search(query, top_k=top_k)
+
+    elif name == "hybrid":
+        results = await hybrid_search(query, top_k=top_k)
+
+    else:  # hybrid_rerank
+        # 窗口是 RERANK_CANDIDATE_K（20），不是 top_k（5）—— 见常量处的说明
+        fused = await hybrid_search(query, top_k=RERANK_CANDIDATE_K)
+        results, reranked = await rerank(query, fused, top_n=top_k)
+
+        # 按**实际走通的路径**打标：降级时是 "hybrid"，不是 "hybrid_rerank"。
+        # 同时把 rerank_score 补齐为 None，让 C 配置的键集恒定
+        # （上层做 `item.get("rerank_score")` 之外的直接下标时不会 KeyError）。
+        for item in results:
+            item["retriever"] = "hybrid_rerank" if reranked else "hybrid"
+            item.setdefault("rerank_score", None)
+
+    logger.info(
+        "检索完成 config=%s reranked=%s 返回=%d query=%r",
+        name, reranked, len(results), query[:20],
+    )
+    return results
