@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D20 · 消融实验（ablation）是什么</title>
+<style>
+:root{
+  --fg:#1f2328; --muted:#5f6570; --line:#e3e6ea; --soft:#f6f7f9;
+  --a:#5f5e5a; --b:#185fa5; --c:#ba7517; --ok:#3b6d11;
+}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;color:var(--fg);
+  font:15px/1.78 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",Arial,sans-serif;}
+.wrap{max-width:900px;margin:0 auto;padding:48px 30px 80px}
+h1{font-size:24px;line-height:1.4;margin:0 0 8px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--muted);font-size:13px;margin:0 0 6px}
+h2{font-size:17px;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:600}
+h3{font-size:15px;margin:26px 0 8px;font-weight:600}
+p{margin:10px 0}
+ul,ol{margin:10px 0;padding-left:22px}
+li{margin:5px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
+  background:var(--soft);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+.lead{background:var(--soft);border-left:3px solid var(--a);border-radius:0 8px 8px 0;padding:14px 18px;margin:18px 0}
+.lead strong{color:#000}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+th{background:var(--soft);font-weight:600;white-space:nowrap}
+td.ctr,th.ctr{text-align:center}
+.yes{color:var(--ok);font-weight:600}
+.no{color:#b4b2a9}
+.tag{display:inline-block;font-family:ui-monospace,Menlo,monospace;font-size:12px;
+  border:1px solid var(--line);border-radius:5px;padding:1px 6px;background:#fff}
+.note{font-size:13px;color:var(--muted);margin:8px 0 0}
+.warn{border-left:3px solid var(--c);background:#fdf8ee;border-radius:0 8px 8px 0;padding:14px 18px;margin:18px 0}
+.warn strong{color:#7a4a05}
+
+/* 归因条形 */
+.chart{margin:20px 0 6px}
+.row{display:grid;grid-template-columns:130px 1fr;align-items:center;gap:14px;margin:12px 0}
+.row .lbl{font-size:13px;text-align:right;color:var(--fg)}
+.row .lbl small{display:block;color:var(--muted);font-size:12px;font-family:ui-monospace,Menlo,monospace}
+.track{display:flex;align-items:center;height:30px}
+.seg{height:30px;display:flex;align-items:center;justify-content:center;
+  font-size:12px;color:#fff;white-space:nowrap;overflow:hidden}
+.seg.base{background:#b4b2a9;border-radius:6px 0 0 6px}
+.seg.bm25{background:var(--b);border-radius:0 6px 6px 0}
+.seg.rr{background:var(--c);border-radius:0 6px 6px 0}
+.seg.only{background:#b4b2a9;border-radius:6px}
+.delta{margin-left:12px;font-size:12.5px;white-space:nowrap}
+.delta.d-b{color:var(--b);font-weight:600}
+.delta.d-c{color:var(--c);font-weight:600}
+.delta.d-none{color:var(--muted)}
+.axis{margin:4px 0 0 144px;font-size:12px;color:var(--muted)}
+.legend{font-size:12.5px;color:var(--muted);margin-left:144px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 5px 0 14px;vertical-align:middle}
+.foot{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);
+  font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>消融实验（ablation study）是什么</h1>
+<p class="sub">AgentForge-Lite · D20 评测方法论 · 名词解释卡</p>
+<p class="sub">本文件是教学用图，口径与当天教程一致；不占教程 §1–§7 编号。</p>
+
+<h2>1 · 词源与一句话定义</h2>
+<p>ablation 源自拉丁语 <em>ablatio</em>（带走、切除）。医学上就是"切除"——心脏<b>射频消融术</b>，用高频电流把异常传导通路烧掉。</p>
+<div class="lead">
+<p><strong>借到机器学习 / 系统评测里，就一句话：把系统里的某个部件拿掉，重测一遍，看性能掉多少。掉掉的那部分，就是这个部件的净贡献。</strong></p>
+<p class="note">这层含义叫 <b>归因（attribution）</b>——把一个总效果拆到各个部件头上。</p>
+</div>
+
+<h2>2 · 为什么非做不可</h2>
+<p>因为"我加了个组件"本身<b>不构成证据</b>。加了可能更好、可能没变、也可能更差。</p>
+<p>尤其对重排：D19 实测它带来 <b>759 ms 净成本、176.91 倍</b>的耗时。若它只换来 0.5% 的提升，那它就是<b>负资产</b>，应该砍掉。不做消融，你永远不知道，只能说"感觉好像更准了"。</p>
+
+<h2>3 · 两种等价写法（别被名字绕晕）</h2>
+<table>
+<tr><th>写法</th><th>做法</th><th>叙事方向</th></tr>
+<tr><td><b>移除式</b>（经典消融）</td><td>从最全的 C 出发逐个拿掉：C → B → A</td><td>看"掉"多少</td></tr>
+<tr><td><b>叠加式</b>（增量）</td><td>从 A 出发逐个加上：A → B → C</td><td>看"涨"多少</td></tr>
+</table>
+<p><b>两者的 Δ 完全一样</b>，只是叙述方向相反。AgentForge 用的是 A / B / C <b>并列跑</b>，等价于叠加式的三档。</p>
+
+<h2>4 · 在本项目里的具体形态</h2>
+<p>唯一变化的变量是 <code>settings.retriever_config</code>。</p>
+<table>
+<tr>
+  <th>配置</th>
+  <th class="ctr">向量检索</th>
+  <th class="ctr">BM25</th>
+  <th class="ctr">RRF 融合</th>
+  <th class="ctr">bge-reranker</th>
+  <th>这一档测什么</th>
+</tr>
+<tr>
+  <td><b>A</b> <span class="tag">pure_vector</span></td>
+  <td class="ctr yes">✓</td><td class="ctr no">—</td><td class="ctr no">—</td><td class="ctr no">—</td>
+  <td><b>基准线</b>（baseline / 对照组）</td>
+</tr>
+<tr>
+  <td><b>B</b> <span class="tag">hybrid</span></td>
+  <td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr no">—</td>
+  <td><b>Δ(B−A)</b> = BM25 + RRF 的净贡献</td>
+</tr>
+<tr>
+  <td><b>C</b> <span class="tag">hybrid_rerank</span></td>
+  <td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr yes">✓</td>
+  <td><b>Δ(C−B)</b> = 重排的净贡献</td>
+</tr>
+</table>
+<p>验收口径（PRD §S2）：<b>C 相对 A ≥ +10%</b>。</p>
+
+<h3>怎么读这三个数</h3>
+<ul>
+<li>Δ(B−A) 很小甚至为负 → BM25 那一路没帮上忙（可能语料里专有名词 / 术语不够多）</li>
+<li>Δ(C−B) 很小甚至为负 → <b>重排是负资产</b>，那 759 ms 该省掉</li>
+<li>三个数<b>都要报</b>，不能只报"C 比 A 高"</li>
+</ul>
+
+<h2>5 · 归因长什么样（示意，非实测）</h2>
+<p class="note">⚠️ 下面的条长是<b>画出来讲道理的，不是跑出来的数</b>。真实数值要等消融脚本全量跑完（50 条 × 3 配置）。</p>
+
+<div class="chart">
+  <div class="row">
+    <div class="lbl">A · pure_vector<small>pure_vector</small></div>
+    <div class="track">
+      <div class="seg base" style="width:52%">基准线</div>
+      <div class="delta d-none">这是对照的 0 点</div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="lbl">B · hybrid<small>hybrid</small></div>
+    <div class="track">
+      <div class="seg base" style="width:52%">A 的部分</div>
+      <div class="seg bm25" style="width:11%">Δ</div>
+      <div class="delta d-b">Δ(B−A)：BM25 + RRF 换来的</div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="lbl">C · hybrid_rerank<small>hybrid_rerank</small></div>
+    <div class="track">
+      <div class="seg base" style="width:52%">A 的部分</div>
+      <div class="seg bm25" style="width:11%">B 增</div>
+      <div class="seg rr" style="width:12%">Δ</div>
+      <div class="delta d-c">Δ(C−B)：重排换来的（代价 759 ms）</div>
+    </div>
+  </div>
+</div>
+<div class="legend">
+  <i style="background:#b4b2a9"></i>向量基线
+  <i style="background:#185fa5"></i>BM25 + RRF
+  <i style="background:#ba7517"></i>bge-reranker
+</div>
+
+<h2>6 · 三个前提，破一个实验就废</h2>
+<ol>
+<li><b>只变一个变量。</b>同一份 50 条评测集、同一个 judge、同样的二值化规则、<b>分母一致</b>——唯一变的就是那三个 config。
+  <br><span class="note">这正是 D19 做「检索配置化」的目的：同一份测试用例要能构建 3 个 build。若直接把重排塞进 <code>search()</code>，B 配置会永久消失，"重排到底有没有用"以后再也答不出来。</span></li>
+<li><b>分母必须一致。</b>今天探针测出的 relay-gpt <b>20% 失败率</b>就是活的反例：某些配置少算几条题，分母一变，三个百分比<b>根本不可比</b>。</li>
+<li><b>Δ 必须显著大于噪声。</b>见下一节。</li>
+</ol>
+
+<h2>7 · 消融和今天测的 ε 是什么关系（关键）</h2>
+<div class="warn">
+<p><strong>消融测的是 Δ；但 Δ 能不能信，取决于测量仪器的噪声 ε。</strong></p>
+<p class="note">如果"差 4 条题"本来就是 judge 自己抖出来的，那"提升 10%"这个结论不成立。
+只看 Δ 不看 ε，等于用一把刻度乱跳的尺子量长度。</p>
+</div>
+<p>而今天探针第 1 轮的教训正好是反面：<b>连 ε 本身都会假报 0</b> —— 因为样本全落在 5 分或 ≤3 分，
+<b>阈值带（3.5 ~ 4.5）是空的</b>，翻转概率必然为 0，与 judge 稳不稳无关。</p>
+<p>所以探针第 2 轮加梯度样本 <b>G1~G7</b>（G3 / G4 / G5 三个 ★ 样本专门压在阈值带上），
+把样本打进 correctness ≈ 4 附近。只有这一步做完，ε 与噪声地板才是可信的。</p>
+
+<h2>8 · 别和 A/B 测试搞混</h2>
+<table>
+<tr><th></th><th>消融实验</th><th>A/B 测试</th></tr>
+<tr><td><b>环境</b></td><td>离线、固定评测集</td><td>线上、真实用户分流</td></tr>
+<tr><td><b>看什么</b></td><td>检索 / 回答<b>质量指标</b></td><td><b>业务指标</b>（点击、留存）</td></tr>
+<tr><td><b>目的</b></td><td><b>归因</b>：是哪个部件带来的提升</td><td><b>决策</b>：新版本要不要全量上线</td></tr>
+</table>
+<p>我们做的是前者。</p>
+
+<div class="foot">
+AgentForge-Lite · docs/tutorials/D20-消融实验说明.html<br>
+配套阅读：D20-术语卡.md（名词定义）· D20-探针结果-第1轮.md（ε 实测）
+</div>
+
+</div>
+</body>
+</html>
