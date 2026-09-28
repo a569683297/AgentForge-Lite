@@ -10,6 +10,9 @@ D10 端到端验证：Agent 是否自己决定调用检索工具
 不改生产代码，跑完即失效。
 
 用法：uv run python -m scripts.d10_agent_rag_verify
+
+⚠ 2026-09-28 改：清理范围自限（原先调 delete_all_documents() 清空全库，
+   会删光 D21 的长期语料）。现在按 VERIFY_PREFIX 前缀删除。
 """
 
 import asyncio
@@ -17,7 +20,14 @@ import uuid
 
 import app.services.agent_service as agent_module
 from app.services.agent_service import run_agent
-from app.services.document_service import delete_all_documents, ingest_texts
+from app.services.document_service import (
+    count_documents_by_prefix,
+    delete_documents_by_prefix,
+    ingest_texts,
+)
+
+# 本脚本造的文档统一带此前缀 —— 既是"这批数据归我管"的标记，也是清理边界
+VERIFY_PREFIX = "d10-agent-rag"
 
 # 刻意使用「模型不可能知道的虚构事实」：
 # 回答正确 = 确实查了文档，而不是模型编的。
@@ -49,10 +59,19 @@ async def _spy_execute_tool(name: str, arguments: dict) -> str:
 agent_module.execute_tool = _spy_execute_tool
 
 
+async def cleanup_corpus() -> None:
+    """跑完把自己的语料收干净 —— 别给 D22/D23 的检索评测留下会命中的垃圾。"""
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    print(f"\n（已清理本脚本语料：{VERIFY_PREFIX}* 残留={left}）")
+    if left:
+        raise RuntimeError(f"清理不干净：{VERIFY_PREFIX}* 还剩 {left} 份")
+
+
 async def main() -> None:
-    print(f"{'='*64}\n准备知识库\n{'='*64}")
-    await delete_all_documents()
-    _, n = await ingest_texts(DOCS, filename="d10-e2e")
+    print(f"{'='*64}\n准备知识库（只清本脚本自己的数据）\n{'='*64}")
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    _, n = await ingest_texts(DOCS, filename=VERIFY_PREFIX)
     print(f"✅ 入库 {len(DOCS)} 篇 → {n} 个切片\n")
 
     for index, (question, keyword, expect_tool) in enumerate(CASES, start=1):
@@ -84,6 +103,7 @@ async def main() -> None:
                   f"回答{'包含' if hit else '未包含'}文档关键词「{keyword}」")
         print()
 
+    await cleanup_corpus()
     print(f"{'='*64}\n完成。可到 Langfuse 查看本次 trace 的 tool 调用详情。\n{'='*64}")
 
 

@@ -26,17 +26,26 @@ import uuid
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services.document_service import delete_all_documents, ingest_texts
+from app.services.document_service import (
+    count_documents_by_prefix,
+    delete_documents_by_prefix,
+    ingest_texts,
+)
 
+# 本脚本造的文档统一带此前缀（2026-09-28 新增）—— 清理时的作用域边界。
+# 原先调 delete_all_documents() 清空全库，会删光 D21 的长期语料。
+# ⚠ 与 d11_citation_verify 用**不同的**前缀：两个脚本各管各的数据，
+#   否则后跑的会把先跑的产物一起收走（虽然内容一样，但作用域不清）。
+VERIFY_PREFIX = "d11-http"
 # 与 d11_citation_verify 用同一批虚构事实，保证两个脚本对同一份知识库做验证
 DOCS = [
     (
-        "d11-alpha.md",
+        f"{VERIFY_PREFIX}-alpha.md",
         "公司内部项目管理规定：代号为「琥珀」的项目由星河算法组负责，项目周期两年，"
         "负责人为林工。该项目组直接向 CTO 汇报。",
     ),
     (
-        "d11-beta.md",
+        f"{VERIFY_PREFIX}-beta.md",
         "公司内部项目管理规定：代号为「翡翠」的项目由山海基础组负责，项目周期一年，"
         "负责人为周工。该项目组直接向 CTO 汇报。",
     ),
@@ -206,8 +215,8 @@ def case_h4_response_shape(client: TestClient) -> bool:
 
 async def prepare_kb() -> None:
     """播种知识库，让本脚本可以独立运行。"""
-    section("准备知识库（本脚本自己播种）")
-    await delete_all_documents()
+    section("准备知识库（本脚本自己播种，只清自己的数据）")
+    await delete_documents_by_prefix(VERIFY_PREFIX)
     for filename, text in DOCS:
         _, count = await ingest_texts([text], filename=filename)
         print(f"  入库 {filename} → {count} 个切片")
@@ -221,6 +230,15 @@ async def prepare_kb() -> None:
     await engine.dispose()
 
 
+async def cleanup_kb() -> None:
+    """跑完把自己的语料收干净 —— 别给 D22/D23 的检索评测留下会命中的垃圾。"""
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    print(f"\n（已清理本脚本语料：{VERIFY_PREFIX}* 残留={left}）")
+    if left:
+        raise RuntimeError(f"清理不干净：{VERIFY_PREFIX}* 还剩 {left} 份")
+
+
 def main() -> None:
     asyncio.run(prepare_kb())
 
@@ -232,6 +250,18 @@ def main() -> None:
         results.append(("H2 多轮沿用会话", case_h2_reuse_session(client)))
         results.append(("H3 参数校验", case_h3_validation(client)))
         results.append(("H4 响应结构", case_h4_response_shape(client)))
+
+        # ⚠ 清理必须**在 TestClient 自己的 loop 内**完成（2026-09-28 补）。
+        #   第一版写成 `asyncio.run(cleanup_kb())`（出了 with 块再收尾），
+        #   结果是 exit=1：新 loop 拿到绑在 TestClient loop 上的连接 →
+        #   `got Future ... attached to a different loop`。
+        #   改成在块内 dispose 之后，又变成 exit=134（SIGABRT，
+        #   `libc++abi: recursive_mutex lock failed`）—— 功能全对、"汇总 4/4 通过"
+        #   都打出来了，崩在解释器退出阶段：多起了一个 loop 之后，
+        #   某些 C 层（tokenizer / onnxruntime）的线程在析构时被打断。
+        #   → 结论：**这里的活别另起 loop**，用 portal 把它送回 TestClient 的 loop 执行。
+        #   这与 d14_sessions_verify 用 client.portal.call(engine.dispose) 是同一条纪律。
+        client.portal.call(cleanup_kb)
 
     section("汇总")
     for name, ok in results:

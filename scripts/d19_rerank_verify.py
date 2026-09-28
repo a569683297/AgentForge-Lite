@@ -35,7 +35,7 @@ import app.tools.retrieval as tool_module
 from app.config import RETRIEVER_CONFIGS, Settings, settings
 from app.core.citation import get_sources, reset_sources
 from app.core.db import async_session_factory, engine
-from app.services.document_service import delete_document, ingest_texts
+from app.services.document_service import delete_documents_by_prefix, ingest_texts
 from app.services.rerank_service import rerank
 from app.services.retrieval_service import hybrid_search, retrieve, search, search_keywords
 from app.tools.retrieval import search_documents
@@ -470,13 +470,14 @@ async def section_g(ck: Checker, query: str) -> None:
 # 主流程
 # ============================================================
 async def cleanup() -> int:
-    async with async_session_factory() as session:
-        rows = (await session.execute(
-            text("SELECT id FROM documents WHERE filename LIKE :p"), {"p": f"{VERIFY_PREFIX}%"}
-        )).all()
-    for row in rows:
-        await delete_document(row.id)
-    return len(rows)
+    """把本脚本造的语料删掉，返回删除条数。
+
+    2026-09-28 改：统一走 `document_service.delete_documents_by_prefix`。
+    原先这里手写 `LIKE '{prefix}%'` —— 前缀里一旦出现下划线就会**误伤**别的
+    文档（`_` 在 LIKE 里是"任意单个字符"），而且删多了不报错。
+    收口到一个函数，就不用每个脚本各自记得转义这件事。
+    """
+    return await delete_documents_by_prefix(VERIFY_PREFIX)
 
 
 async def main() -> None:

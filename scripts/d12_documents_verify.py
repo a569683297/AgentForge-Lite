@@ -44,14 +44,21 @@ from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.services.document_service import (
     count_chunks,
+    count_documents_by_prefix,
     create_document,
-    delete_all_documents,
+    delete_documents_by_prefix,
 )
 from app.services.embedding_service import embed_texts
 from app.services.retrieval_service import search
 
 # 虚构事实：模型不可能知道，命中即证明真的走了检索
 FAKE_FACT = "「玄鸟」项目由数据治理组负责，负责人为秦工，项目周期十八个月。"
+
+# 本脚本造的全部文档都带此前缀（2026-09-28 新增）—— 清理时的作用域边界。
+# 原先调 delete_all_documents() 清空全库，会删光 D21 的长期语料。
+# 之所以不能像别的脚本那样只给一个文件名加前缀：本脚本要造 9 份不同文件
+# （四种格式 + 失败路径 + 待删除），**没有共同前缀就没法把清理范围框住**。
+VERIFY_PREFIX = "d12"
 
 
 def section(title: str) -> None:
@@ -145,11 +152,11 @@ async def case_upload_formats(client: AsyncClient) -> tuple[bool, dict]:
     ok = True
 
     cases = [
-        ("formats.md", "文档格式说明：公司所有内部文档统一存放在知识库中。".encode("utf-8"), "md"),
-        ("gbk.txt", "员工考勤规定：上班时间为上午九点，迟到超过三十分钟记一次迟到。".encode("gbk"), "txt(GBK)"),
-        ("policy.docx", build_docx(f"产品规划：{FAKE_FACT}"), "docx"),
-        ("report.pdf", build_text_pdf(), "pdf（两页，应带页码）"),
-        ("scanned.pdf", build_blank_pdf(), "PDF 无文字层（应失败）"),
+        ("d12-formats.md", "文档格式说明：公司所有内部文档统一存放在知识库中。".encode("utf-8"), "md"),
+        ("d12-gbk.txt", "员工考勤规定：上班时间为上午九点，迟到超过三十分钟记一次迟到。".encode("gbk"), "txt(GBK)"),
+        ("d12-policy.docx", build_docx(f"产品规划：{FAKE_FACT}"), "docx"),
+        ("d12-report.pdf", build_text_pdf(), "pdf（两页，应带页码）"),
+        ("d12-scanned.pdf", build_blank_pdf(), "PDF 无文字层（应失败）"),
     ]
     for filename, data, label in cases:
         response = await upload(client, filename, data)
@@ -199,12 +206,12 @@ async def case_bad_input(client: AsyncClient) -> bool:
     section("V6-V7. 非法上传")
     ok = True
 
-    bad_ext = await upload(client, "virus.exe", b"MZ\x90\x00")
+    bad_ext = await upload(client, "d12-virus.exe", b"MZ\x90\x00")
     hit = bad_ext.status_code == 400
     ok = ok and hit
     print(f"  [{'✅' if hit else '❌'}] 不支持的扩展名 → HTTP={bad_ext.status_code} detail={bad_ext.json().get('detail')}")
 
-    too_big = await upload(client, "big.txt", b"0" * (21 * 1024 * 1024))
+    too_big = await upload(client, "d12-big.txt", b"0" * (21 * 1024 * 1024))
     hit = too_big.status_code == 400
     ok = ok and hit
     print(f"  [{'✅' if hit else '❌'}] 超大文件(21MB)   → HTTP={too_big.status_code} detail={too_big.json().get('detail')}")
@@ -215,7 +222,7 @@ async def case_bad_input(client: AsyncClient) -> bool:
 async def case_initial_status() -> tuple[bool, uuid.UUID]:
     """V8：起点状态是 processing（绕开 HTTP，因为没有后台任务派发）。"""
     section("V8. 起点状态（直接建记录，不派后台任务）")
-    document_id = await create_document(filename="pending.md", file_type="md")
+    document_id = await create_document(filename="d12-pending.md", file_type="md")
     async with async_session_factory() as session:
         document = await session.get(Document, document_id)
         status_value = document.status if document else None
@@ -240,11 +247,11 @@ async def case_list(client: AsyncClient) -> bool:
     by_name = {doc["filename"]: doc for doc in documents}
     checks = {
         "四种格式都在列表里": all(
-            name in by_name for name in ("formats.md", "gbk.txt", "policy.docx", "report.pdf")
+            name in by_name for name in ("d12-formats.md", "d12-gbk.txt", "d12-policy.docx", "d12-report.pdf")
         ),
-        "失败文档状态为 failed": by_name.get("scanned.pdf", {}).get("status") == DocumentStatus.FAILED,
-        "成功文档状态为 ready": by_name.get("formats.md", {}).get("status") == DocumentStatus.READY,
-        "processing 文档也在列表里": by_name.get("pending.md", {}).get("status") == DocumentStatus.PROCESSING,
+        "失败文档状态为 failed": by_name.get("d12-scanned.pdf", {}).get("status") == DocumentStatus.FAILED,
+        "成功文档状态为 ready": by_name.get("d12-formats.md", {}).get("status") == DocumentStatus.READY,
+        "processing 文档也在列表里": by_name.get("d12-pending.md", {}).get("status") == DocumentStatus.PROCESSING,
     }
     for label, hit in checks.items():
         print(f"  [{'✅' if hit else '❌'}] {label}")
@@ -258,7 +265,7 @@ async def case_search_after_upload() -> bool:
     print(f"  检索「玄鸟项目是谁负责的」→ {len(results)} 条")
     for item in results:
         print(f"    来源={item['source']}  页码={item['page_ref']}  相似度={item['similarity']}")
-    hit = any("玄鸟" in item["content"] and item["source"] == "policy.docx" for item in results)
+    hit = any("玄鸟" in item["content"] and item["source"] == "d12-policy.docx" for item in results)
     print(f"  [{'✅' if hit else '❌'}] 命中 docx 里上传的虚构事实")
     return hit
 
@@ -309,7 +316,7 @@ async def case_delete(client: AsyncClient) -> bool:
     section("V12. 删除与级联")
     ok = True
 
-    created = await upload(client, "to-delete.md", "这是一份待删除的文档，用于验证级联删除。".encode())
+    created = await upload(client, "d12-to-delete.md", "这是一份待删除的文档，用于验证级联删除。".encode())
     document_id = created.json()["id"]
     chunks_before = await count_chunks(uuid.UUID(document_id))
     print(f"  删除前：文档 {document_id} 有 {chunks_before} 个切片")
@@ -340,11 +347,24 @@ async def case_delete(client: AsyncClient) -> bool:
     return ok
 
 
-async def main() -> None:
-    print(f"{'=' * 64}\n清空知识库（保证本次验证干净）\n{'=' * 64}")
-    deleted = await delete_all_documents()
-    print(f"  已清空 {deleted} 份文档（切片由外键级联删除）")
+async def cleanup_corpus() -> None:
+    """跑完把自己的语料收干净 —— 别给 D22/D23 的检索评测留下会命中的垃圾。
 
+    ⚠ 本脚本的 V1-V5 上传了 5 份、V8 手工建了 1 份，V12 只删了其中 1 份。
+    剩下的如果不收，就会一直躺在知识库里被检索到。
+    """
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    print(f"\n（已清理本脚本语料：{VERIFY_PREFIX}* 残留={left}）")
+    if left:
+        raise RuntimeError(f"清理不干净：{VERIFY_PREFIX}* 还剩 {left} 份")
+
+
+async def main() -> None:
+    print(f"{'=' * 64}\n清理本脚本自己的数据（保证本次验证干净）\n{'=' * 64}")
+    deleted = await delete_documents_by_prefix(VERIFY_PREFIX)
+    print(f"  已清理 {deleted} 份本脚本的文档（切片由外键级联删除）")
+    print(f"  ℹ 前缀之外的既有文档（含 D21 长期语料）不受影响")
     results: list[tuple[str, bool]] = []
 
     transport = ASGITransport(app=app)
@@ -363,6 +383,9 @@ async def main() -> None:
         results.append(("V10 上传后可检索", await case_search_after_upload()))
         results.append(("V11 只检索 ready 切片", await case_only_ready_is_searchable(pending_id)))
         results.append(("V12-V13 删除与级联", await case_delete(client)))
+
+    # 跑完把自己的语料收干净 —— 别给 D22/D23 的检索评测留下会命中的垃圾
+    await cleanup_corpus()
 
     section("汇总")
     for name, passed in results:

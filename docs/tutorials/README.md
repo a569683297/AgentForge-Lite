@@ -55,12 +55,25 @@ PRD §10 把 `eval_cases` / `eval_runs` 写成「原有表（不变）」，但�
 `documents` / `document_chunks` / `messages` / `sessions` **四张**。
 D21 的隐藏工作量的第一项是**先把这两张表建出来**。
 
-⚠ **D21 引入长期语料后暴露一个隐患**：7 个历史验证脚本（`d9_retrieval_verify` /
-`d10_tool_verify` / `d10_agent_rag_verify` / `d11_citation_verify` / `d11_http_verify` /
-`d12_documents_verify` / `d14_sessions_verify`）都调用 `delete_all_documents()`，
-**跑一次全量回归就会把 51 片语料删光**，而且不报错。
-当前对策：回归后重跑 `d21_seed` 重建（**指纹不变**，见下）。
-正确修法（待做）：清理函数按范围自限（`delete_documents_by_prefix`）。
+⚠ **D21 引入长期语料后暴露一个隐患 —— 当天已修**：9 个历史验证脚本
+（`d9_retrieval_verify` / `d10_tool_verify` / `d10_agent_rag_verify` / `d11_citation_verify` /
+`d11_http_verify` / `d12_documents_verify` / `d14_sessions_verify` / `d16_bm25_verify` /
+`d17_hybrid_verify` / `d19_rerank_verify`）原先都是用 `delete_all_documents()`
+或手写 `LIKE '{prefix}%'` 做清理 —— **跑一次全量回归就把 51 片语料删光**，而且不报错。
+
+修法（三层）：
+1. 新增 `delete_documents_by_prefix()` / `count_documents_by_prefix()`，清理按前缀自限；
+2. `delete_all_documents()` 加**硬闸**（`ALLOW_DELETE_ALL_DOCUMENTS=1` 才放行，否则抛错）——
+   改调用点只解决今天已知的几处，硬闸解决"明天第 10 个脚本"；
+3. 每个脚本**两头都按同一前缀收**（开头清保证幂等 + 结尾清**并断言残留 0**）——
+   只删别人的不够，`d16`/`d14` 原先还**留下自己的**（`d16-bm25-verify-*` 每跑一次留 4 份），
+   而残留会污染 D22/D23 的检索评测。
+
+验收：`scripts/d21_delete_scope_verify.py` **27/27**；**跑完全量回归后库里恰好只剩 8 篇语料**。
+⚠ 回归那次是 18 个 exit=0 + 1 个**退出期偶发 ABORT**（`d10_agent_rag_verify`，
+`libc++abi: recursive_mutex lock failed`，崩在所有输出与清理都完成之后、连跑 3 次为 0）——
+断言与数据全部正确，但**别记成"19/19 稳定通过"**。D23 要用退出码判"这轮过没过"，这个偶发必须先定性。
+详见 [`D21-评测集与语料.md`](D21-评测集与语料.md) §7「踩坑③补记」。
 
 ⚠ **评测集指纹（冻结依据）**：
 `a7797b06e2fa8f824a2db3f1254fbebc01c7e4cf3b117ad793677706c0b90afe`

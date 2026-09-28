@@ -20,10 +20,12 @@ D17 验证脚本：RRF 混合检索
 
 import asyncio
 
-from sqlalchemy import text
-
-from app.core.db import async_session_factory, engine
-from app.services.document_service import delete_document, ingest_texts
+from app.core.db import engine
+from app.services.document_service import (
+    count_documents_by_prefix,
+    delete_documents_by_prefix,
+    ingest_texts,
+)
 from app.services.retrieval_service import (
     HYBRID_CANDIDATE_K,
     RRF_K,
@@ -459,14 +461,11 @@ async def main() -> None:
     section_a(ck)
 
     # 清掉上次残留的同名测试文档，保证幂等
-    async with async_session_factory() as session:
-        stale = (await session.execute(text(
-            "SELECT id, filename FROM documents WHERE filename LIKE :p"
-        ), {"p": f"{VERIFY_PREFIX}%"})) .all()
-    for row in stale:
-        await delete_document(row.id)
+    # 2026-09-28 改：统一走 delete_documents_by_prefix（原先手写 SQL + 逐条删），
+    # 顺带拿到 LIKE 通配符转义 —— 前缀里出现下划线时手写 SQL 会误伤别的文档。
+    stale = await delete_documents_by_prefix(VERIFY_PREFIX)
     if stale:
-        print(f"（已清理上次残留的 {len(stale)} 份测试文档）\n")
+        print(f"（已清理上次残留的 {stale} 份测试文档）\n")
 
     # 造语料（走真实写路径，顺带验证 content_tokens 在入库时被算出来）
     for filename, content in VERIFY_DOCS.items():
@@ -481,13 +480,12 @@ async def main() -> None:
     await section_e(ck)
 
     # 收尾：删掉本脚本造的语料（避免污染后续 BM25 的语料统计量 N/df/avgdl）
-    async with async_session_factory() as session:
-        rows = (await session.execute(text(
-            "SELECT id FROM documents WHERE filename LIKE :p"
-        ), {"p": f"{VERIFY_PREFIX}%"})) .all()
-    for row in rows:
-        await delete_document(row.id)
-    print(f"（已清理本脚本造的 {len(rows)} 份测试文档）")
+    # + 断言真的收干净了（2026-09-28 补：原先只删不断言，"删了 0 份"也会打印
+    #   "已清理"，属于"做了但没人验证做过"）
+    removed = await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    print(f"（已清理本脚本造的 {removed} 份测试文档）")
+    ck.check(left == 0, f"Z1 本脚本语料已收干净（残留 {left}）")
 
     await engine.dispose()
     ck.summary()

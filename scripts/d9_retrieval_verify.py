@@ -6,16 +6,29 @@ D9 验证脚本：向量检索（RAG 基础）
 3. 切片：长文本正确切片且有重叠
 
 用法：uv run python -m scripts.d9_retrieval_verify
+
+⚠ 2026-09-28 改：清理范围自限
+    原先调 `delete_all_documents()`（清空全库）。D21 建了长期语料后，
+    跑一次本脚本就会把评测集的依据删光，而本脚本**只想清掉自己造的那一篇**。
+    现在改为按 `VERIFY_PREFIX` 前缀删除，作用域自限。
 """
 
 import asyncio
 
 from app.core.logging import logger
-from app.services.document_service import delete_all_documents, ingest_texts
+from app.services.document_service import (
+    count_documents_by_prefix,
+    delete_documents_by_prefix,
+    ingest_texts,
+)
 from app.services.retrieval_service import (
     search,
     split_text,
 )
+
+# 本脚本造的全部文档都用这个前缀命名 —— 既是"这批数据归我管"的标记，
+# 也是清理时的作用域边界。约定见 document_service.delete_documents_by_prefix。
+VERIFY_PREFIX = "d09-retrieval"
 
 # 测试语料：三段不同主题的文档（刻意用不同的词汇表述）
 DOCS = [
@@ -41,8 +54,8 @@ async def case_chunk() -> None:
 async def case_retrieval() -> None:
     """用例 1-2：入库 + 语义检索。"""
     print(f"\n{'='*58}\n用例 1：文档入库\n{'='*58}")
-    await delete_all_documents()          # 先清空，保证验证干净
-    _, n = await ingest_texts(DOCS, filename="test-docs")
+    await delete_documents_by_prefix(VERIFY_PREFIX)   # 只清本脚本自己的数据
+    _, n = await ingest_texts(DOCS, filename=VERIFY_PREFIX)
     print(f"✅ 入库 {len(DOCS)} 篇文档 → {n} 个切片")
 
     # 关键验证：query 用词与文档完全不同，但语义相关
@@ -67,9 +80,25 @@ async def case_retrieval() -> None:
         print(f"  {'✅ 命中' if hit else '❌ 未命中'}（top1 主题{'正确' if hit else '错误'}）")
 
 
+async def cleanup_corpus() -> None:
+    """跑完把自己的语料收干净。
+
+    为什么必须收（2026-09-28）：「清理」不只是别删别人的，还包括**别留下自己的**。
+    残留的测试语料会躺在同一个知识库里，被 D22/D23 的检索评测捞到 ——
+    评测题问的是 D21 语料的内容，却可能被这些测试文档命中，成绩就没法解释了。
+    D19 早就是这么做的（它的 H1 断言就是这条），本脚本对齐。
+    """
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    print(f"\n（已清理本脚本语料：{VERIFY_PREFIX}* 残留={left}）")
+    if left:
+        raise RuntimeError(f"清理不干净：{VERIFY_PREFIX}* 还剩 {left} 份")
+
+
 async def main() -> None:
     await case_chunk()
     await case_retrieval()
+    await cleanup_corpus()
     print(f"\n{'='*58}\n全部用例完成。\n{'='*58}")
 
 

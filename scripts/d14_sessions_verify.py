@@ -42,6 +42,11 @@ TEST_SID = uuid.uuid5(uuid.NAMESPACE_DNS, "agentforge.d14.verify")
 CONTROL_SID = uuid.uuid5(uuid.NAMESPACE_DNS, "agentforge.d14.verify.control")
 TEST_TITLE_HINT = "帮我查一下上个季度的营收情况"
 
+# 本脚本播种的知识库文档名（2026-09-28 新增）。
+# 它既是"这批数据归我管"的标记，也是**清理时的作用域边界** ——
+# 原先这里调 delete_all_documents() 清空全库，会把 D21 的长期语料一起删掉。
+VERIFY_PREFIX = "d14-verify"
+
 # 一轮完整对话的三条消息：user → assistant(带 tool_calls) → tool
 TURN_MESSAGES = [
     {"role": "user", "content": "上周的营收是多少？"},
@@ -200,13 +205,21 @@ async def prepare_corpus() -> None:
     为什么要在脚本里做：B 段的「有工具路径」依赖检索能真的命中，
     而知识库内容会随别的验证脚本（d10/d11/d12）跑动而变 ——
     靠"跑之前库里恰好有什么"就是隐性依赖，会变成随机假失败。
+
+    ⚠ 2026-09-28 改：清理范围自限
+        原先调 `delete_all_documents()` 清空全库 —— 这个脚本**只想清掉自己
+        那篇 `d14-verify`**，却会把 D21 的 8 篇长期语料一起删光。
+        现在改为按 `VERIFY_PREFIX` 前缀删除。
+        （顺带：d10/d11/d12 也已改成按前缀删除，所以上面说的
+          "会被别的脚本跑动而变"这个隐性依赖，实际上被这轮改动削弱了 ——
+          但**保留自己播种**，脚本仍然自包含，不依赖执行顺序。）
     """
     from app.core.db import engine
-    from app.services.document_service import delete_all_documents, ingest_texts
+    from app.services.document_service import delete_documents_by_prefix, ingest_texts
 
     try:
-        await delete_all_documents()
-        _, n = await ingest_texts(RAG_DOCS, filename="d14-verify")
+        await delete_documents_by_prefix(VERIFY_PREFIX)
+        _, n = await ingest_texts(RAG_DOCS, filename=VERIFY_PREFIX)
         print(f"[准备] 知识库语料已更新 → {n} 个切片")
     finally:
         # 与 A 段同理：本 loop 用完就把连接池关掉，
@@ -389,6 +402,36 @@ async def run_db_layer(records: list[dict]) -> None:
               f"assistant 总计 {sum(1 for r in rows if r.role == 'assistant')} 条"
               f"（修复前无工具轮 2 条 / 有工具轮 3 条）")
 
+    # 本 loop 的活干完了，立刻把连接池关掉（本脚本的固定纪律，见 main 的注释）。
+    # ⚠ 这一行是 2026-09-28 加的：cleanup_corpus() 会用 asyncio.run 另起一个 loop，
+    #   如果这里不 dispose，那个新 loop 会拿到绑在本 loop 上的连接 →
+    #   `got Future ... attached to a different loop`（实测过，脚本直接 exit=1）。
+    #   同族坑：d11_http_verify 的 TestClient 段、d19 的 C 段。
+    from app.core.db import engine
+
+    await engine.dispose()
+
+
+async def cleanup_corpus() -> None:
+    """跑完把自己的语料收干净（2026-09-28 新增）。
+
+    为什么必须收：「别删别人的」只解决了一半问题，另一半是**别留下自己的**。
+    残留的 `d14-verify` 会一直躺在知识库里被检索到，而 D22/D23 的评测题
+    问的是 D21 那 8 篇语料的内容 —— 被这些测试文档命中，成绩就没法解释了。
+
+    断言走 check() 记入统一汇总，所以清理不干净会让整个脚本非 0 退出。
+    """
+    from app.core.db import engine
+    from app.services.document_service import (
+        count_documents_by_prefix,
+        delete_documents_by_prefix,
+    )
+
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    check("Z1 本脚本语料已收干净（0 残留）", left == 0, f"实际残留={left}")
+    await engine.dispose()
+
 
 def main() -> None:
     # A 部分自己管一个事件循环，并且**在这个循环结束前**关掉连接池
@@ -403,6 +446,10 @@ def main() -> None:
 
     # C 部分再开一个 loop 回库核对（内部会先 dispose 掉 B 留下的死连接）。
     asyncio.run(run_db_layer(records))
+
+    # 跑完把自己的语料收干净（2026-09-28 新增）——
+    # 放在 C 段之后：C 段还要检索，不能提前清掉。
+    asyncio.run(cleanup_corpus())
 
     print(f"\n=== 结果：{len(passed)} 通过 / {len(failed)} 失败 ===")
     if failed:

@@ -24,7 +24,11 @@ import asyncio
 from sqlalchemy import text
 
 from app.core.db import async_session_factory, engine
-from app.services.document_service import delete_document, ingest_texts
+from app.services.document_service import (
+    count_documents_by_prefix,
+    delete_documents_by_prefix,
+    ingest_texts,
+)
 from app.services.retrieval_service import (
     BM25_B,
     BM25_K1,
@@ -236,14 +240,12 @@ async def section_c(ck: Checker) -> None:
     print("=" * 74)
 
     # ---- 清掉上次残留的同名测试文档，保证幂等 ----
-    async with async_session_factory() as session:
-        stale = (await session.execute(text(
-            "SELECT id, filename FROM documents WHERE filename LIKE :p"
-        ), {"p": f"{VERIFY_PREFIX}%"})).all()
-    for row in stale:
-        await delete_document(row.id)
+    # 2026-09-28 改：改用 delete_documents_by_prefix 统一口径（原先是手写 SQL +
+    # 逐条 delete_document）。作用域一样是 VERIFY_PREFIX，只是收口到一处逻辑，
+    # 顺带拿到 LIKE 通配符转义（前缀里出现下划线时手写 SQL 会误伤）。
+    stale = await delete_documents_by_prefix(VERIFY_PREFIX)
     if stale:
-        print(f"  （已清理上次残留的 {len(stale)} 份测试文档）")
+        print(f"  （已清理上次残留的 {stale} 份测试文档）")
 
     # ---- 造数据 ----
     doc_ids: dict[str, str] = {}
@@ -492,6 +494,15 @@ async def main() -> None:
     await section_c(ck)
     await section_d(ck)
     await section_e(ck)
+
+    # ✅ 跑完把自己的语料收干净（2026-09-28 新增）。
+    # 原先只在 C 段开头清"上次残留"，跑完就不管了 —— 结果库里长期躺着
+    # 4 份 d16-bm25-verify-*，会被 D22/D23 的检索评测捞到。
+    # 只删别人的不够，**留下自己的同样是污染**。
+    removed = await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    ck.check(left == 0, f"Z1 本脚本语料已收干净（清 {removed} 份，残留 {left}）")
+
     await engine.dispose()
     ck.summary()
 

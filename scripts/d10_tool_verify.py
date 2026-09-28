@@ -9,12 +9,22 @@ D10 验证脚本：检索工具化 + 同步/异步分流
 4. 反例演示：不改注册表会拿到什么东西（肉眼看清危害）
 
 用法：uv run python -m scripts.d10_tool_verify
+
+⚠ 2026-09-28 改：清理范围自限（原先调 delete_all_documents() 清空全库，
+   会删光 D21 的长期语料）。现在按 VERIFY_PREFIX 前缀删除。
 """
 
 import asyncio
 
-from app.services.document_service import delete_all_documents, ingest_texts
+from app.services.document_service import (
+    count_documents_by_prefix,
+    delete_documents_by_prefix,
+    ingest_texts,
+)
 from app.tools import execute_tool, get_tools_schema, list_tools
+
+# 本脚本造的文档统一带此前缀 —— 既是"这批数据归我管"的标记，也是清理边界
+VERIFY_PREFIX = "d10-tool-verify"
 
 DOCS = [
     "公司年假政策：员工入职满一年后，每年可享受五天带薪休假。"
@@ -74,17 +84,27 @@ async def case_bad_demo() -> None:
     print("\n→ LLM 拿到的是这串内存地址，而不是检索结果；且程序不报错。")
 
 
+async def cleanup_corpus() -> None:
+    """跑完把自己的语料收干净 —— 别给 D22/D23 的检索评测留下会命中的垃圾。"""
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    print(f"\n（已清理本脚本语料：{VERIFY_PREFIX}* 残留={left}）")
+    if left:
+        raise RuntimeError(f"清理不干净：{VERIFY_PREFIX}* 还剩 {left} 份")
+
+
 async def main() -> None:
     await case_registry()
     await case_sync_tool()
 
-    print(f"\n{'='*60}\n准备数据（清空并重新入库）\n{'='*60}")
-    await delete_all_documents()
-    _, n = await ingest_texts(DOCS, filename="d10-verify")
+    print(f"\n{'='*60}\n准备数据（只清本脚本自己的数据，再重新入库）\n{'='*60}")
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    _, n = await ingest_texts(DOCS, filename=VERIFY_PREFIX)
     print(f"✅ 入库 {len(DOCS)} 篇 → {n} 个切片")
 
     await case_async_tool()
     await case_bad_demo()
+    await cleanup_corpus()
     print(f"\n{'='*60}\n全部用例完成。\n{'='*60}")
 
 

@@ -124,14 +124,17 @@ async def case_a3_concurrent_isolation() -> bool:
 # ============================================================
 # B. 端到端层
 # ============================================================
+# 本脚本造的文档统一带此前缀（2026-09-28 新增）—— 清理时的作用域边界。
+# 原先调 delete_all_documents() 清空全库，会删光 D21 的长期语料。
+VERIFY_PREFIX = "d11-citation"
 DOCS = [
     (
-        "d11-alpha.md",
+        f"{VERIFY_PREFIX}-alpha.md",
         "公司内部项目管理规定：代号为「琥珀」的项目由星河算法组负责，项目周期两年，"
         "负责人为林工。该项目组直接向 CTO 汇报。",
     ),
     (
-        "d11-beta.md",
+        f"{VERIFY_PREFIX}-beta.md",
         "公司内部项目管理规定：代号为「翡翠」的项目由山海基础组负责，项目周期一年，"
         "负责人为周工。该项目组直接向 CTO 汇报。",
     ),
@@ -139,13 +142,27 @@ DOCS = [
 
 
 async def prepare_kb() -> None:
-    section("准备知识库")
-    from app.services.document_service import delete_all_documents, ingest_texts
+    section("准备知识库（只清本脚本自己的数据）")
+    from app.services.document_service import delete_documents_by_prefix, ingest_texts
 
-    await delete_all_documents()
+    await delete_documents_by_prefix(VERIFY_PREFIX)
     for filename, text in DOCS:
         _, n = await ingest_texts([text], filename=filename)
         print(f"  入库 {filename} → {n} 个切片")
+
+
+async def cleanup_kb() -> None:
+    """跑完把自己的语料收干净 —— 别给 D22/D23 的检索评测留下会命中的垃圾。"""
+    from app.services.document_service import (
+        count_documents_by_prefix,
+        delete_documents_by_prefix,
+    )
+
+    await delete_documents_by_prefix(VERIFY_PREFIX)
+    left = await count_documents_by_prefix(VERIFY_PREFIX)
+    print(f"\n（已清理本脚本语料：{VERIFY_PREFIX}* 残留={left}）")
+    if left:
+        raise RuntimeError(f"清理不干净：{VERIFY_PREFIX}* 还剩 {left} 份")
 
 
 async def case_b1_answer_with_citation() -> bool:
@@ -290,6 +307,9 @@ async def main() -> None:
     except Exception as e:  # noqa: BLE001
         print(f"\n  ⚠️ B 层未跑通：{type(e).__name__}: {e}")
         print("     若是读取 .env 被拦，请在终端直接跑本脚本")
+
+    # 跑完把自己的语料收干净 —— 别给 D22/D23 的检索评测留下会命中的垃圾
+    await cleanup_kb()
 
     section("汇总")
     for name, ok in results:
