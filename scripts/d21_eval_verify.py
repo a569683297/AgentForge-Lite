@@ -125,6 +125,38 @@ async def section_a(ck: Checker) -> None:
     ck.check(bool(unique_on_key), "A7 case_key 有唯一约束（靠应用层自觉不够）",
              f"索引={[r.indexdef for r in idx]}")
 
+    # ---- eval_runs 不能只验「表存在」---------------------------------------
+    # 为什么补这段（2026-09-28）：A1/A2 只证明两张表**在不在**，而 A3~A7 的
+    # 列数与类型断言**全打在 eval_cases 上**。结果是 eval_runs 只拿到了
+    # 一条「存在」级的证据 —— 它就算建成 1 列、就算 Float 映射成了别的类型，
+    # 这一套断言照样全绿。「两张表」的目标，验证强度却是一张表。
+    # 同日我在 d21_migrate 里刚因为「期望值是我自己写的」栽过一次
+    # （category 写成 text，实际 varchar），更说明：凡是声称建好的表，
+    # 都要有**独立于语句成功**的结构证据。
+    async with async_session_factory() as session:
+        run_cols = (await session.execute(text("""
+            SELECT column_name, data_type, udt_name FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'eval_runs'
+            ORDER BY ordinal_position
+        """))).all()
+    run_types = {c.column_name: (c.data_type, c.udt_name) for c in run_cols}
+    print(f"  eval_runs 列 = {list(run_types)}")
+    ck.check(len(run_cols) == 11, "A8 eval_runs 有 11 列", f"实际={len(run_cols)}")
+    # config_name 是 String(32) -> varchar，不是 text。这个坑 d21_migrate 的
+    # EXPECTED_COLUMNS 已经踩过一次（同文件 category 那行）。
+    ck.check(run_types.get("config_name") == ("character varying", "varchar"),
+             "A9 eval_runs.config_name 是 varchar（String(32) 的映射，不是 text）",
+             f"实际={run_types.get('config_name')}")
+    # Float 在 PG 里落成 double precision / float8。必须断言它是浮点而不是
+    # numeric —— numeric 是精确十进制，比较与舍入行为都不同。
+    ck.check(run_types.get("accuracy", ("", ""))[1] == "float8",
+             "A10 eval_runs.accuracy 是 double precision（Float 的映射）",
+             f"实际={run_types.get('accuracy')}")
+    # 带时区的时间戳。写成不带时区的 timestamp 会在跨时区比对时静默偏移。
+    ck.check(run_types.get("created_at", ("", ""))[1] == "timestamptz",
+             "A11 eval_runs.created_at 带时区（timestamp with time zone）",
+             f"实际={run_types.get('created_at')}")
+
 
 # ============================================================
 # B 语料
