@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D20 · 评测闭环图</title>
+<style>
+:root{
+  --fg:#1f2328; --muted:#5f6570; --line:#e3e6ea; --soft:#f6f7f9;
+  --a:#5f5e5a; --b:#185fa5; --c:#ba7517; --ok:#3b6d11; --stop:#a32b1f;
+}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;color:var(--fg);
+  font:15px/1.78 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",Arial,sans-serif;}
+.wrap{max-width:900px;margin:0 auto;padding:48px 30px 80px}
+h1{font-size:24px;line-height:1.4;margin:0 0 8px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--muted);font-size:13px;margin:0 0 6px}
+h2{font-size:17px;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:600}
+h3{font-size:15px;margin:26px 0 8px;font-weight:600}
+p{margin:10px 0}
+ul,ol{margin:10px 0;padding-left:22px}
+li{margin:5px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
+  background:var(--soft);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+.lead{background:var(--soft);border-left:3px solid var(--a);border-radius:0 8px 8px 0;padding:14px 18px;margin:18px 0}
+.lead strong{color:#000}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+th{background:var(--soft);font-weight:600;white-space:nowrap}
+td.ctr,th.ctr{text-align:center}
+.tag{display:inline-block;font-family:ui-monospace,Menlo,monospace;font-size:12px;
+  border:1px solid var(--line);border-radius:5px;padding:1px 6px;background:#fff}
+.note{font-size:13px;color:var(--muted);margin:8px 0 0}
+.warn{border-left:3px solid var(--c);background:#fdf8ee;border-radius:0 8px 8px 0;padding:14px 18px;margin:18px 0}
+.warn strong{color:#7a4a05}
+.stop{border-left:3px solid var(--stop);background:#fdf0ee;border-radius:0 8px 8px 0;padding:14px 18px;margin:18px 0}
+.stop strong{color:#7a2015}
+
+/* ---- 纵向流程 ---- */
+.flow{margin:24px 0 8px}
+.step{display:grid;grid-template-columns:46px 1fr;gap:15px;position:relative;padding-bottom:22px}
+.step:not(:last-child)::before{content:"";position:absolute;left:22px;top:44px;bottom:0;width:2px;background:var(--line)}
+.n{width:44px;height:44px;border-radius:50%;background:var(--a);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;z-index:1;
+  font-family:ui-monospace,Menlo,monospace}
+.step.key .n{background:var(--c)}
+.step.gate .n{background:var(--stop)}
+.bd{padding-top:5px;min-width:0}
+.bd .t{font-size:15px;font-weight:600;margin:0 0 3px}
+.bd .t em{font-style:normal;font-size:12.5px;font-weight:500;color:var(--muted);margin-left:8px;
+  font-family:ui-monospace,Menlo,monospace}
+.bd p{margin:4px 0;font-size:13.5px;color:var(--muted);line-height:1.7}
+.bd p.hi{color:var(--fg)}
+.owner{display:inline-block;font-size:11.5px;font-family:ui-monospace,Menlo,monospace;
+  border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-left:6px;color:var(--muted);background:#fff;vertical-align:1px}
+.owner.now{border-color:var(--c);color:#7a4a05;background:#fdf8ee}
+.owner.d21{border-color:var(--b);color:var(--b);background:#f1f7fd}
+
+/* ---- 层次编号小圆点 ---- */
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:1px}
+.dot.r{background:var(--b)} .dot.a{background:var(--ok)} .dot.g{background:var(--c)}
+
+.foot{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>评测闭环：从语料到归因</h1>
+<p class="sub">AgentForge-Lite · D20 评测方法论 · 全流程图示</p>
+<p class="sub">本文件是教学用图，口径与 <code>D20-总结.md</code> 一致；不占教程 §1–§7 编号。</p>
+
+<div class="lead">
+<p><strong>评测不是一个"动作"，是一条闭环。</strong>任何一步偷工，后面的结论都会失效 —— 而失效时<strong>代码不会报错</strong>，只会安静地给出一个错的数。</p>
+</div>
+
+<h2>1 · 闭环九步（外加今天补上的第 0 步）</h2>
+
+<div class="flow">
+
+  <div class="step key">
+    <div class="n">0</div>
+    <div class="bd">
+      <p class="t">先校准量具：测出 ε<span class="owner now">D20 · 今天</span></p>
+      <p class="hi"><b>同一份答案重复打分，测出"判定不一致率 ε"，由它推出"差几条才算真差异"。</b></p>
+      <p>这一步是今天新加的，也是<b>最容易漏的一步</b> —— 尺子本身在抖，量出来的长度就没有意义。
+      实测：ε = <b>0.95%</b>（deepseek）/ <b>1.90%</b>（relay）→ 50 条题单次判定门槛 <b>2.9 / 4.6 条</b>。</p>
+      <p>而 PRD 的验收线"+10% 相对提升"在 50 条题上 <b>≈ 4 条题</b> —— <b>恰好卡在噪声边缘</b>。
+      这正是"要重复 3 次打分"这条决定的来源。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">1</div>
+    <div class="bd">
+      <p class="t">立语料<span class="owner d21">D21</span></p>
+      <p>真实中文文档。跨文档推理题（B 类 10 条）需要 <b>≥2 篇有语义关联</b>的文档才出得来。</p>
+      <p class="note">当前库里只有 1 篇 / 3 个切片 —— 这是 D21 动手前必须先清掉的前置墙。</p>
+    </div>
+  </div>
+
+  <div class="step gate">
+    <div class="n">2</div>
+    <div class="bd">
+      <p class="t">建评测集 50 条 + 参考答案 + 标注<span class="owner d21">D21</span></p>
+      <p class="hi">A 文档问答 <b>30</b>（<b>含 5 条负例</b>）／ B 跨文档推理 <b>10</b> ／ C 工具调用 <b>10</b>。</p>
+      <p><b>写完即冻结。</b>负例的"正确答案"是<b>拒答</b> —— 它唯一的作用是测幻觉控制。</p>
+      <p class="note">⚠ 冻结之后不许拿来调参：看一眼哪条挂了就去改 prompt 再重跑 = 把评测集背下来了（数据泄漏）。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">3</div>
+    <div class="bd">
+      <p class="t">同一份评测集跑三配置<span class="owner d21">D21</span></p>
+      <p><span class="tag">A pure_vector</span> <span class="tag">B hybrid</span> <span class="tag">C hybrid_rerank</span></p>
+      <p class="hi"><b>只变 <code>RETRIEVER_CONFIG</code> 一个变量</b> —— judge / prompt / temperature / 语料 / 分母全不动。</p>
+      <p class="note">D19 做「三配置可切」的全部目的就在这里：让"只变这一个"<b>物理上成立</b>。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">4</div>
+    <div class="bd">
+      <p class="t">被测系统端到端产答案<span class="owner d21">D23</span></p>
+      <p>跑的是 <b>AgentForge 自己</b>（检索 → 生成 → 引用），不是只测检索层。</p>
+      <p class="note">生成只做 1 次并落库；重复的是<b>打分</b>，不是生成（见第 5 步）。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">5</div>
+    <div class="bd">
+      <p class="t">judge 三维打分 0–5<span class="owner d21">D22</span></p>
+      <p><b>correctness</b> ↔ 参考答案（对不对）　<b>faithfulness</b> ↔ <b>检索片段</b>（有没有编造，<b>RAG 独有</b>）　<b>completeness</b> ↔ 参考答案要点（该说的说了没）</p>
+      <p class="note">三个维度不能合成一个分：一个答案可以"对但不全"（漏例外条款），也可以"全但有编造"（顺手加了个不存在的数字）。<b>两者的修法完全相反</b> —— 前者调召回窗口，后者收紧 prompt。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">6</div>
+    <div class="bd">
+      <p class="t">二值化：<code>correctness ≥ 4</code> 记"对"<span class="owner d21">D22</span></p>
+      <p>不报平均分 —— judge 抖动本身就有 ±0.3，比较两个平均数的小数第二位没有意义。</p>
+      <p class="note">⚠ 阈值是<b>人为选的</b>，而这正是今天第 1 轮踩坑的位置：样本不进阈值带，翻转率就被锁死为 0。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">7</div>
+    <div class="bd">
+      <p class="t">落库：汇总 + 逐条明细<span class="owner d21">D22</span></p>
+      <p><code>eval_runs</code> 存汇总（category × 维度）　<code>eval_case_results</code> 存逐条明细（含 <code>failure_reason</code>）</p>
+      <p class="hi">汇总分<b>不可再下钻</b> —— 没有明细表，报告要求的"失败案例各取 3 条"根本取不出来。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">8</div>
+    <div class="bd">
+      <p class="t">报告：口径写清 + 三类分开<span class="owner d21">D24</span></p>
+      <p>C=88%、A=80% → <b>相对 +10%</b>（达标）与 <b>绝对 +8 个百分点</b>（没到）<b>都要写</b>；<b>样本量一起报</b>（50 条里 1 条 = 2 个百分点）。</p>
+      <p class="note">C 类只有 10 条，全崩也只影响总分 20 个百分点，很容易被 A 类高分掩盖 → <b>必须分类别出分</b>。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">9</div>
+    <div class="bd">
+      <p class="t">归因 → 改代码 → 回到第 3 步<span class="owner d21">D24</span></p>
+      <p>横向按 <code>category</code> 聚合（哪类题失分最多）· 纵向按三个维度聚合（哪个维度最弱）· 再叠加 D19 的 <code>retriever</code> 字段（有多少条其实走了降级）。</p>
+      <p class="hi"><b>但评测集不许动。</b></p>
+    </div>
+  </div>
+
+</div>
+
+<div class="stop">
+<p><strong>闭环里唯一"不许动"的东西是第 2 步的评测集。</strong></p>
+<p class="note">改 prompt、改召回窗口、改 <code>RERANK_CANDIDATE_K</code> —— 都可以，改完用<b>同一份</b>评测集重跑。
+但评测集一旦冻住，就不能因为"某条题挂了"去改它。那是把评测集背下来，不是把系统做好。</p>
+</div>
+
+<h2>2 · 这三段分别回答哪一层问题</h2>
+
+<table>
+<tr><th>层次</th><th>问题</th><th>靠闭环哪几步</th><th>缺了会怎样</th></tr>
+<tr>
+  <td><span class="dot r"></span><b>① 相对</b></td>
+  <td>C 比 A 好吗？好多少？</td>
+  <td>第 <b>3</b> 步（三配置同集对比）</td>
+  <td>答不出"重排到底有没有用"</td>
+</tr>
+<tr>
+  <td><span class="dot a"></span><b>② 绝对</b></td>
+  <td>88% 这条线过了吗？</td>
+  <td>第 <b>5 6</b> 步（judge + 二值化）</td>
+  <td>可能"三配置都很差，但 C 比 A 好 10%"</td>
+</tr>
+<tr>
+  <td><span class="dot g"></span><b>③ 归因</b></td>
+  <td>差在哪类题、哪个维度？</td>
+  <td>第 <b>7</b> 步（逐条明细表）</td>
+  <td>只知道"分数低"，<b>不知道为什么</b></td>
+</tr>
+</table>
+
+<p class="note">第 <b>0</b> 步不属于任何一层，它是<b>三段共同的前提</b>：尺子在抖，三个层次全部不可信。</p>
+
+<div class="warn">
+<p><strong>与 D19 的 <code>retriever</code> 字段是同一条思路：结论必须可归因。</strong></p>
+<p class="note">D19 问「这条结果是重排产的还是降级来的」；D20 问「这次失分是 A 类还是 C 类、是正确性还是忠实度」。</p>
+<p class="note"><b>面试可讲的版本：没有归因能力的指标不是指标，只是分数。</b></p>
+</div>
+
+<h2>3 · 今天做了什么、D21–D24 做什么</h2>
+
+<table>
+<tr><th>天</th><th>做什么</th><th>对应闭环</th><th>交付物</th></tr>
+<tr>
+  <td><b>D20</b><br><span class="note">今天</span></td>
+  <td><b>只做设计和校准，业务代码一行未动</b></td>
+  <td>第 <b>0</b> 步</td>
+  <td>ε 与噪声门槛实测<br><code>d20_judge_probe.py</code></td>
+</tr>
+<tr>
+  <td><b>D21</b></td>
+  <td>立真实语料 + 建评测集 50 条（<b>写完即冻结</b>）+ <b>立刻重测 ε</b></td>
+  <td>第 <b>1 2</b> 步<br>回填第 0 步</td>
+  <td>冻结的评测集<br>新的 ε 与门槛</td>
+</tr>
+<tr>
+  <td><b>D22</b></td>
+  <td>judge 打分服务 + 明细表<br><span class="note">judge 走"显式锁通道、失败不降级"；C 类走精确校验不走 judge</span></td>
+  <td>第 <b>5 6 7</b> 步</td>
+  <td><code>eval_service</code><br><code>eval_case_results</code></td>
+</tr>
+<tr>
+  <td><b>D23</b></td>
+  <td>消融脚本：3 配置 × 50 条<br><span class="note">生成 1 次落库 → 打分重复 3 次取多数</span></td>
+  <td>第 <b>3 4</b> 步</td>
+  <td>A/B/C 三个准确率<br>+ 两个 Δ</td>
+</tr>
+<tr>
+  <td><b>D24</b></td>
+  <td>评测报告：相对/绝对口径 + 分类别 + 归因</td>
+  <td>第 <b>8 9</b> 步</td>
+  <td>验收 S2：C 相对 A ≥ +10%？</td>
+</tr>
+</table>
+
+<div class="lead">
+<p><strong>今天唯一"以后可以直接引用"的数字：50 条题上，单次判定噪声门槛 = 2.9 条（deepseek）/ 4.6 条（relay），3 次多数投票后降到 0.36 / 0.76 条。</strong></p>
+<p class="note">PRD 的 "+10%" ≈ 4 条题 → 单次打分恰好卡在噪声边缘；重复 3 次后余量才拉开。<b>所以"要 3 次重复"不是保险，是必需。</b></p>
+</div>
+
+<div class="foot">
+AgentForge-Lite · docs/tutorials/D20-评测闭环图.html<br>
+配套阅读：<code>D20-总结.md</code>（自包含总结，唯一复习入口）· <code>D20-消融实验说明.html</code>（消融专题图解）· <code>D20-探针结果-第2轮.md</code>（完整实测数据）
+</div>
+
+</div>
+</body>
+</html>
