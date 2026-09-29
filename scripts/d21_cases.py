@@ -379,7 +379,21 @@ _NO_TOOL = "__none__"      # 哨兵值：**显式要求不调用任何工具**�
 
 
 def _tool_case(key: str, question: str, tool: str, why: str) -> dict:
-    """工具类题的构造器：reference 说明期望行为，evidence 标记期望工具（供机检）。"""
+    """
+    工具类题的构造器：reference 说明**期望行为**，evidence 标记期望工具（供机检）。
+
+    ⚠ 这里的 `reference` **不是标准答案，也不参与判分**（D23 起明确）：
+      它写的是"这题期望系统怎么调工具"，是给**人**看的出题说明。
+      C 类题的判定走 `expected_tool`（→ `failure_taxonomy.tool_call_ok`），
+      根本不需要答案内容 —— C05~C07 问"现在几点"，答案本来就不固定。
+
+      这个区分在 D23 之前只存在于本函数的这句 docstring 里，下游
+      `judge_service.build_prompt` 并不知道，于是把它当【参考答案】发给了 judge，
+      导致"系统调对了工具、答对了时间，却被判 0 分"。
+      → 教训：**字段的语义不能只写在生产者的注释里，消费者也要显式知情**
+        （现在 `derive_case_outcome` 与 runner 都按 is_tool_only 分路，
+         且 eval_cases.reference 的列注释里写明了这一点）。
+    """
     if tool == _NO_TOOL:
         reference = f"不应当调用任何工具，直接回答即可。理由：{why}"
     else:

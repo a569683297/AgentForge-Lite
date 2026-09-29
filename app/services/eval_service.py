@@ -430,13 +430,22 @@ def summarize_results(rows: list) -> dict:
         它衡量的是"系统产出的东西平均质量如何"，天然是逐次生成的粒度。
         ⚠ 所以它与 accuracy 的**分母不同**，报告里必须分别写明，不能互相印证。
 
+    ⚠ **三维度均分的真实分母是 `scored_rows`，不是 `total_rows`**（D23 修复）。
+      工具类题不判内容（判据见 failure_taxonomy.is_tool_only）→ 它们的
+      `score_*` 是 NULL。SQL 的 AVG 与这里的 `mean_of` 都会跳过 NULL，
+      所以分数没错，**错的是分母的隐含**：报告里若写"平均正确性 4.2 分（共 150 行）"，
+      那个 150 是错的，真实分母只有 120。
+      这正是 D20 那条教训的又一次变体 —— 分母悄悄变小而没人看得见。
+      所以把 `scored_rows` 一并返回，**让分母可被引用**。
+
     多数投票的平局规则：N 为偶数时可能 1:1，此时记为**不通过**
         （`sum*2 > len` 严格大于）。理由同 D20：平局说明"没有多数意见"，
         把平局算成通过等于**往有利方向兜底**，会让系统看起来比实际好。
     """
     if not rows:
         return {
-            "total_rows": 0, "total_cases": 0, "passed_cases": 0, "accuracy": 0.0,
+            "total_rows": 0, "scored_rows": 0, "total_cases": 0, "passed_cases": 0,
+            "accuracy": 0.0,
             "score_correctness": None, "score_faithfulness": None, "score_completeness": None,
             "failure_breakdown": {}, "generation_inconsistent": 0,
         }
@@ -464,6 +473,9 @@ def summarize_results(rows: list) -> dict:
 
     return {
         "total_rows": len(rows),
+        "scored_rows": sum(
+            1 for row in rows if _field(row, "score_correctness") is not None
+        ),
         "total_cases": len(by_case),
         "passed_cases": passed_cases,
         "accuracy": round(passed_cases / len(by_case), 4),

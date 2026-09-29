@@ -114,9 +114,10 @@ async def get_eval_run(run_id: int) -> EvalRunDetailOut:
     """
     运行详情：汇总分 + **按类别聚合** + 失败模式分布 + 生成侧不一致题数。
 
-    注意两个口径不同（别放在一起比）：
+    注意三个口径不同（别放在一起比）：
         `accuracy`        分母是**题数**（每题多次生成先多数投票）
-        `by_category` 里的 avg_* 分母是**明细行数**
+        `scored_rows`     三维度均分的分母（**有分数的行数**，不等于 rows）
+        `by_category` 里的 avg_*   分母是该类别里**有分数的行数**
     这一点在 schema 的字段说明里也写了 —— 报告必须写明分母，
     否则 "+10%" 到底是 50 条里的 5 条还是 150 行里的 15 行就说不清。
     """
@@ -138,6 +139,7 @@ async def get_eval_run(run_id: int) -> EvalRunDetailOut:
         by_category=by_category,
         failure_breakdown=summary["failure_breakdown"],
         rows=summary["total_rows"],
+        scored_rows=summary["scored_rows"],
         generation_inconsistent=summary["generation_inconsistent"],
     )
 

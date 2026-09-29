@@ -13,13 +13,25 @@ D22 验证：评测器、明细表与聚合
     · "单条可评分"     → 断言 judge 的原始分数被如实落库、可按题取回（C/E 段）
 
 --------------------------------------------------------------------------
-本脚本自己跑一轮**小规模**评测（约 1 分钟），而不是依赖库里已有数据
+本脚本自己跑**两轮**小规模评测（合计约 2 分钟），而不是依赖库里已有数据
 --------------------------------------------------------------------------
 依赖"跑之前库里恰好有什么"是隐性依赖，会在别人机器上变成随机假失败
 （D14 的注释里已经写过这条）。所以这里自给自足：
-    category=tool_call, limit=4, generation_runs=2, judge_runs=3
-    4 题 × 2 次生成 = 8 条明细，24 次打分
-跑完默认**删掉自己建的那条 run**（按 run_id 删，作用域自限）。
+
+    C/D 段（主力） category=doc_qa, limit=4, generation_runs=2, judge_runs=3
+                    4 题 × 2 次生成 = 8 条明细，24 次打分
+    C2 段         category=tool_call, limit=2, generation_runs=1
+                    2 题 × 1 次生成 = 2 条明细，**0 次打分** ← D23 的契约
+
+⚠ D23 之前 C/D 段的类别是 `tool_call`，D23 改成了 `doc_qa`。原因：
+  工具类题从 D23 起**不调 judge**，于是原来那两条断言
+  （C9 judge_runs == 3、C10 judge_raw 长度 == judge_runs）在 tool_call 上必然为假。
+  但这**不是把断言删掉**，而是分成两轮：
+     · 内容题（doc_qa）继续验"打分链路"（多次打分、原始分数落库）
+     · 工具题（tool_call）改验"不判内容"的新契约（C2 段）
+  两条路径都得有人验 —— 只验其中一条，另一条坏了也不会被发现。
+
+跑完默认**删掉自己建的两条 run**（按 run_id 删，作用域自限）。
 加 `--keep` 可以保留下来看。
 
 运行（必须在项目根目录）：
@@ -42,10 +54,16 @@ from app.services import eval_runner, eval_service, failure_taxonomy
 
 # 小规模实跑的参数（见模块 docstring 的说明）
 MINI_CONFIG = "hybrid_rerank"
-MINI_CATEGORY = "tool_call"
+# C/D 段跑**内容题**：验打分链路（judge 多次打分 + 原始分数落库）。
+# ⚠ D23 之前这里是 "tool_call"；工具类题不再打分后，改成 doc_qa。
+MINI_CATEGORY = "doc_qa"
 MINI_LIMIT = 4
 MINI_GENERATION_RUNS = 2
 MINI_JUDGE_RUNS = 3
+
+# C2 段跑**工具题**：验 D23 的新契约（只判工具、不判内容、不调 judge）。
+MINI_TOOL_CATEGORY = "tool_call"
+MINI_TOOL_LIMIT = 2
 
 
 class Checker:
@@ -194,6 +212,49 @@ def section_b(ck: Checker) -> None:
         failure_taxonomy.describe("某个没见过的值") == "某个没见过的值",
         "B10 describe 对枚举外的值原样返回（不掩盖）",
     )
+
+    # ---- B11~B16：D23 的修复 —— 工具类题**只判工具** ----
+    # 这一段是"修复真的落地了"的纯函数层证据：比实跑更快、更直接，
+    # 而且它同时钉住"修复没把内容题的防线一起拆掉"（B16）。
+    ck.check(
+        derive(correctness=None, faithfulness=None, completeness=None,
+               expected_tool="current_time", actual_tools=["current_time"]) == (True, None),
+        "B11 工具题不传任何分数也合法（分数不参与判定，所以允许缺）",
+        str(derive(correctness=None, faithfulness=None, completeness=None,
+                   expected_tool="current_time", actual_tools=["current_time"])),
+    )
+    # B12 是 D23 那个假失败的最小复现：系统调对了工具、答案也对，但 judge
+    #     给的三个维度分数全是 1 —— 修复前这条判 wrong_answer/hallucination。
+    ck.check(
+        derive(correctness=1, faithfulness=1, completeness=1,
+               expected_tool="search_documents",
+               actual_tools=["search_documents"]) == (True, None),
+        "B12 工具题分数全 1 也通过（内容不进判定）—— D23 修掉的正是这条",
+    )
+    ck.check(
+        derive(correctness=None, faithfulness=None, completeness=None,
+               expected_tool="__none__", actual_tools=[]) == (True, None),
+        "B13 __none__ 题（要求不调工具）也走同一条'只看工具'路径",
+    )
+    ck.check(
+        derive(correctness=None, faithfulness=None, completeness=None,
+               expected_tool="__none__", actual_tools=["current_time"])
+        == (False, "tool_miss"),
+        "B14 工具题的否决权仍然生效（不传分数也照样能判出 tool_miss）",
+    )
+    ck.check(
+        failure_taxonomy.is_tool_only(None) is False
+        and failure_taxonomy.is_tool_only("__none__") is True
+        and failure_taxonomy.is_tool_only("search_documents") is True,
+        "B15 判定路径的开关就是 expected_tool 有没有标注（None 是唯一的内容题）",
+    )
+    # B16 是**修复的护栏**：分路不能把内容题的防线一起拆了。
+    #     A/B 类题（expected_tool=None）缺分数必须照样抛错。
+    try:
+        derive(correctness=None, faithfulness=None, completeness=None, expected_tool=None)
+        ck.check(False, "B16 内容题缺分数仍然抛错（修复没拆掉防线）", "未抛错")
+    except ValueError:
+        ck.check(True, "B16 内容题缺分数仍然抛错（修复没拆掉防线）")
 
 
 # ============================================================
@@ -351,6 +412,95 @@ async def section_cd(ck: Checker) -> int | None:
 
 
 # ============================================================
+# C2 段：工具类题的判定路径（D23 修复的契约）
+# ============================================================
+async def section_tool_only(ck: Checker) -> None:
+    """
+    验 D23 的新契约：工具类题**只判工具调用**，不判内容、不调 judge。
+
+    为什么单独一段而不是并进 C/D 段：
+      C/D 段跑的是内容题（要验打分链路），两者对 `judge_runs` 的期望**正好相反**。
+      写在同一个 run 里必然要写一堆"如果是 A 类就…如果 C 类就…"的分支 ——
+      那种断言读起来像谜语，坏了也说不清是哪条路径坏的。分成两段，各验各的。
+    """
+    ck.section("C2. 工具类题只判工具（D23 修复：不调 judge）")
+
+    result = await eval_runner.run_evaluation(
+        MINI_CONFIG,
+        generation_runs=1,
+        # 故意仍然传 3 —— 工具题**不该**用上它。传了没用到，才是这条契约的证据。
+        runs_per_case=MINI_JUDGE_RUNS,
+        judge_model=settings.judge_model,
+        category=MINI_TOOL_CATEGORY,
+        limit=MINI_TOOL_LIMIT,
+        verbose=False,
+    )
+    run_id = result["run_id"]
+    print(f"  （本次 run_id={run_id}）")
+
+    rows = await eval_service.list_case_results(run_id, limit=2000)
+    catalog = {case.case_key: case for case in await eval_service.list_cases(limit=500)}
+
+    ck.check(len(rows) == MINI_TOOL_LIMIT,
+             f"T1 明细 {MINI_TOOL_LIMIT} 行（{MINI_TOOL_LIMIT} 题 × 1 次生成）", str(len(rows)))
+    ck.check(all(row.judge_runs == 0 for row in rows),
+             "T2 工具题一次 judge 都没调（judge_runs 全为 0）",
+             str(sorted({row.judge_runs for row in rows})))
+    ck.check(
+        all(row.score_correctness is None and row.score_faithfulness is None
+            and row.score_completeness is None for row in rows),
+        "T3 三个维度分数全为 NULL（不判内容）",
+    )
+    ck.check(all(row.judge_raw is None for row in rows),
+             "T4 judge_raw 为 NULL（没有原始分数可存）")
+
+    # T5 是这一段最重要的一条：**回库核对** passed 是否恰好等于那个纯函数。
+    #    "跑通了"不等于"结论对" —— 只有拿库里的行重新算一遍才算验过
+    #    （同 D22 的判据：我调了个函数不是证据，我回库里查了一遍才是）。
+    mismatched = [
+        row.case_key for row in rows
+        if bool(row.passed) != failure_taxonomy.tool_call_ok(
+            getattr(catalog.get(row.case_key), "expected_tool", None), row.tool_calls
+        )
+    ]
+    ck.check(not mismatched,
+             "T5 passed == tool_call_ok(expected_tool, tool_calls)（逐行回库核对）",
+             str(mismatched))
+    ck.check(all(row.failure_reason in (None, "tool_miss") for row in rows),
+             "T6 工具题的失败原因只可能是 tool_miss 或通过（不出现 hallucination/incomplete 等）",
+             str(sorted({str(row.failure_reason) for row in rows})))
+
+    # T7 走 SQL 而不是 ORM：ORM 的 None 与"JSON 字面量 null"读回来长得一样，
+    #    只有在 SQL 层才分得清（D14 那个坑的检验方式）。
+    async with engine.connect() as conn:
+        json_null = await conn.scalar(text(
+            "SELECT count(*) FROM eval_case_results "
+            "WHERE run_id=:r AND judge_raw = 'null'::jsonb"
+        ), {"r": run_id})
+    ck.check(json_null == 0,
+             "T7 judge_raw 是真 SQL NULL（不是 JSON 字面量 null —— D14 的坑）",
+             str(json_null))
+
+    ck.check(
+        result["scored_rows"] == 0 and result["total_rows"] == MINI_TOOL_LIMIT,
+        f"T8 汇总里 scored_rows=0 而 total_rows={MINI_TOOL_LIMIT}"
+        "（均分的分母与行数分母被分开了）",
+        f"scored={result['scored_rows']} total={result['total_rows']}",
+    )
+    ck.check(
+        result["total_cases"] == MINI_TOOL_LIMIT and result["accuracy"] is not None,
+        "T9 准确率仍算得出（按题算，分母不受'不打分'影响）",
+        f"acc={result['accuracy']} cases={result['total_cases']}",
+    )
+
+    # 清理：本段自己建的 run 自己删，否则会污染 C/D 段之后的所有断言。
+    deleted_runs, deleted_rows = await eval_service.delete_run(run_id)
+    ck.check(deleted_runs == 1 and deleted_rows == MINI_TOOL_LIMIT,
+             "T10 C2 段的 run 已自行清理（作用域自限）",
+             f"runs={deleted_runs} rows={deleted_rows}")
+
+
+# ============================================================
 # E 段：HTTP 接口
 # ============================================================
 def section_e(ck: Checker, run_id: int) -> None:
@@ -391,15 +541,20 @@ def section_e(ck: Checker, run_id: int) -> None:
             "E9 明细带 failure_reason 的中文标签（展示用派生值，不落库）",
         )
 
-        # 过滤：本次只跑了 tool_call，按 doc_qa 过滤必须是空 ——
-        # 这是"过滤生效"的**负向证据**（只验正向的话，一个永远不过滤的实现也会全绿）
-        resp = client.get(f"/api/eval/runs/{run_id}/cases", params={"category": "doc_qa"})
+        # 过滤：本次跑的是 doc_qa，按 tool_call 过滤必须是空 ——
+        # 这是"过滤生效"的**负向证据**（只验正向的话，一个永远不过滤的实现也会全绿）。
+        # 再补一条正向的：按 doc_qa 过滤必须非空。两条一起才说明它真的在按值筛。
+        resp = client.get(f"/api/eval/runs/{run_id}/cases", params={"category": MINI_TOOL_CATEGORY})
         ck.check(resp.status_code == 200 and resp.json() == [],
-                 "E10 按 doc_qa 过滤返回空（过滤真的生效）",
+                 f"E10 按 {MINI_TOOL_CATEGORY} 过滤返回空（过滤真的生效）",
+                 str(len(resp.json()) if resp.status_code == 200 else resp.status_code))
+        resp = client.get(f"/api/eval/runs/{run_id}/cases", params={"category": MINI_CATEGORY})
+        ck.check(resp.status_code == 200 and len(resp.json()) == expected_rows,
+                 f"E10b 按 {MINI_CATEGORY} 过滤返回全部 {expected_rows} 行（正向也成立）",
                  str(len(resp.json()) if resp.status_code == 200 else resp.status_code))
 
         # 单条取回（含检索片段与原始分数）—— "单条可评分"的可读证据
-        first_key = cases[0]["case_key"] if cases else "C01"
+        first_key = cases[0]["case_key"] if cases else "A01"
         resp = client.get(f"/api/eval/runs/{run_id}/results/{first_key}")
         ok = resp.status_code == 200
         ck.check(ok, f"E11 GET /runs/{{id}}/results/{first_key} 200", str(resp.status_code))
@@ -471,6 +626,8 @@ async def service_layer(ck: Checker) -> int:
     await section_a(ck)
     section_b(ck)
     run_id = await section_cd(ck)
+    # C2 段自己建一条 run、验完自己删 —— 不干扰上面那条的 run_id
+    await section_tool_only(ck)
     # 本 loop 用完就把连接池关掉：下一段 TestClient 是另一个 loop，
     # 不关的话它会拿到绑在**这个已结束的 loop** 上的连接 → `Event loop is closed`
     await engine.dispose()

@@ -190,6 +190,23 @@ async def score_answers(
     """
     阶段②：对每份答案重复打分 runs_per_case 次，取中位数，再推导通过与否。
 
+    ----------------------------------------------------------------------
+    工具类题**不打分**（D23 修复）
+    ----------------------------------------------------------------------
+    判据 = `failure_taxonomy.is_tool_only(expected_tool)`（唯一出处，见那里）。
+
+    为什么不打：
+        C 类题的 `reference` 是**期望行为说明**而不是标准答案（出题时就写明了的），
+        但 `judge_service.build_prompt` 无差别地把它标成【参考答案】发出去，
+        judge 于是判"答案没按要求执行"给 0 分。
+        D23 实测：15 条失败里 13 条是这么来的（C05「现在几点了？」
+        **答案正确、工具调对，judge 给 0 分**）。
+
+        改判定路径（而不是改写 reference）的理由见 failure_taxonomy 的 docstring。
+        这里补一条**成本**理由：不打分还省掉 C 类题的全部 judge 调用
+        （30 行 × 3 次 = 90 次 / 每轮约 28 万 token），并且让 C 类题的结果
+        **不再有裁判侧抖动** —— 它变成一个确定性判定。
+
     ⚠ 打分**全部失败**时抛错，而不是落库成"答错"。
       理由：那会让"量具坏了"伪装成"系统答错了"，而两者的修法完全不同
       （一个修 judge 通道，一个改检索/prompt）。这正是 D21 那条教训的形态 ——
@@ -205,9 +222,16 @@ async def score_answers(
     #   两种错法都不会报错，只会给出一个"看起来很正常"的假数。
     started = time.perf_counter()
 
+    skipped = 0
     for row in answers:
         if row["run_failed"]:
             tasks.append([])     # 没跑出答案 → 不打分（归因会直接判 system_error）
+            continue
+        if failure_taxonomy.is_tool_only(row["expected_tool"]):
+            # 工具类题：判定只看工具调用，内容不进 judge。
+            # 用空 list 占位（而不是 continue），下面的 zip 才能按位置对齐。
+            tasks.append([])
+            skipped += 1
             continue
         tasks.append([
             asyncio.create_task(_judge_with_semaphore(
@@ -234,43 +258,44 @@ async def score_answers(
     for row, results in zip(answers, grouped):
         if row["run_failed"]:
             passed, reason = failure_taxonomy.derive_case_outcome(run_failed=True)
-            scored.append({
-                **row,
-                "score_correctness": None,
-                "score_faithfulness": None,
-                "score_completeness": None,
-                "judge_runs": 0,
-                "judge_raw": None,
-                "passed": passed,
-                "failure_reason": reason,
-            })
-            continue
-
-        outcome = judge_service.aggregate(results)
-        if outcome.all_failed:
-            raise RuntimeError(
-                f"{row['case_key']}#{row['generation_index']} 的 {len(results)} 次打分**全部失败**："
-                f"{outcome.errors[:2]}。"
-                "本轮评测中止 —— 把打分失败落库成'答错'会让量具故障伪装成系统缺陷，"
-                "而两者需要完全不同的修复。"
+            c = f = m = None
+            runs, raw = 0, None
+        elif not results:
+            # 工具类题：没有分数，也**不需要**分数（derive 会走工具那条路）
+            c = f = m = None
+            runs, raw = 0, None
+            passed, reason = failure_taxonomy.derive_case_outcome(
+                correctness=None, faithfulness=None, completeness=None,
+                expected_tool=row["expected_tool"],
+                actual_tools=row["tool_calls"],
             )
-
-        passed, reason = failure_taxonomy.derive_case_outcome(
-            correctness=outcome.correctness,
-            faithfulness=outcome.faithfulness,
-            completeness=outcome.completeness,
-            expected_tool=row["expected_tool"],
-            actual_tools=row["tool_calls"],
-        )
-        scored.append({
-            **row,
-            "score_correctness": outcome.correctness,
-            "score_faithfulness": outcome.faithfulness,
-            "score_completeness": outcome.completeness,
-            "judge_runs": outcome.runs_ok,
+        else:
+            outcome = judge_service.aggregate(results)
+            if outcome.all_failed:
+                raise RuntimeError(
+                    f"{row['case_key']}#{row['generation_index']} 的 {len(results)} 次打分**全部失败**："
+                    f"{outcome.errors[:2]}。"
+                    "本轮评测中止 —— 把打分失败落库成'答错'会让量具故障伪装成系统缺陷，"
+                    "而两者需要完全不同的修复。"
+                )
+            c, f, m = outcome.correctness, outcome.faithfulness, outcome.completeness
+            runs = outcome.runs_ok
             # 原始各次分数：D20 的教训是"报平均分等于在比噪声更小的差异"，
             # 存下每一次才能事后算抖动、判断某个差异是否超出门槛
-            "judge_raw": [r for r in outcome.raw],
+            raw = list(outcome.raw)
+            passed, reason = failure_taxonomy.derive_case_outcome(
+                correctness=c, faithfulness=f, completeness=m,
+                expected_tool=row["expected_tool"],
+                actual_tools=row["tool_calls"],
+            )
+
+        scored.append({
+            **row,
+            "score_correctness": c,
+            "score_faithfulness": f,
+            "score_completeness": m,
+            "judge_runs": runs,
+            "judge_raw": raw,
             "passed": passed,
             "failure_reason": reason,
         })
@@ -280,7 +305,8 @@ async def score_answers(
     if verbose:
         print(
             f"  [打分] {ok_runs} 次成功（期望 {len(answers) * runs_per_case} 次，"
-            f"其中 {sum(1 for a in answers if a['run_failed'])} 份未生成）耗时 {elapsed:.1f}s"
+            f"其中 {sum(1 for a in answers if a['run_failed'])} 份未生成、"
+            f"{skipped} 份工具类题不打分）耗时 {elapsed:.1f}s"
         )
     return scored
 

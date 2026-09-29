@@ -119,6 +119,13 @@ class EvalRunDetailOut(EvalRunOut):
         description="失败模式分布（failure_reason → 条数）—— 回答\"失败里有多少是没检索到、多少是编造\"",
     )
     rows: int = Field(default=0, description="明细总行数")
+    scored_rows: int = Field(
+        default=0,
+        description="**有分数的**明细行数 —— 三维度均分的真实分母。"
+                    "工具类题（expected_tool 非空）不判内容、score_* 为 NULL，"
+                    "所以它 < rows。引用均分时必须带上这个分母，"
+                    "否则会写出\"平均正确性 4.2 分（共 150 行）\"这种错话（真实分母只有 120）",
+    )
     generation_inconsistent: int = Field(
         default=0,
         description="多次生成结论不一致的题数（生成侧抖动的直接观测）——"

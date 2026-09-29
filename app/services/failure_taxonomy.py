@@ -68,6 +68,32 @@ FAILURE_REASON_LABELS: dict[str, str] = {
 # ============================================================
 # 工具调用判定
 # ============================================================
+def is_tool_only(expected_tool: str | None) -> bool:
+    """
+    这道题**是否只判工具调用**（不判答案内容）。
+
+    判据 = `expected_tool` 有没有被标注。三种语义里后两种
+    （`"__none__"` 与具体工具名）都属于"这题在考工具选择"，所以只判工具；
+    只有 `None`（未约束工具）才是内容题。
+
+    ----------------------------------------------------------------------
+    为什么这个判断必须单独成一个函数，而不是两处各写一遍
+    ----------------------------------------------------------------------
+    "要不要调 judge" 与 "要不要看分数" 是**同一个判断**，分别落在两个文件：
+        · `eval_runner.score_answers` —— 决定给不给这题发 judge 请求
+        · `derive_case_outcome`      —— 决定拿不拿分数当判据
+
+    如果两处各写一遍 `expected_tool is not None`，那么将来只要有一处被改成
+    （比如）`category == "tool_call"`，就会出现**静默分裂**：
+    runner 照常打分、判定函数却不看分数 —— 花了钱、落了库，
+    而那批分数**一个都没参与判定**，且不会有任何报错。
+    这正是本项目反复踩的那条坑（同一判断两处写 → 两份真相）。
+
+    所以判据只此一处，两边都调它。
+    """
+    return expected_tool is not None
+
+
 def tool_call_ok(expected_tool: str | None, actual_tools: list[str] | None) -> bool:
     """
     实际调用的工具是否满足题目要求。
@@ -114,6 +140,37 @@ def derive_case_outcome(
     分成两个函数写会立刻出现"passed=True 却有 failure_reason"这种不自洽状态。
 
     ----------------------------------------------------------------------
+    两条判定路径（D23 修复后）：内容题看分数，工具题只看工具
+    ----------------------------------------------------------------------
+        tool_only 为真（`expected_tool` 被标注）：
+            通过 ⟺ 工具调用满足要求。**分数完全不参与判定，允许传 None。**
+        tool_only 为假（`expected_tool is None`）：
+            通过 ⟺ 工具未约束（恒满足） 且 correctness ≥ PASS_THRESHOLD。
+            三个维度任一为 None 就抛错 —— 那是调用方用错了。
+
+    为什么工具题不看分数（D23 的修复，根因见下）：
+        C 类题的 `eval_cases.reference` 存的是**期望行为说明**
+        （"应当调用 search_documents 工具完成该请求。理由：…"），
+        它**从来就不是标准答案** —— 出题时（`d21_cases.py` 的 `_tool_case`）
+        docstring 就写明了这一点。错的是**消费者**：`judge_service.build_prompt`
+        无差别地把它标成【参考答案】发给 judge，judge 于是判"答案没按要求执行"
+        并打 0 分。
+
+        D23 实测到的铁证：C05 题面「现在几点了？」，系统**调对了 `current_time`、
+        答出了正确时刻**，judge 给 0 分；而同一批题在 D22 的验收里 judge 给 5 分
+        —— **同一个字段、同一个 judge，两次理解相反**。这说明该字段对 judge 而言
+        语义本身就是歧义的，不是"偶尔判错"。
+
+    为什么是"只判工具"而不是"改写 reference 让它变成合格答案"：
+        ① C 类题**考的就是会不会选工具**，不是答得对不对；
+           "答得对不对"由 A/B 类题覆盖，这是分工不是漏测。
+           参考 D22 已写下的对称面：**tool_miss 有否决权**（答案侥幸对了也算不通过）
+           —— 既然"答案对"救不了 tool_miss，那"答案错"也不该拖垮 tool 对了的题。
+           修复前是**半吊子**：只给了否决权，没给对称的通过权。
+        ② C05~C07 问的是"现在几点 / 今天几号"，**答案不固定**，
+           本来就没法写成一条可核对的标准答案。
+
+    ----------------------------------------------------------------------
     优先级：上游原因优先于下游表现
     ----------------------------------------------------------------------
     "没调工具"是**根因**，"答错了"是它的**结果**。若一律记成 wrong_answer，
@@ -122,6 +179,9 @@ def derive_case_outcome(
 
     顺序（= FAILURE_REASONS 的顺序）：
         system_error → tool_miss → hallucination → incomplete → wrong_answer
+
+    工具题只会落在前两个上（system_error / tool_miss）——
+    **不需要为它新增枚举值**。
 
     ----------------------------------------------------------------------
     两个刻意的设计决定
@@ -136,6 +196,16 @@ def derive_case_outcome(
         # 连答案都没跑出来。分数此时必然是 None，先返回，避免下面拿 None 去比大小。
         return False, FAILURE_SYSTEM_ERROR
 
+    # ① 工具是否调对（C 类题的否决权，排在分数之前）
+    if not tool_call_ok(expected_tool, actual_tools):
+        return False, FAILURE_TOOL_MISS
+
+    # ② 工具题到此即通过 —— 分数**不参与判定**，所以不检查它是否缺失。
+    #    注意这个分路必须在"分数缺失检查"**之前**：否则不打分的工具题
+    #    会被那句 ValueError 拦下，而它本来就是不该有分数的。
+    if is_tool_only(expected_tool):
+        return True, None
+
     # 分数缺失 = 调用方用错了。**抛错而不是当成 0 分**：
     # 当成 0 分会让"打分器坏了"伪装成"系统答错了"，两种问题的修法完全不同。
     # 这正是 D21 那条教训的形态：静默地把一种情况算成另一种。
@@ -148,15 +218,11 @@ def derive_case_outcome(
             "不要让它落库成一条'答错'）"
         )
 
-    # ① 工具是否调对（C 类题的否决权，排在分数之前）
-    if not tool_call_ok(expected_tool, actual_tools):
-        return False, FAILURE_TOOL_MISS
-
-    # ② 分数是否达标（PRD F7.5：correctness ≥ 4 记对）
+    # ③ 分数是否达标（PRD F7.5：correctness ≥ 4 记对）
     if correctness >= PASS_THRESHOLD:
         return True, None
 
-    # ③ 未达标 → 归因到具体失败模式（优先级见上）
+    # ④ 未达标 → 归因到具体失败模式（优先级见上）
     if faithfulness <= HALLUCINATION_MAX_FAITHFULNESS:
         return False, FAILURE_HALLUCINATION
     if completeness <= INCOMPLETE_MAX_COMPLETENESS:

@@ -145,7 +145,11 @@ class EvalCase(Base):
     )
     reference: Mapped[str] = mapped_column(
         Text,
-        comment="参考答案 —— judge 判分时的标尺；负例写成「知识库中没有…」这类可判定陈述",
+        comment="A/B 类题：**参考答案**，judge 判分时的标尺；负例写成「知识库中没有…」这类可判定陈述。"
+                "⚠ C 类题（expected_tool 非空）里这一列存的是**期望行为说明**"
+                "（如「应当调用 search_documents 工具完成该请求」），**不是标准答案、不参与判分** —— "
+                "C 类题的判定依据是 expected_tool（走 tool_call_ok）。"
+                "D23 的 bug 正是 judge 拿它当答案比对，把正确行为判成 0 分",
     )
     evidence: Mapped[str] = mapped_column(
         Text,
@@ -165,7 +169,9 @@ class EvalCase(Base):
     expected_tool: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
-        comment="工具类题期望调用的工具名；'__none__' 表示显式要求不调用任何工具",
+        comment="工具类题期望调用的工具名；'__none__' 表示显式要求不调用任何工具。"
+                "⚠ 它同时是**判定路径的开关**（D23 起）：非空 = 该题只判工具调用、"
+                "不判内容、不消 judge 调用 —— 判据唯一出处见 failure_taxonomy.is_tool_only",
     )
     is_negative: Mapped[bool] = mapped_column(
         Boolean,
@@ -330,23 +336,27 @@ class EvalCaseResult(Base):
     )
 
     # ---- 打分结果（runs_per_case 次的聚合值）----
+    # ⚠ 工具类题（expected_tool 非空）**不判内容** → 下面这四列整组为 NULL / 0。
+    #   所以"三维度均分"的**分母不是 total_rows 而是有分数的行数**（summarize_results
+    #   返回的 scored_rows），报告里引用均分时必须带上那个分母。
     score_correctness: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="正确性（多次打分取中位数）"
+        Float, nullable=True, comment="正确性（多次打分取中位数）；工具类题不判内容 → NULL"
     )
     score_faithfulness: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="引用忠实度（中位数）"
+        Float, nullable=True, comment="引用忠实度（中位数）；工具类题不判内容 → NULL"
     )
     score_completeness: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="完整性（中位数）"
+        Float, nullable=True, comment="完整性（中位数）；工具类题不判内容 → NULL"
     )
     judge_runs: Mapped[int] = mapped_column(
-        Integer, comment="本行实际成功打分的次数（< runs_per_case 说明有调用失败）"
+        Integer, comment="本行实际成功打分的次数（< runs_per_case 说明有调用失败）；"
+                         "工具类题不调 judge → 恒为 0（与「未生成」的行靠 passed/failure_reason 区分）"
     )
     judge_raw: Mapped[list | None] = mapped_column(
         JSONB(none_as_null=True),
         nullable=True,
         comment="各次原始分数（审计用）。必须存：D20 的教训是\"报平均分等于在比噪声更小的差异\"，"
-                "存下每次的分数才能事后算抖动、判断某个差异是否超出门槛",
+                "存下每次的分数才能事后算抖动、判断某个差异是否超出门槛；工具类题 → NULL",
     )
 
     # ---- 结论（由纯函数推导，不是 judge 写的）----
@@ -354,8 +364,11 @@ class EvalCaseResult(Base):
         Boolean,
         server_default="false",
         index=True,
-        comment="是否通过。判据 = correctness ≥ 4（PRD F7.5），"
-                "但 C 类题 tool_miss 有否决权 —— 见 failure_taxonomy.derive_case_outcome",
+        comment="是否通过。判据见 failure_taxonomy.derive_case_outcome，两条路径："
+                "① 内容题（expected_tool 为空）= correctness ≥ 4（PRD F7.5），"
+                "且工具若被约束则 tool_miss 有否决权；"
+                "② 工具题（expected_tool 非空，D23 起）= **只看工具调用是否满足**，"
+                "分数完全不参与（所以它是确定性判定，不受裁判侧抖动影响）",
     )
     failure_reason: Mapped[str | None] = mapped_column(
         String(32),
