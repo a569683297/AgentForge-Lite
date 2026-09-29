@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>评测抖动的三层与诊断流程</title>
+<style>
+  :root{
+    --bg:#FFFFFF; --surface:#F7F6F3; --line:#E3E1DB;
+    --ink:#2C2C2A; --ink2:#5F5E5A; --ink3:#888780;
+    --blue-f:#E6F1FB; --blue-s:#185FA5; --blue-t:#0C447C;
+    --amber-f:#FAEEDA; --amber-s:#854F0B; --amber-t:#633806;
+    --red-f:#FCEBEB; --red-s:#A32D2D; --red-t:#791F1F;
+    --green-f:#EAF3DE; --green-s:#3B6D11; --green-t:#27500A;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:32px 24px 48px;
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:14px; line-height:1.65;
+  }
+  .wrap{max-width:980px;margin:0 auto}
+  h1{font-size:19px;font-weight:600;margin:0 0 6px}
+  .sub{color:var(--ink2);font-size:13px;margin-bottom:28px}
+  h2{font-size:15px;font-weight:600;margin:34px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+
+  .flow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:26px;
+        padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:10px}
+  .q{font-weight:600;color:var(--ink)}
+  .arrow{color:var(--ink3)}
+  .branch{color:var(--ink2);font-size:13px}
+
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:820px){.cards{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--bg)}
+  .card .tag{display:inline-block;font-size:12px;font-weight:600;padding:2px 9px;border-radius:999px;margin-bottom:10px}
+  .card h3{font-size:14px;font-weight:600;margin:0 0 4px}
+  .card .what{font-size:13px;color:var(--ink2);margin-bottom:12px}
+  .card dl{margin:0;font-size:13px}
+  .card dt{color:var(--ink3);font-size:12px;margin-top:9px}
+  .card dd{margin:1px 0 0}
+  .evidence{margin-top:12px;padding:10px 12px;border-radius:8px;font-size:12.5px;line-height:1.6}
+  .b1 .tag{background:var(--blue-f);color:var(--blue-t)}
+  .b1 .evidence{background:var(--blue-f);color:var(--blue-t)}
+  .b2 .tag{background:var(--amber-f);color:var(--amber-t)}
+  .b2 .evidence{background:var(--amber-f);color:var(--amber-t)}
+  .b3 .tag{background:var(--red-f);color:var(--red-t)}
+  .b3 .evidence{background:var(--red-f);color:var(--red-t)}
+  .verdict{margin-top:12px;font-size:13px;font-weight:600}
+
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-weight:600;color:var(--ink2);font-size:12px;background:var(--surface)}
+  td.num{white-space:nowrap;color:var(--ink3);font-variant-numeric:tabular-nums}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;
+       background:var(--surface);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+
+  .warn{margin-top:22px;padding:14px 16px;border-radius:10px;background:var(--red-f);
+        border:1px solid #F7C1C1;color:var(--red-t);font-size:13px}
+  .warn b{display:block;margin-bottom:6px;font-size:13.5px}
+  .warn ol{margin:6px 0 0;padding-left:20px}
+  .warn li{margin-bottom:5px}
+
+  .note{margin-top:26px;font-size:12.5px;color:var(--ink3);border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>评测抖动的三层与诊断流程</h1>
+  <div class="sub">同一道题跑两遍分数不一样 —— 先判断它属于哪一层，再决定用什么办法。用错工具比不做更糟。</div>
+
+  <div class="flow">
+    <span class="q">两次结果不一样</span>
+    <span class="arrow">→</span>
+    <span class="branch">输入（题 + 语料）的指纹相等吗？</span>
+    <span class="arrow">→</span>
+    <span class="branch">不等 = 第 3 层</span>
+    <span class="arrow">·</span>
+    <span class="branch">相等 → 看重复的是「打分」还是「跑系统」</span>
+  </div>
+
+  <div class="cards">
+
+    <div class="card b1">
+      <span class="tag">第 1 层</span>
+      <h3>裁判侧抖动</h3>
+      <div class="what">同一份答案反复交给裁判模型打分，分数不一样。</div>
+      <dl>
+        <dt>被测对象</dt><dd>不变（答案被钉住）</dd>
+        <dt>我们在做的事</dt><dd>重复测量同一个值</dd>
+        <dt>处理</dt><dd>重复打分 + 多数投票</dd>
+      </dl>
+      <div class="evidence">
+        ε = <b>0.95%</b>（deepseek 裁判）<br>
+        95% Wilson 区间 0.17% ~ 5.20%
+      </div>
+      <div class="verdict" style="color:var(--blue-t)">工具：统计学 —— 有效</div>
+    </div>
+
+    <div class="card b2">
+      <span class="tag">第 2 层</span>
+      <h3>生成侧抖动</h3>
+      <div class="what">同一道题、同一配置，重复跑系统，答案本身就是随机变量。</div>
+      <dl>
+        <dt>被测对象</dt><dd>每次都不同</dd>
+        <dt>我们在做的事</dt><dd>给一个随机变量抽样</dd>
+        <dt>处理</dt><dd>只能重复生成，或放大噪声门槛</dd>
+      </dl>
+      <div class="evidence">
+        B01 两次独立运行：<b>459 字判对 / 511 字判错</b><br>
+        裁判内部 5 次打分各自完全一致
+      </div>
+      <div class="verdict" style="color:var(--amber-t)">投票救不了 —— 重复的是裁判，不是输入</div>
+    </div>
+
+    <div class="card b3">
+      <span class="tag">第 3 层</span>
+      <h3>不是抖动</h3>
+      <div class="what">两次不同不是因为随机，而是输入被换过：语料改了、题改了、配置串了。</div>
+      <dl>
+        <dt>被测对象</dt><dd>偷偷换掉了</dd>
+        <dt>特征</dt><dd>重复多少次都不收敛</dd>
+        <dt>处理</dt><dd>指纹前置拦截，不做统计</dd>
+      </dl>
+      <div class="evidence">
+        改语料正文 + 不带 force 跑播种脚本：<br>
+        语料没更新、指纹不变、<b>三处都不出声</b>
+      </div>
+      <div class="verdict" style="color:var(--red-t)">最危险 —— 它看起来像抖动</div>
+    </div>
+
+  </div>
+
+  <h2>诊断流程：五步定位，再决定改哪里</h2>
+  <table>
+    <thead>
+      <tr><th style="width:34px">#</th><th style="width:150px">动作</th><th>目的</th><th style="width:150px">成本</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="num">①</td><td>先冻结</td>
+        <td>核对两次跑的<b>题指纹 + 语料指纹</b>。不相等 → 第 3 层，<b>立刻停下查输入</b>，不要动统计。</td>
+        <td class="num">0（纯查库）</td>
+      </tr>
+      <tr>
+        <td class="num">②</td><td>测裁判侧</td>
+        <td>把第一份答案<b>落库固定</b>，对同一份答案重复打分 M 次。答案钉住了 → 变化只可能来自裁判。</td>
+        <td class="num">M 次打分</td>
+      </tr>
+      <tr>
+        <td class="num">③</td><td>测生成侧</td>
+        <td>重复跑 N 次得 N 份答案；<b>每份先打分 M 次取多数</b>（压掉裁判噪声），再比较 N 份的多数结论。</td>
+        <td class="num">N×M 打分 + N 次生成</td>
+      </tr>
+      <tr>
+        <td class="num">④</td><td>比大小</td>
+        <td>谁大先解决谁。生成侧 ≫ 裁判侧 → 打分 3 次等于白花钱。</td>
+        <td class="num">0</td>
+      </tr>
+      <tr>
+        <td class="num">⑤</td><td>定 N</td>
+        <td>用 ③ 量出的散布反推「消融要生成几次才够」——<b>先量再定</b>，别先花 3 倍钱。</td>
+        <td class="num">0</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="warn">
+    <b>这一步最容易犯的三个错</b>
+    <ol>
+      <li><b>用统计工具去处理第 3 层。</b>输入被换了却「多跑几次取平均」→ 得到一个混合了两个不同系统的数字，<b>没有任何含义，却看起来更稳</b>。修法：报告生成前强校验指纹，不等就拒绝出报告（不是打一行警告）。</li>
+      <li><b>重复生成 N 次后取最高分。</b>这是选择偏差 —— 挑出运气最好的那次当成系统水平，会系统性虚高，而且<b>恰恰在最不稳定的题上虚高最多</b>。正确做法是取多数结论，并把散布一起报出来。</li>
+      <li><b>把不同口径的门槛并列比较。</b>D20 的「2.9 条」用的是 ε 点估计 0.95%；D21 的「11.42 条」用的是 Wilson 上界 7.14%。<b>不是同一把尺子</b>，放一起会得出「两次测量矛盾」的错误结论。</li>
+    </ol>
+  </div>
+
+  <h2>一句话判据</h2>
+  <table>
+    <thead><tr><th style="width:110px">层</th><th>你重复的是什么</th><th>该用什么</th></tr></thead>
+    <tbody>
+      <tr><td>第 1 层</td><td>重复<b>裁判</b>（输入不变）</td><td>多数投票、置信区间</td></tr>
+      <tr><td>第 2 层</td><td>重复<b>输入</b>（裁判固定）</td><td>抽样取分布，报散布不报最高分</td></tr>
+      <tr><td>第 3 层</td><td>什么都没重复 —— <b>测的是两个东西</b></td><td>指纹比对，拒绝出报告</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    配套文字材料：<code>docs/tutorials/D22-决策材料.md</code>（三个待拍板设计点的完整材料）<br>
+    数据来源：<code>D20-总结.md</code>（ε 校准）· <code>D21-评测集与语料.md</code> §2.10 / 附录 A（生成侧抖动实测）
+  </div>
+
+</div>
+</body>
+</html>
