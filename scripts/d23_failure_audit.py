@@ -28,7 +28,7 @@
 
 用法
 ----
-    uv run python -m scripts.d23_failure_audit            # 默认审计 generation_runs=1 的全部 run
+    uv run python -m scripts.d23_failure_audit            # 默认审计「每个配置最新的一轮」
     uv run python -m scripts.d23_failure_audit --run 6    # 只看某个 run
 """
 
@@ -40,6 +40,7 @@ import app.models  # noqa: F401
 from sqlalchemy import text
 
 from app.core.db import engine
+from app.services import failure_taxonomy
 
 # judge 的 reason 里出现这些词 → 说明它在拿 reference 那句"元说明"当判据
 TOOL_WORDS = ("工具", "检索", "search")
@@ -48,8 +49,21 @@ SHORT_NAME = {"pure_vector": "A", "hybrid": "B", "hybrid_rerank": "C"}
 
 
 async def fetch(conn, run_ids: list[int] | None) -> list[dict]:
-    where = "where r.run_id = any(:ids)" if run_ids else "where e.generation_runs = 1"
-    params = {"ids": run_ids} if run_ids else {}
+    """取明细。
+
+    `run_ids=None` 时取的是「**每个配置最新的一轮**」，**不是**"所有
+    `generation_runs = 1` 的 run" —— 重跑之后后者会从 3 条变 6 条，
+    把已作废的旧轮（run 4/5/6，其 tool_call 判定已声明作废）混进归因统计，
+    **且不报任何错**。口径与 `d23_diagnose.fetch_runs` 保持一致。
+    """
+    if run_ids:
+        where, params = "where r.run_id = any(:ids)", {"ids": run_ids}
+    else:
+        where, params = (
+            "where r.run_id in (select distinct on (config_name) id from eval_runs"
+            " where generation_runs = 1 order by config_name, id desc)",
+            {},
+        )
     rows = (
         await conn.execute(
             text(
@@ -73,7 +87,25 @@ async def fetch(conn, run_ids: list[int] | None) -> list[dict]:
 
 
 def classify(row: dict) -> str:
-    """单条明细的归因。"""
+    """单条明细的归因。
+
+    ⚠ **工具类题要在最前面单独分路**（2026-09-29 修复后新增），但**只在它没被打过分时**：
+    方案乙之后工具类题**不再送 judge** → `judge_raw` 是空 list（占位保证位置对齐）→
+    "judge 把元说明当答案"这条归因**对它们不可能成立**，
+    旧代码会因 `zero == 0` 一律落到「待查」，把真实的 `tool_miss` 说成"待查"。
+
+    而**修复前的旧 run**（4/5/6）工具类题是**真的送过 judge** 的（`judge_raw` 非空），
+    那些行仍要走下面的老路 —— 否则本脚本就**改写了历史**：
+    当初查出「13 条假失败」的证据会全部变成"工具题其它失败"。
+
+    判据复用 `failure_taxonomy.is_tool_only` —— 与 runner / 判定函数同一出处，
+    不许在这里再写一遍 `expected_tool is not None`（同一判断两处写 = 两份真相）。
+    """
+    if failure_taxonomy.is_tool_only(row["expected_tool"]) and not (row["judge_raw"] or []):
+        if row["failure_reason"] == failure_taxonomy.FAILURE_TOOL_MISS:
+            return "工具题未调对"
+        return "工具题其它失败"
+
     raw = row["judge_raw"] or []
     zero = sum(1 for x in raw if isinstance(x, dict) and x.get("correctness") == 0)
     tool_mentioned = sum(
@@ -176,6 +208,8 @@ async def main() -> None:
     print()
     print("⚠ 提醒：`评测集bug` 的判据是『reference 里含「应当调用/不应当调用」等元说明』")
     print("   + 『judge 的 0 分理由提到工具』两件事同时成立。若某条只满足其一，会归到「待查」，请人工看一眼。")
+    print("⚠ 提醒：`工具题未调对` 只在**修复后**的 run 上会出现（工具类题不送 judge、`judge_raw` 为空）；")
+    print("   修复前的旧 run 工具类题真的打过分，仍按老路归因 —— 两类标签不要混着比。")
 
 
 if __name__ == "__main__":

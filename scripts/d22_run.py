@@ -74,17 +74,28 @@ async def main() -> None:
     print("=" * 74)
 
     if args.dry_run:
+        from sqlalchemy import text
+
         from app.services import eval_service
 
         dataset_fp, case_count = await eval_service.fingerprint_from_db()
         corpus_fp, chunk_count = await eval_service.corpus_fingerprint_from_db()
+        # 工具类题（D23 修复后）**不送 judge** —— 打分次数要按"内容题"算，
+        # 否则预估会凭空多出 30 次/配置（10 题 × 3 次）。
+        async with engine.connect() as conn:
+            n_tool = (
+                await conn.execute(
+                    text("select count(*) from eval_cases where expected_tool is not null")
+                )
+            ).scalar_one()
         print(f"  评测集指纹 : {dataset_fp}")
         print(f"  语料指纹   : {corpus_fp}")
         print(f"  题数       : {case_count}   切片数：{chunk_count}")
         print(f"  配置       : {args.config}")
+        print(f"  题目构成   : 内容题 {case_count - n_tool} 条（要打分）+ 工具类题 {n_tool} 条（不送 judge）")
         print(
             f"  预计耗时   : 生成 {case_count * args.generation_runs} 次 + "
-            f"打分 {case_count * args.generation_runs * args.judge_runs} 次"
+            f"打分 {(case_count - n_tool) * args.generation_runs * args.judge_runs} 次"
         )
         await engine.dispose()
         print("\n[--dry-run] 未实际执行。")
@@ -113,9 +124,15 @@ async def main() -> None:
     print(f"准确率       : {result['accuracy']:.2%}  "
           f"（{result['passed_cases']}/{result['total_cases']} 题，分母是**题数**）")
     print(f"正确性均分   : {result['score_correctness']}  "
-          f"（分母是**明细行数** {result['total_rows']}，与上面的口径不同）")
+          f"（分母是**有分数的行数** {result['scored_rows']}，与上面的口径不同）")
     print(f"忠实度均分   : {result['score_faithfulness']}")
     print(f"完整性均分   : {result['score_completeness']}")
+    if result["scored_rows"] != result["total_rows"]:
+        # D23 修复（方案乙）之后这里必然不等：工具类题只判工具调用、不送 judge，
+        # 三列分数是 NULL，不参与求平均。差多少行 = 有多少条工具类题。
+        print(f"  ⚠ 明细行数 {result['total_rows']} ≠ 有分数的行数 {result['scored_rows']}"
+              f"（差的 {result['total_rows'] - result['scored_rows']} 行是**工具类题**："
+              f"只判工具调用、不判内容，故三列均分里没有它们）")
     print(f"生成不一致题 : {result['generation_inconsistent']}"
           "（同题多次生成结论不同的题数 —— 这个数不低时，分数里有随机性成分）")
     print(f"失败模式分布 : {json.dumps(result['failure_breakdown'], ensure_ascii=False)}")

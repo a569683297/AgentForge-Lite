@@ -35,6 +35,7 @@ from collections import Counter
 import app.models  # noqa: F401 —— 导入即注册全部模型
 from sqlalchemy import text
 
+from app.config import RETRIEVER_CONFIGS
 from app.core.db import engine
 
 # D22 探针实测的生成侧抖动（10 题里 1 题翻转）—— 本轮所有差异都要与它对比
@@ -44,22 +45,30 @@ SCORE_BUCKETS = (5, 4, 3, 2, 1)
 
 
 async def fetch_runs(conn) -> list[dict]:
-    """本次诊断的三个 run：generation_runs = 1（D22 小规模那条是 2，自动排除）。"""
+    """本次诊断的三条 run：**每个配置各取最新的一条**（`generation_runs = 1`）。
+
+    为什么不是「恰好三条」——
+    D23 修完尺子（工具类题不再送 judge）必须重跑一遍，表里 `generation_runs = 1`
+    的 run 就从 3 条变 6 条。旧那轮（run 4/5/6）的 tool_call 判定已作废
+    （**不重算、不删**，留作证据），如果这里还按「数够不够 3 条」判断，
+    重跑之后脚本会直接退出。所以改成按配置取 `id` 最大的一条。
+    """
     rows = (
         await conn.execute(
             text(
                 """
-                select id, config_name, accuracy, score_correctness,
+                select distinct on (config_name)
+                       id, config_name, accuracy, score_correctness,
                        score_faithfulness, score_completeness,
                        runs_per_case, generation_runs, created_at
                 from eval_runs
                 where generation_runs = 1
-                order by id
+                order by config_name, id desc
                 """
             )
         )
     ).mappings().all()
-    return [dict(r) for r in rows]
+    return sorted((dict(r) for r in rows), key=lambda r: r["id"])
 
 
 async def fetch_details(conn, run_ids: list[int]) -> list[dict]:
@@ -101,6 +110,19 @@ def judge_internal_flip(raw) -> bool:
     return len(set(scores)) > 1
 
 
+def outcome_tuple(row: dict | None) -> tuple:
+    """一条明细在「能不能区分配置」这件事上的**可比形态** = `(判定, 分数)`。
+
+    ⚠ 不能只看分数（2026-09-29 修复后新增）：
+    工具类题**不判内容**、分数恒为 `None` → 只看分数的话，它们在三配置下
+    全是 `None`、`len(set(...)) == 1`，会被**自动算成"三配置一致"** ——
+    等于把 10 条题从"有没有区分度"的统计里悄悄豁免掉，**且不报任何错**。
+    """
+    if row is None:
+        return (None, None)
+    return (bool(row["passed"]), row["score_correctness"])
+
+
 def summarize(run: dict, rows: list[dict]) -> dict:
     """一个配置的汇总（accuracy 自己重算一遍，与库里存的对账）。"""
     by_case: dict[str, list[dict]] = {}
@@ -127,6 +149,9 @@ def summarize(run: dict, rows: list[dict]) -> dict:
         "config": run["config_name"],
         "n_cases": n_cases,
         "n_rows": n_rows,
+        # ⚠ **有分数的行数**（内容题）。工具类题只判工具调用、不送 judge → 三列分数是 NULL。
+        #   凡是"按分数统计"的百分比都必须用它当分母，用 n_rows 会系统性压低。
+        "n_scored": len(corr),
         "passed_cases": passed_cases,
         "accuracy": accuracy,
         "accuracy_stored": run["accuracy"],
@@ -134,7 +159,10 @@ def summarize(run: dict, rows: list[dict]) -> dict:
         "faithfulness": sum(faith) / len(faith) if faith else 0.0,
         "completeness": sum(comp) / len(comp) if comp else 0.0,
         "perfect_rows": sum(1 for r in rows if r["score_correctness"] == 5),
-        "flipped_rows": sum(1 for r in rows if judge_internal_flip(r["judge_raw"])),
+        # judge 内翻只能在"真的被 judge 打过分"的行上看 → 分母同样是有分数的行数
+        "flipped_rows": sum(
+            1 for r in rows if r["score_correctness"] is not None and judge_internal_flip(r["judge_raw"])
+        ),
         "failures": Counter(r["failure_reason"] for r in rows if r["failure_reason"]),
         "rows": rows,
     }
@@ -151,13 +179,19 @@ def print_summary_table(blocks: list[dict]) -> None:
             f"| `{b['config']}` | {b['run_id']} | {b['n_cases']} | {b['passed_cases']} | "
             f"{b['accuracy']:.2%} | {b['accuracy_stored']:.2%} | "
             f"{b['correctness']:.2f} | {b['faithfulness']:.2f} | {b['completeness']:.2f} | "
-            f"{b['perfect_rows']}/{b['n_rows']} | {b['flipped_rows']}/{b['n_rows']} |"
+            f"{b['perfect_rows']}/{b['n_scored']} | {b['flipped_rows']}/{b['n_scored']} |"
         )
+    # 明细行数 ≠ 有分数的行数时必须说清楚，否则后面每一列百分比的分母都是隐式的
+    if any(b["n_scored"] != b["n_rows"] for b in blocks):
+        skipped = {b["n_rows"] - b["n_scored"] for b in blocks}
+        print()
+        print(f"⚠ 明细行数 ≠ **有分数的行数**：差的 {sorted(skipped)} 行是**工具类题**"
+              "（只判工具调用、不送 judge）→ **后两列的分母是有分数的行数**，不是行数。")
 
 
 def print_score_distribution(blocks: list[dict]) -> None:
     print()
-    print("## 二、正确性分数分布（判定级，分母 = 明细行数）")
+    print("## 二、正确性分数分布（分母 = **有分数的行数**；工具类题不判内容，不进此表）")
     print()
     header = "| 分数 | " + " | ".join(f"`{b['config']}`" for b in blocks) + " |"
     print(header)
@@ -166,13 +200,23 @@ def print_score_distribution(blocks: list[dict]) -> None:
         cells = []
         for b in blocks:
             n = sum(1 for r in b["rows"] if r["score_correctness"] == score)
-            pct = n / b["n_rows"] * 100 if b["n_rows"] else 0
+            pct = n / b["n_scored"] * 100 if b["n_scored"] else 0
             cells.append(f"{n} ({pct:.0f}%)")
         print(f"| {score} 分 | " + " | ".join(cells) + " |")
+    # 把"没进表的那些行"也印出来 —— 否则读者会以为 5 档加起来就是全部明细
+    cells = []
+    for b in blocks:
+        n = b["n_rows"] - b["n_scored"]
+        pct = n / b["n_rows"] * 100 if b["n_rows"] else 0
+        cells.append(f"{n} ({pct:.0f}%)")
+    print(f"| 无分数（工具题） | " + " | ".join(cells) + " |")
 
 
 def print_per_case(blocks: list[dict]) -> None:
-    """逐题并排：只列三配置**不一致**的题（那些才是"有区分潜力"的题）。"""
+    """逐题并排：只列三配置**不一致**的题（那些才是"有区分潜力"的题）。
+
+    比较的是 `outcome_tuple`（判定 + 分数），不是只看分数 —— 理由见那里。
+    """
     per_config: dict[str, dict[str, dict]] = {}
     for b in blocks:
         per_config[b["config"]] = {r["case_key"]: r for r in b["rows"]}
@@ -182,14 +226,14 @@ def print_per_case(blocks: list[dict]) -> None:
 
     differing, identical = [], []
     for key in all_keys:
-        scores = [per_config[c].get(key, {}).get("score_correctness") for c in configs]
-        (differing if len(set(scores)) > 1 else identical).append((key, scores))
+        tuples = [outcome_tuple(per_config[c].get(key)) for c in configs]
+        (differing if len(set(tuples)) > 1 else identical).append((key, tuples))
 
     print()
-    print("## 三、逐题并排（只列三配置分数**不一致**的题）")
+    print("## 三、逐题并排（只列三配置**判定或分数不一致**的题）")
     print()
     if not differing:
-        print("**没有任何一条题在三个配置之间分数不同** —— 全部 50 条题都是「一致」。")
+        print(f"**没有任何一条题在三个配置之间判定或分数不同** —— 全部 {len(all_keys)} 条题都是「一致」。")
     else:
         meta = {}
         for b in blocks:
@@ -197,14 +241,22 @@ def print_per_case(blocks: list[dict]) -> None:
                 meta[r["case_key"]] = (r["category"], r["difficulty"], r["is_negative"])
         print("| 题号 | 类别 | 难度 | 负例 | " + " | ".join(configs) + " |")
         print("|---" * (4 + len(configs)) + "|")
-        for key, scores in differing:
+        for key, tuples in differing:
             cat, diff, neg = meta.get(key, ("?", "?", False))
-            cells = [("—" if s is None else f"{s:g}") for s in scores]
+            cells = [
+                ("过" if t[0] else "败") + ("—" if t[1] is None else f"{t[1]:g}") for t in tuples
+            ]
             print(f"| {key} | {cat} | {diff} | {'是' if neg else ''} | " + " | ".join(cells) + " |")
+        print()
+        print("> 单元格格式：`过5` = 判定通过且正确性 5 分；`败2` = 未通过且 2 分；"
+              "`过—` = 通过但**没有分数**（工具类题不判内容）。")
 
     print()
     print(f"- 三配置**完全一致**的题：**{len(identical)}/{len(all_keys)}**")
     print(f"- 三配置**至少一个不同**的题：**{len(differing)}/{len(all_keys)}**")
+    n_tool = sum(1 for r in blocks[0]["rows"] if r["score_correctness"] is None)
+    if n_tool:
+        print(f"  （其中 **{n_tool}** 条是工具类题：判定依据是「有没有调对工具」，不涉及分数）")
 
 
 def print_verdict(blocks: list[dict], n_identical: int, n_total: int) -> None:
@@ -238,16 +290,19 @@ def print_verdict(blocks: list[dict], n_identical: int, n_total: int) -> None:
               f"折算到 50 条约 {GENERATION_JITTER_FLOOR * n_total:.1f} 条会随机翻转，"
               f"与可区分题的**量级相当**")
     print()
-    perfect_pct = c["perfect_rows"] / c["n_rows"] if c["n_rows"] else 0
-    print(f"**③ 天花板效应**：C 的满分判定 **{c['perfect_rows']}/{c['n_rows']}"
+    perfect_pct = c["perfect_rows"] / c["n_scored"] if c["n_scored"] else 0
+    print(f"**③ 天花板效应**：C 的满分判定 **{c['perfect_rows']}/{c['n_scored']}"
           f"（{perfect_pct:.0%}）**，准确率 **{c['accuracy']:.2%}**。")
+    print(f"   分母是**有分数的行数**（{c['n_rows']} 条明细里 {c['n_scored']} 条有分数）——"
+          "工具类题不判内容，不在其中。")
 
 
 async def main() -> None:
     async with engine.connect() as conn:
         runs = await fetch_runs(conn)
-        if len(runs) != 3:
-            print(f"⚠ 期望 3 条 `generation_runs = 1` 的 run，实际 {len(runs)} 条：")
+        missing = [c for c in RETRIEVER_CONFIGS if c not in {r["config_name"] for r in runs}]
+        if missing:
+            print(f"⚠ 缺配置：{missing}（表里 `generation_runs = 1` 的 run 共 {len(runs)} 条）")
             for r in runs:
                 print(f"   id={r['id']} config={r['config_name']}")
             print("   → 三配置没跑齐，先跑完再诊断。")
@@ -286,10 +341,11 @@ async def main() -> None:
     configs = [b["config"] for b in blocks]
     per_config = [{r["case_key"]: r for r in b["rows"]} for b in blocks]
     all_keys = sorted(set().union(*(set(p) for p in per_config)))
+    # 判据复用 outcome_tuple —— **不许在这里再写一遍**（同一判断两处写 = 两份真相）
     n_identical = sum(
         1
         for key in all_keys
-        if len({p.get(key, {}).get("score_correctness") for p in per_config}) == 1
+        if len({outcome_tuple(p.get(key)) for p in per_config}) == 1
     )
 
     print()
@@ -322,6 +378,7 @@ async def main() -> None:
             }
             for b in blocks
         },
+        "scored_rows": {b["config"]: b["n_scored"] for b in blocks},
         "identical_cases": n_identical,
         "total_cases": len(all_keys),
         "generation_jitter_floor": GENERATION_JITTER_FLOOR,
