@@ -57,6 +57,16 @@ class ChatResult(BaseModel):
             "改写会引入新的不确定性，等 D17 评测体系量化后再定策略。"
         ),
     )
+    tool_calls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "本轮实际调用的工具名序列（按调用顺序）。D22 新增。"
+            "与 sources 同族的『过程的结构化产物需要一条出口』："
+            "评测要判定『C 类题有没有选对工具』（tool_miss），"
+            "而这件事**从答案文本里看不出来** —— 答案可能答对了却完全没查库。"
+            "这些信息本来就在图内部的 messages 里，只是原先没有出口。"
+        ),
+    )
 
 
 class ChatRequest(BaseModel):

@@ -200,37 +200,44 @@ def get_agent():
 # ============================================================
 # 注：引用校验 check_citations 放在 app/core/citation.py
 #     （纯函数、不依赖 config，可与收集器一起单独测试）
-async def run_agent(session_id: uuid.UUID, user_input: str) -> ChatResult:
+async def run_agent(
+    session_id: uuid.UUID,
+    user_input: str,
+    *,
+    persist: bool = True,
+) -> ChatResult:
     """
     带记忆对话的完整入口：读历史 → 跑 Agent → 双层写回 → 返回回答 + 来源。
 
     D11 变化：返回值从 str 变成 ChatResult（answer + sources + invalid_citations）。
     D14 变化：① session_id 从 str 改为 uuid.UUID；② 新增 PG 全量落库（第 ⑧ 步）。
+    D22 变化：① 新增 persist 开关（评测模式不写会话数据）；
+              ② 返回值新增 tool_calls（本轮工具调用序列）。
 
-    端到端流程：
-      ⓪ reset_sources()             重新绑定本请求的引用收集器（并发隔离的关键）
-      ① get_window(session_id)      从 Redis 读最近 N 轮历史（未命中/不可用 → PG 兜底）
-      ①.5 get_summary(session_id)   从 PG 读长期摘要 ← D15 新增
-      ② messages = 历史 + [本次提问]（摘要进 state，不进 messages）
-      ③ agent.ainvoke(messages)     跑 LangGraph 的 ReAct 循环（plan 节点兼任"决策+回答"）
-          └─ 工具执行时把来源登记进收集器（结构通道）
-      ④ 取最终回答（plan 给出的那条；D14 修复后不再有"两份并列答案"要从里面挑）
-      ⑤ get_sources()               取出本请求累计的来源
-      ⑥ check_citations()           校验回答里的 [n] 有没有越界
-      ⑦ append_turn(...)            写回 Redis 热窗口（只 user + assistant）
-      ⑧ append_messages(...)        写回 PG 全量（含 tool 行）← D14 新增
-      ⑧.5 maybe_summarize(...)      轮数够就压缩已滑出窗口的那段 ← D15 新增
-      ⑨ 返回 ChatResult
+    ------------------------------------------------------------------
+    persist=False 的语义与边界（评测专用）
+    ------------------------------------------------------------------
+    评测要对 50 条题 × 3 个配置各跑一遍。若照常写回，会往 messages 里灌
+    150 个**假会话** —— 而 PRD §10 说 messages 是"用户对话"表，评测不是用户对话。
+    明细表 eval_case_results 已经是这些答案的唯一真相，messages 里的副本
+    只会与它慢慢漂移，却看起来也像"数据"。
 
-    ⚠ ⑧.5 是"为下一轮准备"的：跑它的时候本轮回答早已生成完，它影响不到本轮
-      （这轮用的摘要是 ①.5 读进来的）。所以摘要失败只意味着"下一轮少一份背景"，
-      不是"本轮出错" —— 这是它敢被 try 吞掉的依据。
+    ⚠ 但它**影响不到本轮答案** —— 这不是推测，是代码结构保证的：
+      写操作（⑦⑧⑧.5）全部排在 ④ 取答案之后，改不了已经生成的那段文本。
+      唯一的例外是"读到自己刚写的东西"，而评测每条题都新建 session，
+      单次运行内不会发生。**所以这个前提必须由调用方保证**（runner 每条题
+      新建 session_id），否则第二题会读到第一题的问答，答案就真的变了。
+
+    关掉写入后 **仍然执行** ① get_window / ①.5 get_summary：
+      新 session 必然读到空，看似可以跳过 —— 但保留意味着**只有一条读路径**。
+      "评测走另一条读路径"会让"评测测的是不是线上那条路径"这个问题永远无法回答。
 
     Args:
         session_id: 会话 ID（uuid.UUID —— 与 sessions.id / messages.session_id 同类型）
         user_input: 用户本轮输入
+        persist:    True=写回会话记忆（正常对话）；False=不写（评测）。默认 True，旧行为不变。
     Returns:
-        ChatResult：回答文本 + 来源映射表 + 越界引用编号
+        ChatResult：回答文本 + 来源映射表 + 越界引用编号 + 工具调用序列
     """
     from app.services.memory_service import append_turn, get_window, maybe_summarize
     from app.services.session_service import append_messages, get_summary
@@ -283,42 +290,63 @@ async def run_agent(session_id: uuid.UUID, user_input: str) -> ChatResult:
             len(sources),
         )
 
-    # ⑦ 写回 Redis 热窗口（只存 user + 最终回答，不存中间工具消息——见 memory_service 说明）
-    await append_turn(session_id, user_input, final_answer)
-
-    # ⑧ 写回 PG 全量（D14 新增）：含中间的 assistant(tool_calls) 与 tool 消息。
-    #    「本轮新增了哪些消息」= 跑完图后的完整消息列表，减去进图之前的那一段。
-    #    为什么可以直接按长度切：history 是进图前的全部内容，图只会在后面追加，
-    #    所以 result["messages"][len(history):] 恰好是本轮新增
-    #    （① 用户提问 → ② 若干中间步骤 → ③ 最终回答）。
+    # ⑥.5 收集本轮实际调用的工具序列（D22 新增）——
+    #      评测判「C 类题有没有选对工具」（tool_miss）的**唯一依据**。
+    #      这件事从答案文本里看不出来：答案可能答对，却完全没查库。
+    #      与 D11 的 sources 同族 ——「过程的结构化产物需要一条出口」。
+    #      「本轮新增了哪些消息」= 跑完图后的完整列表减去进图之前那一段；
+    #      可以直接按长度切，因为 history 是进图前的全部内容，图只会在后面追加。
     new_messages = result["messages"][len(history):]
-    try:
-        await append_messages(session_id, new_messages, title_hint=user_input)
-    except Exception:
-        # 落库失败不阻断对话：用户已经等到回答了，此时抛 500 只会让这一轮白跑，
-        # 而且历史仍在 Redis 里（下一轮上下文不丢）。但必须留下 ERROR 日志 ——
-        # 静默失败才是真正的坑：D12 的孤儿切片就是这么攒出来的。
-        logger.exception("PG 落库失败（对话结果仍已返回）session=%s", session_id)
+    tool_names = [
+        (call.get("function") or {}).get("name", "")
+        for message in new_messages
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+    ]
+    tool_names = [name for name in tool_names if name]
 
-    # ⑧.5 摘要压缩检查（D15 新增 / PRD F5.1 后半 + F5.2）：
-    #      排在 ⑧ 之后，是因为它的触发判据要从 PG 数轮数 ——
-    #      必须等本轮的 user/assistant 先落库，否则永远差一轮。
-    #      排在 ⑨ 之前（同步执行）：换来可预测的行为与可断言的结果；
-    #      将来若要降延迟，可换成 asyncio.create_task，函数本身不用改。
-    try:
-        await maybe_summarize(session_id)
-    except Exception:
-        # 同上：摘要失败不影响本轮（回答已产出、记忆已写）。
-        # maybe_summarize 内部已经把 LLM 失败/空输出都收敛成返回值了，
-        # 这里兜的是"它自己崩了"（比如 PG 查询异常）—— 一样不该让对话 500。
-        logger.exception("摘要压缩检查失败（对话不受影响）session=%s", session_id)
+    # ---- 以下三步是「写回会话记忆」；评测模式（persist=False）整体跳过 ----
+    #      跳过是安全的：它们在时间上全部排在 ④ 取答案之后，改不了已生成的文本。
+    #      详细边界见函数 docstring 的 persist 说明。
+    if persist:
+        # ⑦ 写回 Redis 热窗口（只存 user + 最终回答，不存中间工具消息——见 memory_service 说明）
+        await append_turn(session_id, user_input, final_answer)
+
+        # ⑧ 写回 PG 全量（D14 新增）：含中间的 assistant(tool_calls) 与 tool 消息。
+        try:
+            await append_messages(session_id, new_messages, title_hint=user_input)
+        except Exception:
+            # 落库失败不阻断对话：用户已经等到回答了，此时抛 500 只会让这一轮白跑，
+            # 而且历史仍在 Redis 里（下一轮上下文不丢）。但必须留下 ERROR 日志 ——
+            # 静默失败才是真正的坑：D12 的孤儿切片就是这么攒出来的。
+            logger.exception("PG 落库失败（对话结果仍已返回）session=%s", session_id)
+
+        # ⑧.5 摘要压缩检查（D15 新增 / PRD F5.1 后半 + F5.2）：
+        #      排在 ⑧ 之后，是因为它的触发判据要从 PG 数轮数 ——
+        #      必须等本轮的 user/assistant 先落库，否则永远差一轮。
+        #      排在 ⑨ 之前（同步执行）：换来可预测的行为与可断言的结果；
+        #      将来若要降延迟，可换成 asyncio.create_task，函数本身不用改。
+        try:
+            await maybe_summarize(session_id)
+        except Exception:
+            # 同上：摘要失败不影响本轮（回答已产出、记忆已写）。
+            # maybe_summarize 内部已经把 LLM 失败/空输出都收敛成返回值了，
+            # 这里兜的是"它自己崩了"（比如 PG 查询异常）—— 一样不该让对话 500。
+            logger.exception("摘要压缩检查失败（对话不受影响）session=%s", session_id)
 
     # ⑨ 返回结构化结果
     logger.info(
-        "Agent 完成 session=%s 回答长度=%d 来源数=%d 越界引用=%s",
+        "Agent 完成 session=%s 回答长度=%d 来源数=%d 工具调用=%s 越界引用=%s persist=%s",
         session_id,
         len(final_answer),
         len(sources),
+        tool_names or "无",
         invalid or "无",
+        persist,
     )
-    return ChatResult(answer=final_answer, sources=sources, invalid_citations=invalid)
+    return ChatResult(
+        answer=final_answer,
+        sources=sources,
+        invalid_citations=invalid,
+        tool_calls=tool_names,
+    )
