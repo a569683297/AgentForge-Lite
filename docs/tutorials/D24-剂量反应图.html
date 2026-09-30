@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>D24 · 干扰文档的剂量-反应曲线</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0; padding: 28px 32px 40px;
+    background: #ffffff; color: #1f2937;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.6;
+  }
+  h1 { font-size: 21px; margin: 0 0 6px; color: #111827; }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 22px; }
+  h2 { font-size: 16px; margin: 30px 0 4px; color: #111827; }
+  .cap { color: #6b7280; font-size: 12.5px; margin-bottom: 8px; }
+  .card {
+    background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 10px 12px 4px; margin-bottom: 6px;
+  }
+  .legend { display: flex; gap: 22px; font-size: 13px; margin: 6px 0 14px; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 22px; height: 3px; border-radius: 2px; display: inline-block; }
+  .note {
+    background: #fffbeb; border-left: 3px solid #f59e0b; border-radius: 0 8px 8px 0;
+    padding: 12px 16px; font-size: 13.5px; margin: 20px 0 0;
+  }
+  .note b { color: #92400e; }
+  table { border-collapse: collapse; font-size: 13px; margin-top: 10px; width: 100%; }
+  th, td { border: 1px solid #e5e7eb; padding: 5px 10px; text-align: center; }
+  th { background: #f3f4f6; font-weight: 600; color: #374151; }
+  td.l { text-align: left; }
+  .k { color: #b91c1c; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>D24 · 干扰文档的剂量-反应曲线</h1>
+<div class="sub">
+  横轴 = 加了几篇「同主题、不同结论」的干扰文档；纵轴 = 标准答案文档（gold）在检索结果里的名次（越小越靠前）。<br>
+  数据来源：<code>scripts/d24_distractor_probe.py</code>（零 LLM 调用）；35 条题 × 5 轮 × 4 条链路，两次独立运行结果逐字相同。
+</div>
+
+<div class="legend">
+  <span><i class="swatch" style="background:#c0392b"></i>向量路（A 配置用的）</span>
+  <span><i class="swatch" style="background:#2471a3"></i>融合路（B 配置用的）</span>
+  <span><i class="swatch" style="background:#1e8449"></i>重排路（C 配置用的）</span>
+  <span style="color:#6b7280">灰色虚线 = 第 5 名（B 配置只取前 5 条）</span>
+</div>
+
+<h2>① 单文档题 A08「出差期间的伙食补助标准是多少？」</h2>
+<div class="cap">干扰篇对它的推力最干净：向量路 <b>1→2→3→4→5</b>，每加一篇正好推后 1 位。</div>
+<div class="card">
+<svg viewBox="0 0 720 360" width="100%" height="360" role="img"
+     aria-label="A08 的剂量-反应曲线：向量路 1,2,3,4,5；融合路与重排路 1,2,2,2,2">
+  <!-- 网格 -->
+  <g stroke="#e5e7eb" stroke-width="1">
+    <line x1="70" y1="300" x2="660" y2="300"/>
+    <line x1="70" y1="255" x2="660" y2="255"/>
+    <line x1="70" y1="210" x2="660" y2="210"/>
+    <line x1="70" y1="165" x2="660" y2="165"/>
+    <line x1="70" y1="120" x2="660" y2="120"/>
+    <line x1="70" y1="75"  x2="660" y2="75"/>
+  </g>
+  <!-- 第 5 名阈值 -->
+  <line x1="70" y1="120" x2="660" y2="120" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="6 5"/>
+  <text x="666" y="124" font-size="11.5" fill="#6b7280">第 5 名</text>
+  <text x="80" y="112" font-size="11.5" fill="#6b7280">↑ 越过它 = A / B 都拿不到</text>
+  <!-- 纵轴刻度 -->
+  <g font-size="12" fill="#6b7280" text-anchor="end">
+    <text x="60" y="304">1</text>
+    <text x="60" y="259">2</text>
+    <text x="60" y="214">3</text>
+    <text x="60" y="169">4</text>
+    <text x="60" y="124">5</text>
+    <text x="60" y="79">6</text>
+  </g>
+  <!-- 折线：融合 / 重排（在此题上完全重合） -->
+  <polyline points="70,300 217,255 365,255 512,255 660,255"
+            fill="none" stroke="#2471a3" stroke-width="3" stroke-linejoin="round"/>
+  <polyline points="70,300 217,255 365,255 512,255 660,255"
+            fill="none" stroke="#1e8449" stroke-width="2" stroke-dasharray="5 4" stroke-linejoin="round"/>
+  <!-- 折线：向量 -->
+  <polyline points="70,300 217,255 365,210 512,165 660,120"
+            fill="none" stroke="#c0392b" stroke-width="3" stroke-linejoin="round"/>
+  <!-- 数据点 -->
+  <g fill="#c0392b">
+    <circle cx="70" cy="300" r="5"/><circle cx="217" cy="255" r="5"/>
+    <circle cx="365" cy="210" r="5"/><circle cx="512" cy="165" r="5"/>
+    <circle cx="660" cy="120" r="6.5"/>
+  </g>
+  <g fill="#2471a3">
+    <circle cx="70" cy="300" r="4"/><circle cx="217" cy="255" r="4"/>
+    <circle cx="365" cy="255" r="4"/><circle cx="512" cy="255" r="4"/>
+    <circle cx="660" cy="255" r="4"/>
+  </g>
+  <!-- 终点标注 -->
+  <text x="640" y="106" font-size="12.5" fill="#c0392b" text-anchor="end" font-weight="600">向量 · 第 5 名（贴到边界）</text>
+  <text x="640" y="272" font-size="12.5" fill="#2471a3" text-anchor="end" font-weight="600">融合 / 重排 · 第 2 名（饱和）</text>
+  <!-- 横轴 -->
+  <g font-size="12" fill="#6b7280" text-anchor="middle">
+    <text x="70"  y="326">0</text>
+    <text x="217" y="326">1</text>
+    <text x="365" y="326">2</text>
+    <text x="512" y="326">3</text>
+    <text x="660" y="326">4</text>
+  </g>
+  <text x="365" y="350" font-size="12.5" fill="#4b5563" text-anchor="middle">干扰文档篇数</text>
+</svg>
+</div>
+
+<h2>② 跨文档题 B01「报销申请到款项到账，总共多少时限？」</h2>
+<div class="cap">三条链路分开：向量路推得动、融合路先升后回、重排路基本不动。</div>
+<div class="card">
+<svg viewBox="0 0 720 360" width="100%" height="360" role="img"
+     aria-label="B01 的剂量-反应曲线：向量 1,2,4,5,5；融合 1,2,3,2,2；重排 1,1,1,2,2">
+  <g stroke="#e5e7eb" stroke-width="1">
+    <line x1="70" y1="300" x2="660" y2="300"/>
+    <line x1="70" y1="255" x2="660" y2="255"/>
+    <line x1="70" y1="210" x2="660" y2="210"/>
+    <line x1="70" y1="165" x2="660" y2="165"/>
+    <line x1="70" y1="120" x2="660" y2="120"/>
+    <line x1="70" y1="75"  x2="660" y2="75"/>
+  </g>
+  <line x1="70" y1="120" x2="660" y2="120" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="6 5"/>
+  <text x="666" y="124" font-size="11.5" fill="#6b7280">第 5 名</text>
+  <g font-size="12" fill="#6b7280" text-anchor="end">
+    <text x="60" y="304">1</text>
+    <text x="60" y="259">2</text>
+    <text x="60" y="214">3</text>
+    <text x="60" y="169">4</text>
+    <text x="60" y="124">5</text>
+    <text x="60" y="79">6</text>
+  </g>
+  <polyline points="70,300 217,300 365,300 512,255 660,255"
+            fill="none" stroke="#1e8449" stroke-width="2.5" stroke-dasharray="5 4" stroke-linejoin="round"/>
+  <polyline points="70,300 217,255 365,210 512,255 660,255"
+            fill="none" stroke="#2471a3" stroke-width="3" stroke-linejoin="round"/>
+  <polyline points="70,300 217,255 365,165 512,120 660,120"
+            fill="none" stroke="#c0392b" stroke-width="3" stroke-linejoin="round"/>
+  <g fill="#c0392b">
+    <circle cx="70" cy="300" r="5"/><circle cx="217" cy="255" r="5"/>
+    <circle cx="365" cy="165" r="5"/><circle cx="512" cy="120" r="5"/>
+    <circle cx="660" cy="120" r="6.5"/>
+  </g>
+  <g fill="#2471a3">
+    <circle cx="70" cy="300" r="4"/><circle cx="217" cy="255" r="4"/>
+    <circle cx="365" cy="210" r="4"/><circle cx="512" cy="255" r="4"/>
+    <circle cx="660" cy="255" r="4"/>
+  </g>
+  <g fill="#1e8449">
+    <circle cx="70" cy="300" r="4"/><circle cx="217" cy="300" r="4"/>
+    <circle cx="365" cy="300" r="4"/><circle cx="512" cy="255" r="4"/>
+    <circle cx="660" cy="255" r="4"/>
+  </g>
+  <text x="640" y="106" font-size="12.5" fill="#c0392b" text-anchor="end" font-weight="600">向量 · 第 5 名（贴到边界）</text>
+  <text x="640" y="272" font-size="12.5" fill="#2471a3" text-anchor="end" font-weight="600">融合 · 第 2 名</text>
+  <g font-size="12" fill="#6b7280" text-anchor="middle">
+    <text x="70"  y="326">0</text>
+    <text x="217" y="326">1</text>
+    <text x="365" y="326">2</text>
+    <text x="512" y="326">3</text>
+    <text x="660" y="326">4</text>
+  </g>
+  <text x="365" y="350" font-size="12.5" fill="#4b5563" text-anchor="middle">干扰文档篇数</text>
+</svg>
+</div>
+
+<h2>③ 汇总读数（8 条目标题，全部由脚本算出）</h2>
+<table>
+  <thead>
+    <tr><th class="l">口径</th><th>向量路</th><th>融合路</th><th>重排路</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="l">平均位移（基线 → 4 篇）</td><td class="k">1.25 位</td><td>0.38 位</td><td>0 位</td></tr>
+    <tr><td class="l">最大位移</td><td class="k">4 位</td><td>1 位</td><td>0 位</td></tr>
+    <tr><td class="l">单调不减的题数</td><td>8 / 8</td><td>—</td><td>—</td></tr>
+    <tr><td class="l">每篇干扰篇的平均推力</td><td class="k">0.31 位/篇</td><td>0.09 位/篇</td><td>—</td></tr>
+    <tr><td class="l">全 35 条题仍在 top5 的条数（4 篇时）</td><td>31 / 35</td><td>34 / 35</td><td><b>35 / 35</b></td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>怎么读这张图：</b><br>
+  ① <b>向量路是唯一被推得动的</b>（红线上台阶，8/8 条单调不减）→ 干扰篇"能造出竞争"这件事是真的。<br>
+  ② <b>融合路饱和</b>（蓝线第 2 篇之后就不动了）→ 原因是 RRF 要求一篇文档被向量与关键词<b>两路共同认可</b>；
+  "同主题、不同结论"的干扰篇<b>语义像但用词不同</b>，只能抢走第 1 名，其余同类干扰篇全排在 gold 之后。<br>
+  ③ <b>重排路完全不动</b>（绿线全在 top5 内）→ 想分开 B 与 C（唯一有区分度的区间是第 6~20 名）<b>这条路做不到</b>。<br>
+  ④ A08 与 B01 的向量名次已到 <b>第 5 名（正好卡在阈值线上）</b>：<b>再写 1 篇同类干扰篇</b>就可能造出
+  「A 拿不到、B 拿得到」——那正是 PRD S2 验收点「混合+重排 ≥ 纯向量」要考的东西。
+</div>
+
+<div class="note" style="background:#fff1f2;border-left-color:#e11d48">
+  <b style="color:#9f1239">⚠ 边界声明：</b>本轮的干扰文档是<b>合成</b>的，只为测「竞争能不能造出来」，
+  <b>不代表真实企业文档的分布</b>。写入窗口约 2 分 45 秒，结束后已断言"残留 0 + 语料指纹逐字恢复"，并独立回库复核。
+</div>
+
+</body>
+</html>
