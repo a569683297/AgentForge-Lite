@@ -141,7 +141,30 @@ async def section_a(ck: Checker) -> None:
         """))).all()
     run_types = {c.column_name: (c.data_type, c.udt_name) for c in run_cols}
     print(f"  eval_runs 列 = {list(run_types)}")
-    ck.check(len(run_cols) == 11, "A8 eval_runs 有 11 列", f"实际={len(run_cols)}")
+    # A8 的教训（2026-09-30 修）：这条原来写的是 `len(run_cols) == 11`。
+    # D22（23240d1）给 eval_runs 加了 corpus_fingerprint / generation_runs
+    # 两列 —— 这条断言**当场就失真了**，从 D22 起一直是红的，只是没人跑过
+    # 这个脚本，直到 D24 做全量回归才暴露出来。
+    # 病根：硬编码「总列数」等于把断言拍成一张一次性快照，而 schema 是会
+    # **合法增长**的。所以拆成两条：
+    #   A8  「D21 定下的列一个不少」（子集校验，按名字）→ 永不失效。
+    #        这才是我当时真正想守的东西：没人偷偷删列 / 改名 / 换语义。
+    #   A8b 「总数 == 13」→ 仍然冻住总数，但**故意**让它将来会红：
+    #        下次扩表的人必须来这里显式确认（并同步 README 的过时点表），
+    #        而不是让一个陈旧断言悄悄变绿或悄悄变红。
+    d21_run_cols = frozenset({
+        "id", "config_name", "dataset_fingerprint", "judge_model",
+        "runs_per_case", "score_correctness", "score_faithfulness",
+        "score_completeness", "accuracy", "report_path", "created_at",
+    })
+    missing_run_cols = sorted(d21_run_cols - set(run_types))
+    ck.check(not missing_run_cols,
+             f"A8 D21 定下的 {len(d21_run_cols)} 列一个不少（子集校验，允许后来者追加）",
+             f"缺失={missing_run_cols}｜实际列={list(run_types)}")
+    ck.check(len(run_cols) == 13,
+             "A8b eval_runs 共 13 列（11 + D22 的 corpus_fingerprint / generation_runs）",
+             f"实际={len(run_cols)}｜若你刚扩了表：请同步本断言的两处期望值"
+             f"与 docs/tutorials/README.md 的历史过时点表")
     # config_name 是 String(32) -> varchar，不是 text。这个坑 d21_migrate 的
     # EXPECTED_COLUMNS 已经踩过一次（同文件 category 那行）。
     ck.check(run_types.get("config_name") == ("character varying", "varchar"),
