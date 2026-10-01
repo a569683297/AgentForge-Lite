@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>D25 · MCP 的 Server 到底是什么</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1f2328; --ink2:#4a5568; --ink3:#6b7280;
+    --line:#e3e6ea; --blue:#1f6feb; --blue-bg:#eef4ff;
+    --green:#1a7f37; --green-bg:#eaf7ee;
+    --amber:#9a6700; --amber-bg:#fff8e6;
+    --red:#b42318; --red-bg:#fdeceb;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--ink);
+       font:15px/1.75 -apple-system,"PingFang SC","Hiragino Sans GB",system-ui,sans-serif;}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-.2px}
+  .sub{color:var(--ink3);font-size:13.5px;margin-bottom:22px}
+  h2{font-size:18px;margin:34px 0 12px;padding-bottom:7px;border-bottom:2px solid var(--line)}
+  h3{font-size:15.5px;margin:20px 0 8px}
+  p{margin:9px 0}
+  code{font-family:var(--mono);font-size:13px;background:#eef0f3;padding:1.5px 5px;border-radius:4px}
+  pre{font-family:var(--mono);font-size:12.5px;line-height:1.62;background:#fbfcfd;
+      border:1px solid var(--line);border-left:3px solid var(--blue);
+      border-radius:6px;padding:11px 13px;overflow-x:auto;margin:10px 0;white-space:pre-wrap;word-break:break-all}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--card)}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f0f2f5;font-weight:600}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600}
+  .pg{background:var(--green-bg);color:var(--green)}
+  .pb{background:var(--blue-bg);color:var(--blue)}
+  .pa{background:var(--amber-bg);color:var(--amber)}
+  .pr{background:var(--red-bg);color:var(--red)}
+  .note{border-left:3px solid var(--amber);background:var(--amber-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .fix{border-left:3px solid var(--red);background:var(--red-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .ok{border-left:3px solid var(--green);background:var(--green-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .big{font-size:16px;font-weight:600;color:var(--ink)}
+  ul,ol{margin:8px 0 8px 20px;padding:0}
+  li{margin:5px 0}
+  .cols{display:flex;gap:14px;flex-wrap:wrap}
+  .cols>.card{flex:1 1 380px;margin:0}
+  .tag{font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
+  .arrow{color:var(--ink3);font-family:var(--mono);font-size:13px}
+  .k{color:var(--blue);font-weight:600}
+  footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);color:var(--ink3);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>MCP 的 Server 到底是什么</h1>
+  <div class="sub">D25 · 全部结论来自 2026-10-01 本机实测（<code>mcp</code> SDK 2.2.0）· 报文为真实抓取，非示意</div>
+
+  <div class="card">
+    <div class="big">一句话结论</div>
+    <p style="margin-bottom:0">
+      <strong>Server 不是「一个工具」，Server 是「一个装着工具的独立进程」。</strong>
+      两者的差别不在"能干多少活"，而在<strong>它是不是一个需要被启动、被连接、被询问、还能自己崩掉的东西</strong>。
+      哪怕一个 Server 里<strong>只装 1 个工具</strong>，它俩也仍然是两种东西 —— 本文就是为证明这一句。
+    </p>
+  </div>
+
+  <h2>一、先看对照：同一个 <code>current_time</code>，两种活法</h2>
+
+  <p>你项目里 D9 写的 <code>app/tools/current_time.py</code>，和一个 MCP Server 里的 <code>current_time</code> 工具，
+     <strong>函数体的代码可以一模一样</strong>。区别全在外面那层壳。</p>
+
+  <div class="cols">
+    <div class="card">
+      <h3 style="margin-top:0"><span class="pill pb">宿主进程内</span> 你的 <code>current_time</code></h3>
+      <pre># app/tools/current_time.py
+def current_time() -> str:
+    return datetime.now(...).isoformat()
+
+# registry 里手写一行登记：
+registry.register("current_time", current_time)</pre>
+      <ul>
+        <li>住在 <strong>Agent 后端自己的进程里</strong>（同进程、同内存）</li>
+        <li>调用 = <strong>直接函数调用</strong>，没有网络、没有序列化</li>
+        <li><strong>没有"启动"这回事</strong> —— 它随 FastAPI 一起活、一起死</li>
+        <li>要加第 2 个工具 → <strong>再手写一行 register</strong></li>
+        <li>"有哪些工具"这件事<strong>只存在于我脑子里和代码里</strong>，机器问不出来</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0"><span class="pill pg">独立进程</span> MCP Server 里的 <code>current_time</code></h3>
+      <pre># 先有一个 Server（盒子）
+server = MCPServer("demo", version="0.0.1")
+
+# 再把函数挂进去（内容物）
+@server.tool(name="current_time", ...)
+def current_time() -> str:
+    return datetime.now(...).isoformat()
+
+server.run("stdio")   # ← 常驻，等请求</pre>
+      <ul>
+        <li>住在 <strong>另一个操作系统进程里</strong>（子进程）</li>
+        <li>调用 = <strong>序列化 → 写管道 → 等回包</strong></li>
+        <li><strong>必须先"启动"</strong>，还可能启动失败 / 中途崩掉</li>
+        <li>加第 2 个工具 → <strong>只多一个装饰器</strong>，宿主一行不改</li>
+        <li>"有哪些工具"<strong>机器能问出来</strong>（<code>tools/list</code>）</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>二、实测：一个 Server 装 3 个工具，一次 <code>tools/list</code> 全拿到</h2>
+
+  <p>如果 Server 就是工具，那"1 个 Server → 3 个工具"这句话就无法成立。实测：</p>
+
+  <pre>  一次 tools/list 拿到 : 3 个工具
+      - current_time   入参 schema = {'properties': {}, 'type': 'object', ...}
+      - add            入参 schema = {'properties': {'a': {'type': 'integer'},
+                                                     'b': {'type': 'integer'}},
+                                       'required': ['a', 'b'], 'type': 'object', ...}
+      - echo           入参 schema = {'properties': {'text': {'type': 'string'}},
+                                       'required': ['text'], 'type': 'object', ...}</pre>
+
+  <div class="ok">
+    <strong>注意这三个 <code>inputSchema</code> 是自动生成的。</strong>
+    我只是写了 <code>def add(a: int, b: int) -&gt; int</code>，
+    Server 就把 <strong>Python 的类型标注翻译成了 JSON Schema</strong> 挂在网上。
+    这一层翻译工作，就是一个"普通函数"永远不做的事 —— 因为没人问它。
+  </div>
+
+  <h2>三、Server 到底做了什么：四件事</h2>
+
+  <table>
+    <tr><th style="width:120px">职责</th><th>它在干什么</th><th>对照：一个普通函数</th></tr>
+    <tr>
+      <td><strong>① 启动<br>与常驻</strong></td>
+      <td>被宿主作为<strong>子进程</strong>拉起，之后就活着等消息；宿主退出它才退出</td>
+      <td>没有进程，谈不上启动</td>
+    </tr>
+    <tr>
+      <td><strong>② 接线</strong></td>
+      <td>起一个循环：<strong>从 stdin 读</strong>一行 JSON-RPC → 处理 → <strong>往 stdout 写</strong>一行结果。<br>
+          （stdio 传输的全部内容就是这个）</td>
+      <td>没有通道，它只存在于调用栈上那一瞬</td>
+    </tr>
+    <tr>
+      <td><strong>③ 报目录</strong></td>
+      <td>被问"你有哪些工具"时，回一张<strong>清单</strong>：名字 + 描述 + 参数 JSON Schema</td>
+      <td>问不了。"有哪些工具"只在代码里</td>
+    </tr>
+    <tr>
+      <td><strong>④ 校验 + 调度</strong></td>
+      <td>收到 <code>tools/call</code> 后：<strong>按名字找到函数 → 校验参数类型 → 真正执行 → 把返回值包装成 MCP 的结果结构</strong></td>
+      <td>只有最后一步（执行）</td>
+    </tr>
+  </table>
+
+  <p class="tag">②③④ 都可以在下面的真实报文里逐条对上。</p>
+
+  <h2>四、真实报文：一次完整的 stdio 会话（原样抓取）</h2>
+
+  <p>下面是 Client（宿主侧）和 Server（子进程）之间<strong>来回的每一行</strong>。
+     中间插了一层透明监听，所以看到的是协议原文，不是我重写的示意。</p>
+
+  <pre>① client → server   请求 method=initialize id=1
+   {"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+      "protocolVersion":"2025-11-25","capabilities":{},
+      "clientInfo":{"name":"mcp","version":"0.1.0"},"_meta":{}}}
+
+② [SERVER 进程] 进程已启动，本进程内装了 3 个工具        ← 它是另一个进程
+
+③ server → client   响应 OK id=1
+   {"jsonrpc":"2.0","id":1,"result":{
+      "capabilities":{"tools":{},"resources":{},"prompts":{},"experimental":{}},
+      "protocolVersion":"2025-11-25",
+      "serverInfo":{"name":"demo-three-tools","version":"0.0.1"}}}   ← Server 自报家门
+
+④ client → server   通知 method=notifications/initialized
+   {"jsonrpc":"2.0","method":"notifications/initialized"}            ← 没有 id，不需要回
+
+⑤ client → server   请求 method=tools/list id=2                      ← ③ 报目录
+⑥ server → client   响应 OK id=2  → 3 个工具的清单 + JSON Schema
+
+⑦ client → server   请求 method=tools/call id=3
+   {"jsonrpc":"2.0","id":3,"method":"tools/call",
+    "params":{"name":"current_time","arguments":{},"_meta":{}}}
+
+⑧ [SERVER 进程] 执行 current_time()                                  ← ④ 真的在它那边跑
+
+⑨ server → client   响应 OK id=3
+   {"jsonrpc":"2.0","id":3,"result":{
+      "content":[{"text":"2026-10-01T19:24:00+08:00","type":"text"}],
+      "isError":false,
+      "structuredContent":{"result":"2026-10-01T19:24:00+08:00"}}}   ← 双层返回</pre>
+
+  <div class="note">
+    <strong>第 ⑨ 行那个"双层返回"值得单独记一笔</strong>：同一个值出现了两次 ——
+    <code>content</code> 里是给<strong>人/模型读的自然语言</strong>，<code>structuredContent</code> 里是给<strong>程序读的结构化值</strong>。
+    协议同时给两种读者准备了字段。（本次实测原本只预期一种，这是顺手发现。）
+  </div>
+
+  <h2>五、两种"出错"，实测下来长得一样</h2>
+
+  <p>我本来以为"工具报错"和"协议层出错"会是两种形态。实测：<strong>两种都装在"成功的响应"里返回</strong>，
+     用 <code>result.isError = true</code> 标记，<strong>客户端不抛异常</strong>。</p>
+
+  <pre>⑩ client → server   tools/call  name="echo"  arguments={"text":123}   ← 故意传错类型
+   [SERVER 进程] Tool 'echo' rejected arguments: ['text']              ← Server 校验了
+⑪ server → client   响应 OK id=5
+   result.content[0].text = "Error executing tool echo: 1 validation error for
+                             echoArguments / text / Input should be a valid string"
+   result.isError = true                                       ← 客户端侧：is_error=True
+
+⑫ client → server   tools/call  name="not_exist_tool"                  ← 调不存在的工具
+   [SERVER 进程] Tool 'not_exist_tool' failed: 'Unknown tool: not_exist_tool'
+⑬ server → client   响应 OK id=6
+   result.content[0].text = "Unknown tool: not_exist_tool"
+   result.isError = true                                       ← 同样不抛异常</pre>
+
+  <div class="ok">
+    <strong>这个设计是有意的：错误要能被模型看见。</strong>
+    如果把它做成"连接级异常"，那模型看到的就是"工具断了"，没法自己改成正确参数再试一次；
+    装进 <code>result</code> 里，模型读得到那句 <code>Input should be a valid string</code>，
+    就能<strong>自我修正</strong> —— 这是 Agent 循环里很关键的一环。
+    <br><br>
+    ⚠ 附带一句：本次<strong>没有</strong>测到"协议层错误"（JSON-RPC <code>error</code> 对象）的分支，
+    上面结论只覆盖<strong>工具被调用之后</strong>的错。别外推。
+  </div>
+
+  <h2>六、判据：一句话分清楚</h2>
+
+  <div class="card">
+    <p class="big" style="margin-top:0">
+      问一句「需要被<strong>启动</strong>吗？需要被<strong>连接</strong>吗？需要被<strong>问『你有什么』</strong>吗？」
+    </p>
+    <ul>
+      <li>三个都要 → 它是 <strong>Server</strong></li>
+      <li>只要"被调用" → 它是 <strong>Tool</strong></li>
+    </ul>
+    <p style="margin-bottom:0">
+      换一种说法：<strong><code>current_time</code> 的入口是 <code>def current_time(...)</code>；
+      MCP Server 的入口是 <code>server.run("stdio")</code>。</strong>
+      一个是<strong>函数</strong>，一个是<strong>常驻进程</strong>。
+    </p>
+  </div>
+
+  <h2>七、那"多一层"到底换来了什么</h2>
+
+  <table>
+    <tr><th>换来的</th><th>说明</th><th>本项目对应</th></tr>
+    <tr>
+      <td><strong>动态发现</strong></td>
+      <td>工具清单是<strong>运行时问出来的</strong>，不是编译期写死的 → 接入新 server 不用改 Agent 代码</td>
+      <td>PRD §9.9 那条面试叙事</td>
+    </tr>
+    <tr>
+      <td><strong>语言/技术栈无关</strong></td>
+      <td>Server 用什么语言写都行，只要说 MCP。我们是 Python，Harness 官方 Server 是 <strong>Node</strong></td>
+      <td>D27 连 Harness</td>
+    </tr>
+    <tr>
+      <td><strong>故障隔离</strong></td>
+      <td>Server 崩了是<strong>它自己崩</strong>，宿主进程还活着 → 可以重启它、可以降级</td>
+      <td>D27 要写的健康检查 / 重启退避</td>
+    </tr>
+    <tr>
+      <td><strong>独立部署与权限</strong></td>
+      <td>单独升级、单独发凭据（Harness 的 PAT 只给 Server 那一侧用）</td>
+      <td>D25 的 PAT</td>
+    </tr>
+  </table>
+
+  <p><strong>代价也要说清</strong>：多一次进程间往返、多一个要管生命周期的东西
+     （启动、健康检查、崩溃重启、退出清理）。所以判据是
+     <strong>「数据在不在我的进程里？不在，才有 MCP 的价值。」</strong>
+     —— 我们自己的知识库是入库的、同进程的，就<strong>不需要</strong>给它套一层 MCP。</p>
+
+  <h2>八、⚠ 今天这轮实测纠正的两处说法</h2>
+
+  <div class="fix">
+    <strong>纠正 1（较重要）：stdio 的默认路径就是「握手式」。</strong><br>
+    <strong>昨天我说的原话</strong>：「PRD §9.6.2 那句『stdio 发 <code>initialize</code> 握手』<strong>被推翻了</strong>，现在只是 legacy 路径。」<br>
+    <strong>实测事实</strong>：SDK 2.2.0 <strong>同时支持两代</strong>，但走 stdio 时客户端<strong>默认</strong>发 <code>initialize</code>，
+    谈定的版本是 <code>2025-11-25</code>（= <code>LATEST_HANDSHAKE_VERSION</code>），
+    而<strong>不是</strong>同样存在于 <code>mcp.types.LATEST_PROTOCOL_VERSION</code> 里的 <code>2026-07-28</code>。<br>
+    <strong>所以</strong>：PRD 那句话对<strong>默认路径仍然成立</strong>，我昨天把它说成"被推翻"是<strong>过度外推</strong> ——
+    把"规范里新出现了一代"读成了"实现已经切换过去了"。<br>
+    <span class="tag">SDK 常量实测：LATEST_PROTOCOL_VERSION=2026-07-28 · LATEST_HANDSHAKE_VERSION=2025-11-25 ·
+    LATEST_MODERN_VERSION=2026-07-28 · HANDSHAKE_PROTOCOL_VERSIONS=(2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25) ·
+    MODERN_PROTOCOL_VERSIONS=(2026-07-28,) · MCP_PROTOCOL_VERSION_HEADER=mcp-protocol-version</span>
+  </div>
+
+  <div class="fix">
+    <strong>纠正 2（我自己的脚本硬编码了错结论）</strong><br>
+    第一版脚本里我写了 <code>print("调 echo(123): 未报错（Server 接受了错类型）")</code>，
+    而它上一行打印的报文明明白白写着 <code>Tool 'echo' rejected arguments</code>。
+    <strong>数据说"拒绝了"，脚本照念"没拒绝"。</strong>这是本项目第 4 次同一个坑
+    （D13 → D16 → D18 → 今天）：<strong>结论文本必须由数据分支决定，不能硬编码。</strong>
+  </div>
+
+  <footer>
+    报文来源：本机 <code>/tmp/d25_demo/</code>（client → mitm → server 三层真实 stdio 抓包）<br>
+    环境：<code>mcp</code> SDK 2.2.0 · Python 3.12.13 · 采集时间 2026-10-01 19:22~19:24
+  </footer>
+
+</div>
+</body>
+</html>

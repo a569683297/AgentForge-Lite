@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>D25 · MCP 全景图</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#ffffff; --ink:#1f2328; --ink2:#57606a;
+    --line:#d8dee4; --accent:#0969da; --accent-soft:#ddf4ff;
+    --warn:#9a6700; --warn-soft:#fff8c5;
+    --ok:#1a7f37; --ok-soft:#dafbe1;
+    --stop:#82071e; --stop-soft:#ffebe9;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px 20px 56px;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 6px;letter-spacing:-.01em}
+  .sub{color:var(--ink2);font-size:13px;margin:0 0 28px}
+  h2{font-size:16px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+  h2 .n{display:inline-flex;align-items:center;justify-content:center;
+    width:22px;height:22px;border-radius:6px;background:var(--accent);color:#fff;
+    font-size:12px;font-weight:600;flex:0 0 auto}
+  section{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:20px 22px;margin-bottom:18px}
+  p{margin:0 0 10px}
+  p:last-child{margin-bottom:0}
+  code{font-family:var(--mono);font-size:.88em;background:#f0f2f4;
+    border-radius:4px;padding:1.5px 5px}
+  pre{font-family:var(--mono);font-size:12.5px;line-height:1.55;background:#f6f8fa;
+    border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;margin:10px 0}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin:10px 0}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#f2f4f7;font-weight:600}
+  .note{border-left:3px solid var(--accent);background:var(--accent-soft);
+    padding:10px 14px;border-radius:0 8px 8px 0;font-size:13.5px;margin:12px 0}
+  .warn{border-left:3px solid var(--warn);background:var(--warn-soft);
+    padding:10px 14px;border-radius:0 8px 8px 0;font-size:13.5px;margin:12px 0}
+  .ok{border-left:3px solid var(--ok);background:var(--ok-soft);
+    padding:10px 14px;border-radius:0 8px 8px 0;font-size:13.5px;margin:12px 0}
+  .stop{border-left:3px solid var(--stop);background:var(--stop-soft);
+    padding:10px 14px;border-radius:0 8px 8px 0;font-size:13.5px;margin:12px 0}
+  .legend{font-size:12.5px;color:var(--ink2);margin-top:8px}
+  .pill{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:10px;
+    border:1px solid var(--line);background:#f2f4f7;color:var(--ink2);margin-right:6px}
+  .pill.b{background:var(--accent-soft);border-color:#b6e3ff;color:#0a3069}
+  .pill.g{background:var(--ok-soft);border-color:#aceebb;color:#0f5323}
+  .pill.y{background:var(--warn-soft);border-color:#f5e6a8;color:#7d4e00}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr}}
+  .box{border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:#fcfdfe}
+  .box h3{font-size:13.5px;margin:0 0 8px;color:var(--ink2);font-weight:600}
+  .box ul{margin:0;padding-left:18px;font-size:13.5px}
+  .box li{margin:3px 0}
+  .flow{font-family:var(--mono);font-size:12.5px;white-space:pre;overflow-x:auto;
+    background:#f6f8fa;border:1px solid var(--line);border-radius:8px;padding:14px;line-height:1.5}
+  footer{color:var(--ink2);font-size:12.5px;text-align:center;margin-top:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>D25 · MCP 全景图</h1>
+  <p class="sub">Model Context Protocol（模型上下文协议）— 角色 / 传输 / 两代协议 / 本项目落地位置<br>
+  事实核对日期：<strong>2026-10-01</strong>　依据：官方规范页 + 官方 Python SDK 实测（<code>mcp==2.2.0</code>）</p>
+
+  <section>
+    <h2><span class="n">1</span>三角色：谁连着谁</h2>
+    <div class="flow">┌──────────────────────────────────────────────────────────────┐
+│  <b>Host</b>（宿主应用）—— 一个进程，负责“跟用户打交道 + 决定放哪些工具给模型”   │
+│  例：Claude Desktop · Cursor · <b>本项目的 Agent 后端</b>            │
+│                                                              │
+│     ┌───────────────┐              ┌───────────────┐         │
+│     │  <b>Client A</b>     │              │  <b>Client B</b>     │         │
+│     │ （连接器，1:1） │              │ （连接器，1:1） │         │
+│     └───────┬───────┘              └───────┬───────┘         │
+└─────────────┼──────────────────────────────┼─────────────────┘
+              │ JSON-RPC 2.0                 │ JSON-RPC 2.0
+              │                              │
+      ┌───────▼────────┐            ┌────────▼─────────┐
+      │ <b>Server 1</b>       │            │ <b>Server 2</b>        │
+      │ 自研库存服务     │            │ Harness 官方      │
+      │ （D26 写）       │            │ （D27 接）        │
+      │ MCPServer        │            │ harness-mcp-v2   │
+      └────────────────┘            └──────────────────┘</div>
+    <div class="legend">
+      <span class="pill b">1 个 Client 只连 1 个 Server</span>
+      <span class="pill">Host 可以同时开多个 Client</span>
+      <span class="pill">Server 不知道彼此存在</span>
+    </div>
+    <p style="margin-top:12px"><strong>为什么这样分层：</strong>一个 Server 一次只服务一个 Client，
+      于是「权限、会话、连接」都是简单的一对一；跨 Server 的编排责任被推给 Host ——
+      也就是<strong>我们自己的 Agent</strong>。这正是 Tool Registry 存在的位置。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>两边各能提供什么</h2>
+    <div class="grid2">
+      <div class="box">
+        <h3>Server 提供（三样）</h3>
+        <ul>
+          <li><strong>Tools</strong> — 函数，由<strong>模型</strong>决定调用。本项目要用的就是它</li>
+          <li><strong>Resources</strong> — 数据/上下文，由<strong>应用</strong>决定何时塞给模型（像只读文件）</li>
+          <li><strong>Prompts</strong> — 模板化消息/工作流，通常由<strong>用户</strong>主动触发</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h3>Client 提供（当前规范只剩一样）</h3>
+        <ul>
+          <li><strong>Elicitation</strong> — 服务端反过来向用户要补充信息</li>
+        </ul>
+        <p style="font-size:12.5px;color:var(--ink2);margin-top:8px">
+          历史版本还有 <code>sampling</code>（服务端借宿主的模型能力）与 <code>roots</code>（告知工作目录边界），
+          在新规范里已不在核心清单。<strong>协议本身在演进，讲之前先查当日口径。</strong></p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>★ 两代协议：这是本次核对最大的发现</h2>
+    <p>MCP 规范已经<strong>换代</strong>，但生态里两种实现同时存在，所以必须分清：</p>
+    <table>
+      <thead><tr><th>代际</th><th>版本</th><th>怎么确认“我们说的是同一种话”</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="pill y">Legacy 握手式</span></td>
+          <td><code>2025-11-25</code> 及以前</td>
+          <td>先发一次 <code>initialize</code> 握手（协商协议版本 + 能力），之后整个会话沿用</td>
+        </tr>
+        <tr>
+          <td><span class="pill g">Modern 逐请求式</span></td>
+          <td><code>2026-07-28</code> 及以后</td>
+          <td><strong>没有握手</strong>。每个请求自己在 <code>_meta</code> 字段里声明协议版本；HTTP 上另带 <code>MCP-Protocol-Version</code> 头。服务器<strong>逐请求</strong>接受或拒绝</td>
+        </tr>
+        <tr>
+          <td><span class="pill b">Dual-era 双代</span></td>
+          <td>两者都实现</td>
+          <td>看客户端怎么开场：带 <code>_meta</code> 就按 Modern 走，发 <code>initialize</code> 就按 Legacy 走</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="warn">
+      <strong>版本对不上会发生什么：</strong>服务器返回
+      <code>UnsupportedProtocolVersionError</code>（JSON-RPC 错误码 <code>-32022</code>），
+      <code>data</code> 里列出它支持的版本；客户端从里面挑一个重试。
+      现代服务器<strong>必须</strong>实现 <code>server/discover</code>，让客户端能提前问清“你支持哪些版本”。
+    </div>
+    <div class="ok">
+      <strong>我们的位置（2026-10-01 晚实测修正）：</strong>
+      SDK <code>2.2.0</code> <strong>同时实现两代</strong>，走哪一代看客户端怎么开场。
+      但实测发现：<strong>走 stdio 时它默认用「握手式」</strong> ——
+      客户端发 <code>initialize</code>，谈定的版本是 <code>2025-11-25</code>
+      （= <code>LATEST_HANDSHAKE_VERSION</code>），
+      <strong>不是</strong> <code>mcp.types.LATEST_PROTOCOL_VERSION</code> 那个 <code>2026-07-28</code>。
+    </div>
+    <div class="warn">
+      <strong>⚠ 修正一处过度外推：</strong>本图 10-01 初版写着「<code>LATEST_PROTOCOL_VERSION</code> 就是
+      <code>2026-07-28</code>，Harness 仍在讲 <code>initialize</code> → 它处于 Legacy」，读起来像
+      「我们这边已经是 Modern 了、只有 Harness 落后」。
+      <strong>实测不是这样</strong>：<code>2026-07-28</code> 是<strong>规范里最新的一代</strong>，
+      而<strong>实现（本机 SDK + stdio 默认路径）走的是握手那一代</strong>。
+      把「规范新增了一代」读成「实现已经切过去了」，就是这个错的成因。<br>
+      → 连带结论：PRD §9.6.2 那句「stdio 发 <code>initialize</code> 握手（协议版本协商）」
+      对<strong>默认路径仍然成立</strong>。<br>
+      <span style="font-size:12.5px">SDK 常量实测：<code>HANDSHAKE_PROTOCOL_VERSIONS</code> =
+      (<code>2024-11-05</code>, <code>2025-03-26</code>, <code>2025-06-18</code>, <code>2025-11-25</code>) ·
+      <code>MODERN_PROTOCOL_VERSIONS</code> = (<code>2026-07-28</code>,) ·
+      <code>MCP_PROTOCOL_VERSION_HEADER</code> = <code>mcp-protocol-version</code>（HTTP 侧用，stdio 没有头）</span>
+    </div>
+    <div class="ok">
+      SDK 的 <code>Client(mode="auto")</code> 自带代际探测与结果缓存，
+      <strong>这件事不需要我们手写</strong>。但要知道它在替我们做决定 ——
+      以及它默认选的是哪一代（上面这条就是答案）。
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>两条传输：stdio 与 Streamable HTTP</h2>
+    <table>
+      <thead><tr><th></th><th>stdio</th><th>Streamable HTTP</th></tr></thead>
+      <tbody>
+        <tr><td>形态</td><td>宿主<strong>拉起一个子进程</strong>，通过它的标准输入/输出收发 JSON-RPC</td><td>连一个 HTTP 端点（<code>POST /mcp</code>）</td></tr>
+        <tr><td>部署</td><td>本机、单用户</td><td>远程 / 多人共享</td></tr>
+        <tr><td>额外成本</td><td><strong>要管子进程生命周期</strong>：启动、健康检查、崩溃重启（退避）、退出清理，防泄漏</td><td>要管会话与鉴权（<code>mcp-session-id</code> 头、Bearer Token）</td></tr>
+        <tr><td>本项目</td><td><strong>用这条</strong>（Harness 默认 stdio）</td><td>不用（Harness 的托管模式要走 OAuth，且需官方 Support 开账号）</td></tr>
+      </tbody>
+    </table>
+    <div class="note">
+      <strong>为什么 stdio 反而更麻烦：</strong>子进程是<strong>别人家的程序</strong>（这里是 Node）。
+      它崩了、卡了、或者你没关干净，都不会让你的 Python 进程报错 —— 只会表现为“工具时好时坏”。
+      PRD 把「生命周期管理」和「Node 运行时依赖」列为两个独立风险，原因就在这里。
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>本项目落地位置（D25 → D28）</h2>
+    <table>
+      <thead><tr><th>天</th><th>做什么</th><th>用到上面哪一块</th></tr></thead>
+      <tbody>
+        <tr><td><strong>D25</strong>（今天）</td><td>学协议 + 注册 Harness 账号 + 建最小流水线 + 生成<strong>只读 PAT</strong></td><td>先把“外部系统”这一头准备好，PAT 是后面所有调用的钥匙</td></tr>
+        <tr><td>D26</td><td>自研库存服务 <code>mcp_servers/inventory_server.py</code></td><td><strong>Server 端</strong>：<code>MCPServer</code> + <code>@mcp.tool()</code> + <code>run(transport="stdio")</code></td></tr>
+        <tr><td>D27</td><td><code>mcp_client.py</code>：动态发现 + 注册进 Tool Registry + 子进程生命周期 + 注册 Harness</td><td><strong>Client 端</strong>：<code>Client(StdioServerParameters(...))</code> → <code>list_tools()</code> → 逐个注册</td></tr>
+        <tr><td>D28</td><td>三层埋点补全（含 MCP span 与来源标识）</td><td>让每次调用能回答“<strong>这一次是自研工具，还是 Harness 外部 server</strong>”</td></tr>
+      </tbody>
+    </table>
+    <div class="stop">
+      <strong>⚠️ 实测警报（今天现场核对出来的，PRD v4.1 尚未反映）：</strong><br>
+      ① Python SDK 已到 <strong>2.2.0</strong>，<code>from mcp.server.fastmcp import FastMCP</code>
+      <strong>会直接 ImportError</strong>。实测报错原文：“This is mcp 2.x, where <strong>FastMCP was renamed to MCPServer</strong>”。<br>
+      ② Harness 规模数字已变：资源类型 <strong>259</strong>（PRD 写 252）、toolsets <strong>42</strong>（PRD 写 41）、当前版本 <strong>3.2.31</strong>。<br>
+      ③ <code>harness_diagnose</code> 的失败分类依赖 <code>TYPESAFE_API_KEY</code>；没配时该能力<strong>静默跳过</strong>，不报错。
+    </div>
+  </section>
+
+  <footer>
+    AgentForge-Lite · D25 学习日 · 本图为实时核对产物，非记忆复述<br>
+    规范来源：<code>modelcontextprotocol.io/specification/2026-07-28</code>　SDK 来源：本机 <code>uv run --with mcp</code> 实测
+  </footer>
+
+</div>
+</body>
+</html>
