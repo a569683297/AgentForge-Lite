@@ -65,7 +65,7 @@ D24 的主任务是 **报告生成**（规划号 = 教程号 = D24）；此外�
 | D23 | D23 | 消融 3×50（开工前先做**区分度诊断**） | 🟡 **诊断 + 修复 + 重跑 + 检索层指标都已完成，主体待跑**：诊断（三配置 88%/92%/90%）发现 **15 条失败里 13 条是假失败** —— C 类题 `reference` 是"期望行为说明"却被 judge 当成标准答案；已按**方案乙**修好（C 类题只判工具、不送 judge，`d22_verify` **77/77**，**指纹不变、ε 继续有效**）→ **重跑（run 9/10/11）三配置全部 98.00%（49/50）、逐题一致 50/50** → **检索层指标（零 token）证明三层全撞天花板**（Hit@1/5/10 全 100%、首篇 gold 恒第 1 名；唯一梯度在跨文档题第二篇，但区间重叠）→ 下一步围绕「把任务变难」（→ 见本表下方 **D24 加练**行） |
 | D24 | D24 | **报告生成**（PRD F7.4：Markdown → `docs/eval-report-{date}.md`） | ✅ **已完成**：新增报告生成服务 + CLI + 验证脚本（**60/60**），产出 [`docs/eval-report-2026-09-30.md`](../eval-report-2026-09-30.md)（173 行）。四段结构严格按 PRD §9.5（总体对比表 → 每类明细 → 失败案例 → 结论与建议）；**可比性守卫**（评测集/语料指纹 + 题号集合，不满足就**抛异常拒绝出报告**，含 **6 条负面测试**）；**跨配置答案指纹对比**查处「生成侧抖动被误读成配置差异」；三配置**全 98.00%（49/50）**、S2「+10%」**未达标**并给出三条归因。`report_path` 已回写 run 9/10/11 |
 | — | — | **D24 加练：把任务变难**（甲案改问法 / 乙案加干扰文档）**——不占里程碑编号**（PRD §13.2 无此项） | 🟡 **探针阶段完成，方法待拍板**：① **甲案实测失败** —— 10 条口语化挑战题里 **9/10 的 gold 仍是第 1 名**（词法路被改写打掉了，但**语义嵌入几乎免疫** → 瓶颈在语料、不在措辞）；② **乙案模拟**（逐篇追加 1~4 篇「同主题、不同结论」的合成文档）：干扰篇**确实挤进 top5（6/8 条目标题）**，但**只推得动向量路**（平均 **1.25 位**、8/8 单调，A08 精确 `1→2→3→4→5`），**融合路饱和**（0.38 位）、**重排路 35/35 纹丝不动** → 产出的是 **A vs B/C 的区分**，不是 B vs C 的区分。**A08/B01 的向量名次已到第 5 名，再 1 篇同类干扰篇即可能造出「A 拿不到、B 拿得到」**。写入窗口约 2 分 45 秒，结束后**断言语料指纹逐字恢复**并独立回库复核。详见 [`D24-加练-把任务变难.md`](D24-加练-把任务变难.md) |
-| D25 | D25 | **MCP 学习日**（MCP 是什么 + 四个角色权责 + 三原语 + 两代协议 · 工具进注册表的链路 · 注册 Harness 账号 + 只读 PAT） | 🟡 **四轮追问已讲完、Q1–Q4 复述判定全部通过，验收未过**：①「能讲清 MCP 价值」——判据 = **判据三问**（见下方分工表）；②「**PAT 已入 `.env`**」**未完成**（`.env` 现无 `HARNESS_API_KEY`，待用户注册 Harness 后操作）。**学习日：`app/` 与 `scripts/` 一行未动**，产出 = **5 张自包含 HTML 图**（见下方分工表）；取证脚本全在 `/tmp/d25_demo/`，**不入库**。**PRD 三处过时描述已拍板推迟到 D26 一次性改**（见下方） |
+| D25 | D25 | **MCP 学习日**（MCP 是什么 + 四个角色权责 + 三原语 + 两代协议 · 工具进注册表的链路 · 注册 Harness 账号 + PAT） | ✅ **验收全过（2026-10-01 22:40）**：①「能讲清 MCP 价值」——判据 = **判据三问**（见下方分工表）；Q1–Q4 复述判定全部通过；②「**PAT 已入 `.env`**」**已完成并已实测跑通**（见下方「Harness 接入实测」：真连官方 server、真读到数据）。**学习日：`app/` 与 `scripts/` 一行未动**，产出 = **5 张自包含 HTML 图**（见下方分工表）；取证脚本全在 `/tmp/d25_demo/`，**不入库**。**PRD 三处过时描述已拍板推迟到 D26 一次性改**（见下方） |
 
 **D22 的文件分工**（决策材料是开工前的、教程是开工后的，两份都要留）：
 
@@ -119,18 +119,88 @@ D24 的主任务是 **报告生成**（规划号 = 教程号 = D24）；此外�
 | [`D25-工具进注册表的链路.html`](D25-工具进注册表的链路.html) | 「工具怎么进 Tool Registry」的**四步链路**：server 暴露 → client 运行初期**动态发现**（`tools/list`）→ 生成函数存根 → 注册进 Agent 的 Registry，对应代码就是 `registry.register(name=..., description=..., parameters=...)(stub)`。另注 **D27 前置**：`registry.register` **重名直接 `raise ValueError`**，两台 Server 都可能有同名工具 → **必须先定命名空间**（PRD 里的 `harness_diagnose` 已是「Server 名 + 工具名」形态） |
 | [`D25-什么时候该用MCP.html`](D25-什么时候该用MCP.html) | **「能讲清 MCP 价值」这条验收项的实际判据**：**判据三问** —— ① 这个数据/能力**在不在我的进程里** ② 除了我**有没有第二个消费者** ③ 它**会不会成套地变**（需要运行时发现）；**三问全中才该套**。含**代价实测**（往返 +0.56 ms · 启动约 +233 ms · **主项其实是复杂度**）与锚点（一次重排 780 ms ≈ **1,385 次 MCP 往返** → 通道开销在本项目链路里不可能成为选型理由）。★ 含**诚实一条**：**D26 的自研库存 server 不满足这三问**（数据在进程内、只有我一个消费者），它的价值是「证明懂协议两端」，不是「工程上该这么做」 |
 
-⚠ **D25 当场查出三处 PRD 过时 —— 2026-10-01 用户拍板「甲案」：PRD 今天不动，等 D26 实测落定后一次性改**
+⚠ **D25 共查出四处 PRD 需改（三处过时 + 一处口径错）—— 2026-10-01 用户拍板「甲案」：PRD 今天不动，等 D26 实测落定后一次性改**
 （理由：避免改两遍）。**D26 开工第一件必办事**就是把它一次改到位：
 
 | 位置 | PRD 现状 | 实测事实 | D26 改法 |
 |---|---|---|---|
 | §9.6.1 | `from fastmcp import FastMCP` | `mcp` **2.2.0** 下这条已 **ImportError**，官方报错原文含 *"FastMCP was **renamed to `MCPServer`**"* | 换成 `from mcp.server import MCPServer`（客户端 `from mcp import Client`） |
 | §9.6.2 | 「stdio 发 `initialize` 握手」 | 这句**对默认路径仍然成立**（实测谈定 `2025-11-25`） | **不是删掉，是补一代**：注明 Modern（`2026-07-28`）**无握手**、原句属 **legacy 路径** —— 否则又把「规范版本」与「实现默认路径」混为一谈 |
-| §13.2 | 252 资源类型 / 41 toolsets | **259** / **42**（版本 **3.2.31**） | 改数字；另注 `harness_diagnose` 的 6 类失败分类依赖 **`TYPESAFE_API_KEY`**，**没配时静默跳过** |
+| §13.2 | 252 资源类型 / 41 toolsets | **259** / **42**（版本 **3.2.31**）—— **2026-10-01 22:40 已由 server 自报确证** | 改数字；另注 `harness_diagnose` 的 6 类失败分类依赖 **`TYPESAFE_API_KEY`**，**没配时静默跳过** |
+| §9.6 验收项② / §13.2 | 「生成**只读** PAT」 | **个人 PAT 做不到只读**：官方原文 *"API keys and their tokens **inherit the permissions of the account under which they are created**"*，创建流程里**没有「只读」这个选项**。真正的只读在**服务端** —— `HARNESS_READ_ONLY=true`（官方原文 *"Block all mutating operations (create, update, delete, execute). Only list and get operations are allowed."*） | 改述为「**PAT + 服务端 `HARNESS_READ_ONLY=true`**」。⚠ 这个变量是**给 MCP server 进程的**（spawn 时传），**不是本应用读的配置**，所以不该写进 `.env` 模板里当应用配置 |
 
 **D26 的技术路线同日一并拍板（用户选「甲」）**：server 端走**官方 `from mcp.server import MCPServer`** ——
 与 PRD「官方 SDK」这条口径一致，且高层 `Client` 自带代际探测（`mode="auto"`，能连 Legacy 自动回退），
 **不引第三方依赖、也不锁 `mcp<2`**。→ **D26 代码里出现 `from fastmcp import FastMCP` 即为跑偏。**
+
+---
+
+### 🔌 Harness 接入实测（**2026-10-01 22:40** —— 为「确保 D26/D27 不会卡在这」而做）
+
+**结论先说：通了。** 真的拉起官方 server、真的握手、真的读到数据（全程只读，零写操作）。
+脚本：`/tmp/d25_demo/verify_harness_token.py` · `verify_harness_account.py` · `mcp_harness_stage_a.py` · `mcp_harness_stage_b.py`（**不入库**）。
+
+#### ⚠ 明天最需要知道的一条（否则会白等 5 分钟）
+
+**本机 `registry.npmjs.org` 直连超时，拉不下来包。** 实测 `curl` 12 秒 timeout（返回 000），
+而 `registry.npmmirror.com` **0.58 秒返回 200**。
+→ 拉起 server 必须带上镜像：**`npm_config_registry=https://registry.npmmirror.com`**
+（第一次拉 `harness-mcp-v2` 耗时 **2 分 31 秒**，之后走缓存；直连那次挂了 **5 分 54 秒**都没动，是被我手动杀掉的）。
+这条同样适用于 `npx`，因为它和 `npm` 共用 registry 配置。
+
+#### 跑通的证据链
+
+| 环节 | 实测结果 |
+|---|---|
+| **握手** | ✅ 成功。协商到的协议版本 = **`2025-11-25`**（Legacy / 带 `initialize` 握手）—— **与 D25 用 Python SDK 自研 server 实测的版本一致**，说明「stdio 默认走握手代」不是某一家 SDK 的怪癖 |
+| **server 自报家门** | `harness-mcp-server` v**`3.2.31`**，`instructions` 2677 字符 |
+| **capabilities** | `tools(list_changed=True)` · `prompts(list_changed=True)` · `resources(subscribe=None, list_changed=True)` · `completions` · `logging` |
+| **`tools/list`** | ✅ **11 个工具**（与官方文档「11 consolidated tools」一致）：`harness_list` `_get` `_create` `_update` `_delete` `_execute` `_diagnose` `_search` `_describe` `_status` `_schema` |
+| **真读数据** | ✅ `harness_list(resource_type="organization")` → `total: 1`（default 组织）；`resource_type="project"` → `total: 1`（`default_project`）；返回里**自动带 `openInHarness` 深链** |
+| **凭证有效性的独立第三方确认** | server 启动日志自报 **`"accountId":"BCGcUpagTjKhYuqnJWe83Q"`**，并且直接打 Harness API 时错的那一个被服务端拒绝：**`Forbidden: account identifier mismatch (accountIdentifier=569683297 vs apiKey=BCGcUpagTjKhYuqnJWe83Q)`** |
+
+★ **accountId 的定案**：`BCGcUpagTjKhYuqnJWe83Q` 才是 **API 用的 accountId**（= PAT 第二段）；
+`569683297` 是**账号显示名** —— 服务端 `/ng/api/accounts/{id}` 返回 `identifier=BCGcUpagTjKhYuqnJWe83Q` 而
+`name=companyName=569683297`，**两者是不同字段，我此前混为一谈过**。
+→ 连带确认：**PAT 内嵌 accountId 属实，D27 不用另配账号 ID**。
+（另注：该账号 `accountType=TRIAL` / `accountStatus=ACTIVE`，且当前用户 **`admin=false`** —— 所以「建服务账号」那条路走不通，只读只能靠服务端 `HARNESS_READ_ONLY`。）
+
+#### 259 / 42 这组数字定案（顺带解决「三个数打架」）
+
+| 数字 | 出处 | 定性 |
+|---|---|---|
+| **11** | `tools/list` 实测 | ✅ 是**工具数**（合并后的动词） |
+| **259** resource types | registry 启动日志 **+** `harness_describe({})` 返回 `{"total_resource_types":259}` | ✅ 实测确证 |
+| **42** toolsets | 同上，`{"total_toolsets":42}` | ✅ 实测确证 |
+| 139 / 30 | 官方**文档页** | ❌ **过时**，与运行中的 3.2.31 不符 |
+| 252 / 41 | PRD v4.1 | ❌ 更旧 |
+
+★ 补充发现：**不同动词支持的资源类型数并不相同** —— `list` **198** / `get` **174** / `create` **92** /
+`update` **77** / `delete` **84** / `execute` **66** / `diagnose` **6**。
+所以「这个 server 有多少资源类型」这句话**本身是欠定的**，报数必须带动词口径。
+
+#### ★ 一个可以直接拿去面试的实证：路由发生在 Server 内部
+
+客户端只传了 `{"resource_type": "organization", "resource_scope": "account"}`，
+server 的 **audit 日志**把它翻译成了：
+`"operation":"list","risk":"read","http_method":"GET","http_path":"/ng/api/organizations","outcome":"success"`。
+**客户端从头到尾不知道有 `/ng/api/organizations` 这个 URL，也没见过 `organization` 之外的任何一家 API 结构。**
+→ 这就是 PRD §9.9「**接新 server 不改 Agent 代码**」在真实外部 server 上的可运行证据
+（D25 用自研 server 证明过一次，这次是**别人写的 server**，说服力更强）。
+另注：**`risk` 字段**对应 `HARNESS_AUTO_APPROVE_RISK` 那套「人在回路」的阈值控制，可作为面试素材。
+
+#### 错误语义的实测补充（一条**未定性**，留给 D26）
+
+| 情形 | 观测 |
+|---|---|
+| 参数合法、但业务不成立（`pipeline` 不支持 account 级） | `is_error=True`，内容 = `{"error":"pipeline does not support account scope. Supported scopes: project"}` —— **干净的 tool 结果**，无协议前缀 |
+| 参数**不符合 `inputSchema`**（编造 `resource_type`） | `is_error=True`，内容 = `MCP error -32602: Input validation error: Invalid arguments for tool harness_list: Invalid option: expected one of "activity_timeline"\|...`（**3714 字符，把 198 个合法值全列出来**） |
+| 两种情形共同点 | **客户端 `call_tool` 都没抛异常** —— 印证 D25 结论「工具错误装进 result，不走出错帧」，且**错误里带的是可自修正的信息**（合法值清单） |
+
+**⚠ 未定性**：`-32602`（JSON-RPC 的 `Invalid params` 码）是 **server 端 Node SDK 的参数校验**，还是传输层包出来的 ——
+这次**没抓包**，所以**只报观测、不定层**。**规则不变：定性前不许当结论讲。**
+（对照：D25 自研的 **Python** server 在同样情形下返回的是 `rejected arguments: ['text']`，**没有 `-32602` 前缀** ——
+两家 SDK 写法不同，这本身是个可讲的点，但需要抓包才敢下判断。）
 
 ### 📌 评测体系总纲（**跨日文档，没有 D 编号**）
 
@@ -152,6 +222,20 @@ D24 的主任务是 **报告生成**（规划号 = 教程号 = D24）；此外�
 它们决定 runner 的主干结构与建表 schema，写到一半再改等于重写，且会传染到 D23/D24。
 起因（2026-09-28）：我把其中一道问题建立在一个**自己刚抛出、从未讲解过**的设计上，
 用户回"完全找不到在哪里讲的" → 材料改为**先落盘再提问**。
+
+### 📌 配套文件：评测体系的「单文件通读版」（**跨日文档，没有 D 编号**）
+
+[`评测体系整体说明.md`](评测体系整体说明.md) —— **2026-10-01 由用户指定新增**，
+是上面那份总纲的**完整先行版**。
+
+| 项 | 说明 |
+|---|---|
+| **它解决什么问题** | 总纲 §1 目前只是**骨架**（每节带「素材来源」列，主体待写），而用户要的是「**从头复习一遍 + 面试时能复述**」；相关内容散在 9 份文件里，没有任何一处能一次读完 |
+| **一句话定位** | **「从零到一条线」的叙事版** —— 读完能照着讲。**它不是新的结论权威**：自己不产生数字，只把已存在的数字串成一条线 |
+| **三条自我约束**（写在该文件开头） | ① **不产生任何新数字** —— 每个数字的出处见其**附录 A 数据来源索引**（建文时做过「抽取全文数字 → 逐个回附录 A 找出处」的机检，结论是**没有一个数字找不到出处**）；② **口径一律照抄原文**，连「点估计 / 保守口径」这类必须并报的限定都**不合并、不简化**；③ **与总纲的分工写明**：总纲 = 唯一入口与口径登记，本文 = 叙事版；**总纲主体落地时「吸收」本文的叙事**，本文按角色行降级为过程记录 |
+| **结构** | **第 0–7 章 + 附录 A/B/C**（**1126 行 / 36704 字符**）。第 2 章 = **八个决策总表**（即全文目录）；第 5 章 = **失败与自我推翻**（**单独成章**，面试最有说服力的部分）；第 7 章 = 面试专用：**7.1 三分钟讲述稿 / 7.2 八条亮点 / 7.3 十一条追问预案 / 7.4 数据速查卡** |
+| **什么时候看它 / 什么时候看总纲** | 要**从头读一遍**、或**面试前突击** → 看本文（它开头有「**怎么读本文**」对照表，按目的直接指章）；要查**某个决策归谁管、边界怎么划** → 看总纲 |
+| **⚠ 尚未反向登记** | 本文**没有登记进 `评测总纲.md` §4 的分工表** —— 建文时用户明确「**现有文件不要改**」，而总纲那份属「现有文件」。这是**已知待办**（总纲落主体时一并补），**不是遗漏** |
 
 ⚠ 注意 D14/D15 这两行：它们的**规划号是 D10**，比教程号小 —— 因为这是在**补一笔
 历史欠账**（内容本该在规划 D10 做，当时被静默跳过，2026-09-22 核对时才查出来）。
