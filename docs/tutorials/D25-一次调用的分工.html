@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>D25 · 一次 MCP 调用里，谁干了哪一段</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1f2328; --ink2:#4a5568; --ink3:#6b7280;
+    --line:#e3e6ea; --blue:#1f6feb; --blue-bg:#eef4ff;
+    --green:#1a7f37; --green-bg:#eaf7ee;
+    --amber:#9a6700; --amber-bg:#fff8e6;
+    --red:#b42318; --red-bg:#fdeceb;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--ink);
+       font:15px/1.75 -apple-system,"PingFang SC","Hiragino Sans GB",system-ui,sans-serif;}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-.2px}
+  .sub{color:var(--ink3);font-size:13.5px;margin-bottom:22px}
+  h2{font-size:18px;margin:34px 0 12px;padding-bottom:7px;border-bottom:2px solid var(--line)}
+  h3{font-size:15.5px;margin:20px 0 8px}
+  p{margin:9px 0}
+  code{font-family:var(--mono);font-size:13px;background:#eef0f3;padding:1.5px 5px;border-radius:4px}
+  pre{font-family:var(--mono);font-size:12.5px;line-height:1.62;background:#fbfcfd;
+      border:1px solid var(--line);border-left:3px solid var(--blue);
+      border-radius:6px;padding:11px 13px;overflow-x:auto;margin:10px 0;white-space:pre-wrap;word-break:break-all}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--card)}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f0f2f5;font-weight:600}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600}
+  .pg{background:var(--green-bg);color:var(--green)}
+  .pb{background:var(--blue-bg);color:var(--blue)}
+  .pa{background:var(--amber-bg);color:var(--amber)}
+  .pr{background:var(--red-bg);color:var(--red)}
+  .note{border-left:3px solid var(--amber);background:var(--amber-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .fix{border-left:3px solid var(--red);background:var(--red-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .ok{border-left:3px solid var(--green);background:var(--green-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .big{font-size:16px;font-weight:600;color:var(--ink)}
+  ul,ol{margin:8px 0 8px 20px;padding:0}
+  li{margin:5px 0}
+  .cols{display:flex;gap:14px;flex-wrap:wrap}
+  .cols>.card{flex:1 1 380px;margin:0}
+  .tag{font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
+  .k{color:var(--blue);font-weight:600}
+  .miss{color:var(--red);font-weight:600}
+  footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);color:var(--ink3);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>一次 MCP 调用里，谁干了哪一段</h1>
+  <div class="sub">D25 · 全部结论来自 2026-10-01 本机实测（<code>mcp</code> SDK 2.2.0）· 报文与输出均为真实抓取，非示意</div>
+
+  <div class="card">
+    <div class="big">一句话结论</div>
+    <p style="margin-bottom:0">
+      你的模型 —— <strong>「Server 是装工具的盒子 → Client 传工具名和参数 → Server 按名字调对应工具 → 返回结果」</strong>
+      —— <strong>主干完全正确</strong>。差的是三处：<span class="miss">名字是谁给的</span>、
+      <span class="miss">Server 还会先校验一道参数</span>、<span class="miss">失败也走同一条回程</span>。
+      另有一处措辞要松一下：<strong>「多个」不是必要条件</strong> —— 只装 1 个工具的 Server 照样是 Server。
+    </p>
+  </div>
+
+  <h2>一、你的四步 → 真实的六步</h2>
+
+  <table>
+    <tr><th style="width:30%">你描述的</th><th style="width:34%">实测真实情况</th><th>差在哪</th></tr>
+    <tr>
+      <td>Server = 装了<strong>多个</strong>工具的工具箱</td>
+      <td>✅ 本质正确</td>
+      <td>「多个」<strong>不是必要条件</strong>：<code>server_one_tool.py</code> 只装 1 个工具，照样完整跑通（见本文 §2）</td>
+    </tr>
+    <tr>
+      <td class="miss">（你没提到）</td>
+      <td><strong>Server 是被 Client 启动的子进程</strong>，启动后就常驻，等 stdin 上的下一行</td>
+      <td>少了<strong>生命周期</strong>：它会启动失败、会中途崩、退出时必须清理</td>
+    </tr>
+    <tr>
+      <td class="miss">（你没提到）</td>
+      <td><strong>Client 先发 <code>tools/list</code> 问清单 —— 工具名是从这里来的</strong></td>
+      <td>★ <strong>少了「名字的来源」</strong>。这一条就是 MCP 的全部价值所在（§2 专门证它）</td>
+    </tr>
+    <tr>
+      <td>Client 传入要调的工具 + 参数</td>
+      <td>✅ <code>tools/call</code>，参数是 <code>{name, arguments}</code></td>
+      <td>机械上正确。但<strong>决定调哪个的不是 Client，是模型</strong>（§4 说清三者分工）</td>
+    </tr>
+    <tr>
+      <td>Server 按工具名和参数调对应工具</td>
+      <td>✅ <strong>内部就是一张 <code>名字 → 函数</code> 的字典</strong>（§3 把这张表打出来了）</td>
+      <td>只需补一个实现细节：查表前<strong>先校验参数</strong></td>
+    </tr>
+    <tr>
+      <td class="miss">（你没提到）</td>
+      <td><strong>Server 按 JSON Schema 校验参数，类型不对当场拒</strong></td>
+      <td>★ 少了这一道。<code>echo(text=123)</code> 被拒即证据（§5）</td>
+    </tr>
+    <tr>
+      <td>返回正确结果</td>
+      <td>✅ 但<strong>成功和失败都走同一封 <code>result</code></strong>，失败只是把 <code>isError</code> 置真</td>
+      <td>回程只有一条，不是「成功走一条、失败走另一条」</td>
+    </tr>
+  </table>
+
+  <p class="tag">注：<code>tools/list</code> / <code>tools/call</code> 是 MCP 定义的两种「方法名」；
+     <code>JSON Schema</code> 是一种用 JSON 描述「这个函数该收什么参数」的格式，Server 用它把函数的参数类型告诉外部。</p>
+
+  <h2>二、实验：一个「零硬编码」的客户端</h2>
+
+  <div class="fix">
+    <strong>先说为什么要补这个实验 —— 我上一轮的证据是不够的。</strong>
+    <p style="margin:6px 0 0">
+      上一轮的抓包脚本 <code>client_probe.py</code> 第 44 行写的是
+      <code>await session.call_tool("current_time", {})</code> ——
+      <strong>工具名是我写死在客户端代码里的</strong>。所以那一轮虽然打了 <code>tools/list</code>，
+      但<strong>并不能证明「名字是从 Server 来的」</strong>：名字本来就在我手上。
+    </p>
+  </div>
+
+  <p>补的做法是写一个<strong>代码里不出现任何工具名</strong>的客户端，名字一律从
+     <code>tools/list</code> 的返回值里取；参数则按每个工具<strong>自报</strong>的
+     <code>inputSchema</code> 现造（只求合法，不关心语义）。</p>
+
+  <h3>先自证：这个文件里真的没有工具名</h3>
+  <pre>$ grep -n "current_time\|add\|echo" client_zerocode.py
+（无输出 —— 一次都没命中）</pre>
+
+  <h3>然后：同一份文件、<strong>一字未改</strong>，指向两个不同的 Server</h3>
+
+  <div class="cols">
+    <div class="card">
+      <h3 style="margin-top:0"><span class="pill pb">指向</span> 只装 1 个工具的 Server</h3>
+      <pre>### 本次连的 Server 文件：server_one_tool.py
+  Server 自报家门 : demo-one-tool v0.0.1
+  ① tools/list 拿到 1 个工具名：['current_time']
+  ② call current_time  args={}
+                       is_error=False
+                       返回: 2026-10-01T19:34:27+08:00</pre>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0"><span class="pill pb">指向</span> 装 3 个工具的 Server</h3>
+      <pre>### 本次连的 Server 文件：server_three_tools.py
+  Server 自报家门 : demo-three-tools v0.0.1
+  ① tools/list 拿到 3 个工具名：
+       ['current_time', 'add', 'echo']
+  ② call current_time  args={}          -> 19:34:30
+  ② call add           args={'a':7,'b':7} -> 14
+  ② call echo          args={'text':'hello'} -> 收到：hello</pre>
+    </div>
+  </div>
+
+  <div class="ok">
+    <strong>这三行结论由数据直接给出：</strong>
+    <ul style="margin:6px 0 0">
+      <li>客户端脚本<strong>不知道</strong> <code>add</code> 要两个整数、<code>echo</code> 要一个字符串 ——
+          它只是照 Server 给的 <code>inputSchema</code> 造了 <code>{'a':7,'b':7}</code> 和 <code>{'text':'hello'}</code>，就调通了。</li>
+      <li><strong>换一个 Server，客户端一行都不用改</strong> —— 这正是 PRD §9.9 那句
+          「接入新 server 不需要修改 Agent 代码」的<strong>可运行证据</strong>，也是 PRD S10 要证明的能力。</li>
+      <li>所以：<strong>工具名不是我写的，是 Server 在 <code>tools/list</code> 里告诉客户端的。</strong></li>
+    </ul>
+  </div>
+
+  <h2>三、打开箱子：Server 内部那张「名字 → 函数」的表</h2>
+
+  <p>「Server 根据工具名去调相应工具」这句话，落到实现上是什么？把 Server 对象的内部
+     <strong>工具登记表</strong>打印出来看（这一步叫<strong>内省</strong>：程序在运行时读取自己的结构）：</p>
+
+  <pre>server 对象   : MCPServer  name='demo-three-tools'
+tool_manager  : ToolManager
+  公开方法   : ['add_tool', 'call_tool', 'get_tool', 'list_tools', 'remove_tool', ...]
+
+_tools: dict，共 3 条
+  'current_time' -> 登记项类型 Tool  里面挂的函数 = &lt;function current_time at 0x10c2122a0&gt;
+  'add'          -> 登记项类型 Tool  里面挂的函数 = &lt;function add at 0x10b618cc0&gt;
+  'echo'         -> 登记项类型 Tool  里面挂的函数 = &lt;function echo at 0x10a7c54e0&gt;</pre>
+
+  <p>所以「路由」不是什么复杂机制，<strong>就是一次字典查表</strong>：
+     收到 <code>{"name": "add", "arguments": {"a": 7, "b": 7}}</code> →
+     用 <code>"add"</code> 查出那个函数对象 → 把 JSON 里的 <code>{"a":7,"b":7}</code>
+     反序列化成 Python 的 <code>a=7, b=7</code> → 调用它 → 把返回值再序列化回 JSON。</p>
+
+  <p class="tag">那张表是<strong>装饰器</strong>写进去的：源码里每个函数上方的 <code>@server.tool(...)</code>
+     就是「把我登记进那张表」的意思。（<code>装饰器</code> = Python 里包在函数定义上方的一行 <code>@xxx</code>，
+     它在函数被定义的那一刻就执行，用来改写或登记这个函数。）</p>
+
+  <h2>四、三个角色各管哪一段（这是面试最容易被追问的一层）</h2>
+
+  <table>
+    <tr><th style="width:16%">角色</th><th style="width:26%">在本项目里是谁</th><th>它负责的那一段</th></tr>
+    <tr>
+      <td><strong>模型</strong><br><span class="pill pa">决定</span></td>
+      <td>DeepSeek（经 LLM Gateway）</td>
+      <td><strong>决定「调哪个工具、传什么参数」</strong>。看到工具清单后自己选，这一步没有任何代码写死</td>
+    </tr>
+    <tr>
+      <td><strong>Host / Client</strong><br><span class="pill pb">搬运 + 管理</span></td>
+      <td>FastAPI 后端进程<br>（D27 的 <code>mcp_client.py</code>）</td>
+      <td>① 启动并管理 Server 子进程的<strong>生命周期</strong>；
+          ② 发 <code>tools/list</code> 把清单<strong>转成 LangGraph 能认的工具定义</strong>；
+          ③ 把模型的工具调用<strong>翻译成 JSON-RPC</strong> 发出去；
+          ④ <strong>自己不判断该调哪个</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Server</strong><br><span class="pill pg">执行</span></td>
+      <td>D26 自研库存服务 / D27 的 Harness</td>
+      <td>① 启动后常驻，在 stdin 上读、往 stdout 上写；
+          ② 报目录（<code>tools/list</code>）；
+          ③ 按名字查表 → <strong>校验参数</strong> → 执行 → 包装结果</td>
+    </tr>
+  </table>
+
+  <div class="note">
+    <strong>诚实边界：</strong>本次演示里<strong>没有接 LLM</strong> —— 那一跳是我用脚本按「把清单里的工具全调一遍」走的。
+    所以「模型决定调哪个」这一句是<strong>架构层面的说明，不是本文实测出来的</strong>。
+    真实链路里由 ReAct 循环中的模型决定，D27 接入时才会有实测。
+  </div>
+
+  <h2>五、出错也走同一条回程</h2>
+
+  <p>实测两种「出错」，<strong>没有一个抛异常给客户端</strong>：</p>
+
+  <pre>tools/call {"name":"echo",  "arguments":{"text": 123}}     ← 参数类型错
+  Tool 'echo' rejected arguments: ['text']
+  → 响应 OK  isError=true   content.text =
+       Error executing tool echo: 1 validation error for echoArguments
+       text: Input should be a valid string [input_value=123, input_type=int]
+
+tools/call {"name":"not_exist_tool", "arguments":{}}        ← 工具根本不存在
+  Tool 'not_exist_tool' failed: 'Unknown tool: not_exist_tool'
+  → 响应 OK  isError=true   content.text = "Unknown tool: not_exist_tool"</pre>
+
+  <p>两种错都装在一封<strong>成功的 JSON-RPC 响应</strong>里返回，只是把 <code>isError</code> 置真。
+     这是有意的设计：<strong>错误要让模型看得见</strong>，模型才能读出
+     「参数该是字符串而不是数字」并改对重试 —— 这是 Agent 自修正循环的关键一环。</p>
+
+  <p class="tag">每条响应还带 <code>structuredContent</code>：同一个值印两遍 ——
+     <code>content</code> 是给人/模型读的自然语言，<code>structuredContent</code> 是给程序读的结构化值。</p>
+
+  <div class="note">
+    <strong>边界：</strong>本次只测到「工具执行错误」这一支。
+    <strong>协议层错误（响应里带 JSON-RPC <code>error</code> 对象，例如协议版本不支持）没有测到</strong>，
+    此处不下结论。
+  </div>
+
+  <h2>六、本次更正的两处（我上一轮说得不准）</h2>
+
+  <div class="fix">
+    <strong>① 上一轮我说「13 条 JSON-RPC 报文原样落日志」—— 不准确。</strong>
+    <p style="margin:6px 0 0">
+      <code>mitm.py</code> 的转发确实是<strong>逐行原样</strong>的，
+      但它<strong>打印</strong>时做了截断（<code>raw[:300]</code>，见源码第 49 行）。
+      所以日志里 <code>tools/list</code> 那一条长响应是<strong>显示不全</strong>的。
+      <br>→ 影响范围：只影响「肉眼从原始日志数工具个数」。
+      本文与上一轮所有关于「3 个工具」的结论，都取自<strong>未被截断的解析后字段</strong>（<code>listed.tools</code>），结论不受影响。
+    </p>
+  </div>
+
+  <div class="fix">
+    <strong>② 上一轮的抓包<em>没能</em>证明「工具名来自 Server」。</strong>
+    <p style="margin:6px 0 0">
+      因为客户端代码里<strong>写死了</strong> <code>"current_time"</code>。
+      本轮用「零硬编码客户端」补齐了这条证明（§2），且证明方式是<strong>可复现的</strong>：
+      换 Server 不改代码，工具照样调得通。
+    </p>
+  </div>
+
+  <div class="ok">
+    <strong>这两条的共性：</strong>上一轮的结论<strong>方向都对</strong>，
+    但<strong>证据链上有一环是「我以为」，不是「我测了」</strong> ——
+    前者只要没人追问就永远看不出来。写结论时自问一句
+    <strong>「这条断言，我手上哪一行输出能直接指向它？」</strong>，答不上来就该补测。
+  </div>
+
+  <footer>
+    D25 · MCP 学习日 · 配图与《D25-Server与Tool的区别.html》互补：
+    那一份回答「Server <strong>是什么</strong>」（容器 vs 内容物），
+    本文回答「一次调用<strong>怎么走完</strong>」（谁干了哪一段）。<br>
+    复现命令（脚本在 <code>/tmp/d25_demo/</code>，不入库）：
+    <code>python client_zerocode.py server_one_tool.py</code> ·
+    <code>python client_zerocode.py server_three_tools.py</code> ·
+    <code>python inspect_registry.py</code>
+  </footer>
+
+</div>
+</body>
+</html>
