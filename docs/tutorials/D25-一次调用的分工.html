@@ -186,22 +186,37 @@ _tools: dict，共 3 条
      就是「把我登记进那张表」的意思。（<code>装饰器</code> = Python 里包在函数定义上方的一行 <code>@xxx</code>，
      它在函数被定义的那一刻就执行，用来改写或登记这个函数。）</p>
 
-  <h2>四、三个角色各管哪一段（这是面试最容易被追问的一层）</h2>
+  <h2>四、四个角色各管哪一段（这是面试最容易被追问的一层）</h2>
 
   <table>
     <tr><th style="width:16%">角色</th><th style="width:26%">在本项目里是谁</th><th>它负责的那一段</th></tr>
     <tr>
       <td><strong>模型</strong><br><span class="pill pa">决定</span></td>
       <td>DeepSeek（经 LLM Gateway）</td>
-      <td><strong>决定「调哪个工具、传什么参数」</strong>。看到工具清单后自己选，这一步没有任何代码写死</td>
+      <td><strong>决定「调哪个工具、传什么参数」</strong>（<strong>选择权</strong>）。看到工具清单后自己选，这一步没有任何代码写死。
+          <br>规范原文（Tools 页）：<em>"Tools in MCP are designed to be <strong>model-controlled</strong>,
+          meaning that the language model can discover and invoke tools automatically"</em></td>
     </tr>
     <tr>
-      <td><strong>Host / Client</strong><br><span class="pill pb">搬运 + 管理</span></td>
-      <td>FastAPI 后端进程<br>（D27 的 <code>mcp_client.py</code>）</td>
-      <td>① 启动并管理 Server 子进程的<strong>生命周期</strong>；
-          ② 发 <code>tools/list</code> 把清单<strong>转成 LangGraph 能认的工具定义</strong>；
-          ③ 把模型的工具调用<strong>翻译成 JSON-RPC</strong> 发出去；
-          ④ <strong>自己不判断该调哪个</strong></td>
+      <td><strong>Host</strong>（宿主）<br><span class="pill pb">放行 + 编排</span></td>
+      <td>FastAPI 后端进程（<code>app/</code>）<br><strong>不是</strong> React 前端</td>
+      <td>规范 Architecture 页列了 6 条：创建并管理多个 Client 实例 · 控制连接权限与生命周期 ·
+          执行安全策略与「用户同意」要求 · 处理用户授权决定 · 协调 AI/LLM 与 sampling ·
+          汇总跨 Client 的上下文。
+          <br>→ 一句话：<strong>它不选题，但它决定「哪些工具能被模型看见」，并且能否决</strong>
+          （规范原文：<em>"there SHOULD always be a human in the loop with the ability to <strong>deny</strong> tool invocations"</em>；
+          <code>Applications SHOULD: Provide UI that makes clear which tools are being exposed to the AI model</code>）
+          <br>本项目里它还管一件具体的事：<strong>启动并管理 Server 子进程的生命周期</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Client</strong>（连接器）<br><span class="pill pb">搬运</span></td>
+      <td>D27 要写的 <code>app/services/mcp_client.py</code></td>
+      <td><strong>1 个 Client 对象 ↔ 1 个 Server</strong>（规范原文
+          <em>"Each client is created by the host and communicates with <strong>exactly one</strong> server"</em>）。
+          职责：每个请求都带上协议版本与能力 · 双向转发消息 · 管理订阅与通知 · 维持 Server 之间的安全边界。
+          <br>→ 一句话：<strong>它不判断，只管这一条通道</strong>：发 <code>tools/list</code>、
+          把模型的工具调用<strong>翻译成 JSON-RPC</strong> 发出去、把回包翻译回来。
+          <br>D27 还要在这里把清单<strong>转成 LangGraph 能认的工具定义</strong>（生成存根 → 注册进 Tool Registry）</td>
     </tr>
     <tr>
       <td><strong>Server</strong><br><span class="pill pg">执行</span></td>
@@ -216,6 +231,17 @@ _tools: dict，共 3 条
     <strong>诚实边界：</strong>本次演示里<strong>没有接 LLM</strong> —— 那一跳是我用脚本按「把清单里的工具全调一遍」走的。
     所以「模型决定调哪个」这一句是<strong>架构层面的说明，不是本文实测出来的</strong>。
     真实链路里由 ReAct 循环中的模型决定，D27 接入时才会有实测。
+  </div>
+
+  <div class="note">
+    <strong>本节 2026-10-01 修正：</strong>原版把 <strong>Host 与 Client 合成了一行</strong>
+    （「Host / Client · 搬运 + 管理」），结果是<strong>两层的职责边界被压平</strong> ——
+    复述时很容易把「决定调哪个工具」挂到 Host 头上，而那是<strong>模型</strong>的活。
+    现按规范 Architecture 页把两者拆开。原版那四句（启动子进程 / 发 <code>tools/list</code> /
+    翻译成 JSON-RPC / 自己不判断）仍然成立，只是分属两层，已并入上表。
+    <br><br><strong>一句话记法：</strong>模型有<strong>选择权</strong>（调哪个），
+    Host 有<strong>放行权与否决权</strong>（哪些能被看见、能不能执行），
+    Client 只有<strong>搬运</strong>（不判断），Server 只管<strong>执行</strong>。
   </div>
 
   <h2>五、出错也走同一条回程</h2>

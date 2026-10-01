@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>D25 · 工具是怎么进到 Tool Registry 里的</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1f2328; --ink2:#4a5568; --ink3:#6b7280;
+    --line:#e3e6ea; --blue:#1f6feb; --blue-bg:#eef4ff;
+    --green:#1a7f37; --green-bg:#eaf7ee;
+    --amber:#9a6700; --amber-bg:#fff8e6;
+    --red:#b42318; --red-bg:#fdeceb;
+    --purple:#6f42c1; --purple-bg:#f3eefc;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--ink);
+       font:15px/1.75 -apple-system,"PingFang SC","Hiragino Sans GB",system-ui,sans-serif;}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-.2px}
+  .sub{color:var(--ink3);font-size:13.5px;margin-bottom:22px}
+  h2{font-size:18px;margin:34px 0 12px;padding-bottom:7px;border-bottom:2px solid var(--line)}
+  h3{font-size:15.5px;margin:20px 0 8px}
+  p{margin:9px 0}
+  code{font-family:var(--mono);font-size:13px;background:#eef0f3;padding:1.5px 5px;border-radius:4px}
+  pre{font-family:var(--mono);font-size:12.5px;line-height:1.62;background:#fbfcfd;
+      border:1px solid var(--line);border-left:3px solid var(--blue);
+      border-radius:6px;padding:11px 13px;overflow-x:auto;margin:10px 0;white-space:pre-wrap;word-break:break-all}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--card)}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f0f2f5;font-weight:600}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600}
+  .pg{background:var(--green-bg);color:var(--green)}
+  .pb{background:var(--blue-bg);color:var(--blue)}
+  .pa{background:var(--amber-bg);color:var(--amber)}
+  .pr{background:var(--red-bg);color:var(--red)}
+  .pp{background:var(--purple-bg);color:var(--purple)}
+  .note{border-left:3px solid var(--amber);background:var(--amber-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .ok{border-left:3px solid var(--green);background:var(--green-bg);padding:11px 14px;border-radius:6px;margin:12px 0}
+  .big{font-size:16px;font-weight:600;color:var(--ink)}
+  ul,ol{margin:8px 0 8px 20px;padding:0}
+  li{margin:5px 0}
+  .tag{font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
+  .k{color:var(--blue);font-weight:600}
+  .miss{color:var(--red);font-weight:600}
+
+  /* 链路图 */
+  .flow{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin:14px 0}
+  .row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;align-items:stretch}
+  .box{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fff;min-width:170px;flex:0 1 auto}
+  .box .t{font-size:13px;font-weight:600;margin-bottom:3px}
+  .box .d{font-size:12px;color:var(--ink3);line-height:1.55;font-family:var(--mono)}
+  .box.local{border-color:#bfe3c9;background:#f6fdf8}
+  .box.mcp{border-color:#d7c6f2;background:#faf7fe}
+  .box.reg{border-color:#b9d4fb;background:var(--blue-bg);min-width:270px}
+  .box.agent{border-color:#e3d18a;background:var(--amber-bg)}
+  .arrow{text-align:center;color:var(--ink3);font-size:19px;line-height:1;margin:9px 0}
+  .arrow small{display:block;font-size:11.5px;color:var(--ink3);font-family:var(--mono);margin-top:2px}
+  .split{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);color:var(--ink3);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>工具是怎么进到 Tool Registry 里的</h1>
+  <div class="sub">D25 · 左边「本地工具」是<strong>已在跑的代码</strong>（`app/tools/`）；右边「MCP」是 D26/D27 要补的那一段 · 结论由真机 grep 与源码取证，非示意</div>
+
+  <div class="card">
+    <div class="big">一句话结论</div>
+    <p style="margin-bottom:0">
+      <strong>Agent 引擎只依赖注册表的两个接口</strong>（<code>get_tools_schema()</code> 取工具目录、
+      <code>execute_tool(name, args)</code> 按名字执行），<strong>它自己一个工具名都不出现</strong>。
+      所以「工具从哪来」对它是不可见的 —— 只要是<strong>有人往注册表里写条目</strong>，它就照用。
+      MCP 干的事就是<strong>成为注册表的第二个写入者</strong>。
+    </p>
+  </div>
+
+  <h2>一、链路全图（两个入口，汇进同一张表）</h2>
+
+  <div class="flow">
+    <div class="split">
+      <div class="box local" style="flex:1 1 300px">
+        <div class="t">① 本地工具 <span class="pill pg">已在跑</span></div>
+        <div class="d">app/tools/current_time.py<br>app/tools/retrieval.py</div>
+      </div>
+      <div class="box mcp" style="flex:1 1 300px">
+        <div class="t">①′ 外部 MCP Server <span class="pill pp">D26/D27</span></div>
+        <div class="d">独立子进程（如 harness-mcp-v2）<br>工具清单不由你写</div>
+      </div>
+    </div>
+
+    <div class="arrow">↓ <small>本地：@register 装饰器 · MCP：tools/list 发现</small></div>
+
+    <div class="split">
+      <div class="box local" style="flex:1 1 300px">
+        <div class="t">② 写条目</div>
+        <div class="d">@register(name, description, parameters)<br>→ 执行 <b>_registry[name] = {...}</b></div>
+      </div>
+      <div class="box mcp" style="flex:1 1 300px">
+        <div class="t">②′ 写条目</div>
+        <div class="d">tools/list 返回 [名字, description, inputSchema]<br>→ 翻译后写进同一张 _registry</div>
+      </div>
+    </div>
+
+    <div class="arrow">↓ <small>两条入口写进去的条目，形状一一对应</small></div>
+
+    <div class="row">
+      <div class="box reg">
+        <div class="t">③ Tool Registry <span class="pill pb">唯一交汇点</span></div>
+        <div class="d">app/tools/registry.py<br>_registry: dict[名字, {…}]</div>
+      </div>
+    </div>
+
+    <div class="arrow">↓ <small>get_tools_schema() / execute_tool()</small></div>
+
+    <div class="row">
+      <div class="box agent">
+        <div class="t">④ Agent 引擎 <span class="pill pa">零工具名</span></div>
+        <div class="d">app/services/agent_service.py<br>LLM 看目录选工具 → 按名字回执行</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ok">
+    <strong>看图的关键</strong>：① 和 ①′ 是<strong>两个完全不同的来源</strong>（一个在你进程内的函数，一个在别的进程里），
+    但 ③ 往下看过去<strong>没有差别</strong> —— 引擎那一格拿到的永远只是「一张工具目录 + 一个按名字执行的入口」。
+  </div>
+
+  <h2>二、现有链路：本地工具的五步（全部可指认到行）</h2>
+
+  <table>
+    <tr><th style="width:6%">步</th><th style="width:30%">在哪发生</th><th>发生了什么</th></tr>
+    <tr>
+      <td>1</td>
+      <td><code>app/tools/current_time.py</code></td>
+      <td>工具函数上面加一个装饰器：<code>@register(name="current_time", description="…", parameters={…})</code></td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code>app/tools/registry.py</code> 的 <code>decorator()</code></td>
+      <td>把 <code>{function, description, parameters}</code> 塞进模块级字典 <code>_registry</code>。<br>
+          重名会当场 <code>raise ValueError("工具名重复")</code>。</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>app/tools/__init__.py</code></td>
+      <td><strong>副作用导入</strong>（只为触发注册、不为使用）：<code>from app.tools import current_time</code>。<br>
+          ⚠️ 少了这一行，第 2 步就不会执行 —— 注册表是空的，且<strong>不报任何错</strong>。</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><code>agent_service.py</code> 第 117 行</td>
+      <td><code>get_tools_schema()</code> 把注册表渲染成 OpenAI function calling 的 <code>tools</code> 数组，随请求发给 LLM。</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><code>agent_service.py</code> 第 145 行</td>
+      <td>LLM 回 <code>tool_calls</code> → <code>execute_tool(名字, 参数)</code> → 查字典、执行、<code>str()</code> 成字符串 →
+          包成 <code>role:"tool"</code> 消息回灌。</td>
+    </tr>
+  </table>
+
+  <h3>注册表里那一条到底长什么样</h3>
+  <p>本地工具写进去的条目（键名来自 <code>registry.py</code> 源码）：</p>
+  <pre>_registry["current_time"] = {
+    "function":    &lt;function current_time&gt;,      # 真正的可调用对象
+    "description": "获取当前时间…",                # 给 LLM 看，决定它会不会被选中
+    "parameters":  {"type":"object", "properties":{}, "required":[]},   # JSON Schema
+}</pre>
+  <p>MCP 工具从 <code>tools/list</code> 拿回来的条目：</p>
+  <pre>Tool(name="harness_diagnose", description="…", inputSchema={"type":"object", …})
+                                       ↑
+            两边都是 JSON Schema —— 这就是"能被同一张表装下"的前提</pre>
+
+  <div class="note">
+    <strong>形状一一对应表</strong>（这是 MCP 能"零改动接入"的技术前提）：
+    <table style="margin-top:8px">
+      <tr><th>语义</th><th>本地工具（<code>@register</code> 参数）</th><th>MCP（<code>tools/list</code> 返回）</th></tr>
+      <tr><td>叫什么</td><td><code>name</code></td><td><code>name</code></td></tr>
+      <tr><td>干什么用的</td><td><code>description</code></td><td><code>description</code></td></tr>
+      <tr><td>参数长什么样</td><td><code>parameters</code>（JSON Schema）</td><td><code>inputSchema</code>（JSON Schema）</td></tr>
+      <tr><td>怎么执行</td><td><code>function</code>（本进程函数）</td><td><span class="miss">没有对应物</span> → 要改成"记住它属于哪个 Server"</td></tr>
+    </table>
+    <strong>最后一行就是 MCP Client 存在的理由</strong>：前三项 MCP 已经给全了，只有"怎么执行"这一项必须由你的适配层补上。
+  </div>
+
+  <h2>三、所以 MCP Client 只要补三件事</h2>
+
+  <table>
+    <tr><th style="width:16%">动作</th><th style="width:26%">什么时候做</th><th>做什么</th></tr>
+    <tr>
+      <td><strong>发现</strong></td>
+      <td>Server 启动 / 重连时（一次性）</td>
+      <td>发 <code>tools/list</code>，拿回这台 Server 的全部工具（名字 + description + inputSchema）</td>
+    </tr>
+    <tr>
+      <td><strong>适配</strong></td>
+      <td>拿到清单后</td>
+      <td>把 <code>inputSchema</code> 原样当 <code>parameters</code> 用（同一套 JSON Schema，几乎不用转），
+          再补一个"这条归哪个 Server"的标记，然后写进 <code>_registry</code></td>
+    </tr>
+    <tr>
+      <td><strong>分派</strong></td>
+      <td>每次 <code>execute_tool(name, args)</code></td>
+      <td>查这条名字属于哪个 Server → 往那个子进程发 <code>tools/call</code> → 把返回的
+          <code>content</code> 拼成字符串返回（<code>execute_tool</code> 的契约是返回 <code>str</code>）</td>
+    </tr>
+  </table>
+
+  <div class="ok">
+    三件事做完，注册表里就<strong>多了一批来源不同、形状相同的条目</strong>。Agent 引擎那一格
+    <strong>一个字都不用改</strong> —— 它本来就不知道、也不需要知道工具在哪。
+  </div>
+
+  <h2>四、现场证据：引擎里真的没有工具名</h2>
+  <p>对 <code>app/services/agent_service.py</code> 逐个搜具体工具名，命中数：</p>
+  <pre>current_time      → 0
+search_documents  → 0
+retrieve          → 0
+query_inventory   → 0</pre>
+  <p>它从注册表导入的只有两个名字（第 37 行）：</p>
+  <pre>from app.tools import execute_tool, get_tools_schema   # 注册表：工具能力集中管理</pre>
+
+  <div class="note">
+    <strong>自证要求</strong>：这条"命中数 0"必须能<strong>在文件外复现</strong> —— 即任何人拿到这份仓库，
+    跑一遍同样的搜索都能得到 0。判据是<strong>这个 0 不是我填进去的</strong>，
+    否则就成了循环证据（自己写下"没有"，再拿它当"没有"的证明）。
+  </div>
+
+  <h2>五、三条边界 —— 「不改 Agent 代码」不等于「什么都好」</h2>
+
+  <table>
+    <tr><th style="width:24%">容易说过头的地方</th><th>准确说法</th></tr>
+    <tr>
+      <td><span class="miss">"零改动"</span></td>
+      <td>
+        改的<strong>不是代码，是数据</strong>：注册一台 Server 要给它
+        <code>{name, command, args, env}</code>（PRD F6.6 的 <code>POST /api/mcp/register</code>）。
+        → 准确说法是 <strong>「改注册表的内容，不改读注册表的代码」</strong>，
+        而且运行时就能加，不用重新部署。
+      </td>
+    </tr>
+    <tr>
+      <td><span class="miss">"工具名会撞车"</span></td>
+      <td>
+        两台 Server 都可能提供一个叫 <code>search</code> 的工具，而 <code>register()</code> 里
+        <code>raise ValueError("工具名重复")</code> 会在运行时<strong>直接炸</strong>。
+        → 所以 MCP 工具进表要<strong>带命名空间</strong>（PRD 里那个 <code>harness_diagnose</code>
+        就是"Server 名 + 工具名"的形态），并且注册表要额外记住<strong>归属哪个 Server</strong>。
+      </td>
+    </tr>
+    <tr>
+      <td><span class="miss">"接口一致 ≠ 行为一致"</span></td>
+      <td>
+        代码不改，但<strong>Agent 的行为会变</strong>：① 工具变多 → LLM 选择空间变大，可能选错、可能多花 token；
+        ② 工具描述由<strong>别人</strong>写，写得差就选不中；③ 多了一整个进程生命周期
+        （子进程崩溃 / 泄漏 / 退出清理，PRD F6.7 专门写了这条）；④ 多了传输失败面
+        （stdio 断了、超时，而本地函数调用不会"连不上"）。
+        → MCP 降的是<strong>接入成本</strong>，不是<strong>运行风险</strong>。
+      </td>
+    </tr>
+  </table>
+
+  <div class="note">
+    <strong>还有一个细节：MCP 的返回值是双层的</strong> ——
+    <code>content</code>（给人/模型读的自然语言）+ <code>structuredContent</code>（给程序读的结构化值）。
+    而本项目 <code>execute_tool</code> 的契约是<strong>只返回一个字符串</strong>。
+    所以适配层必须做一次取舍：取 <code>content</code>，还是用 <code>structuredContent</code>？
+    → <strong>适配层不是零成本的，它只是把成本从 Agent 挪到了 MCP Client</strong>：
+    <strong>一处改动，换整条引擎零改动。</strong>
+  </div>
+
+  <h2>六、为什么这条路走得通 —— 它是 D8 就铺好的扩展点</h2>
+
+  <table>
+    <tr><th style="width:14%">阶段</th><th style="width:40%">"加一个工具"要做什么</th><th>Agent 引擎改动</th></tr>
+    <tr><td>D6</td><td>在 <code>agent_service.py</code> 里内联工具定义</td><td><span class="miss">要改</span>（工具与引擎耦合）</td></tr>
+    <tr><td><strong>D8</strong></td><td>新建一个文件 + 加 <code>@register</code>，并在 <code>__init__.py</code> 里 import 一次</td><td><span class="pill pg">零改动</span></td></tr>
+    <tr><td><strong>D26/D27</strong></td><td>注册一台外部 MCP Server（给 <code>command/args/env</code>）</td><td><span class="pill pg">仍然零改动</span></td></tr>
+  </table>
+
+  <div class="ok">
+    <strong>所以准确的说法是</strong>：MCP 本身并不"提供"零改动能力 ——
+    它<strong>填进了 D8 那个注册制设计早就留好的插槽</strong>。
+    用软件工程的词说，这叫 <span class="k">依赖倒置</span>（引擎依赖"注册表接口"这个抽象，
+    而不是依赖具体工具）＋ <span class="k">开闭原则</span>（对新增 Server 开放，对修改引擎封闭）。
+  </div>
+
+  <footer>
+    D25 配套图 · 与 <code>D25-MCP全景图.html</code>（协议代际）、<code>D25-Server与Tool的区别.html</code>（Server ≠ Tool）、
+    <code>D25-一次调用的分工.html</code>（一次调用的六步）同一套口径。<br>
+    本文所有代码位置与命中数均取自 2026-10-01 工作区实际读取，非示意。
+  </footer>
+
+</div>
+</body>
+</html>
