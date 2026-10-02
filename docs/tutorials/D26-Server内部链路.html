@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>D26 · 自研 MCP Server：一个工具调用在服务端内部怎么走</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1f2328; --ink2:#4a5259; --ink3:#6b7480;
+    --line:#e3e6ea; --accent:#2f6fd0; --accent-bg:#eef4fd;
+    --ok:#1a7f45; --ok-bg:#eaf6ee; --warn:#a8620a; --warn-bg:#fdf4e6;
+    --bad:#b3261e; --bad-bg:#fdecea; --code:#f2f4f7;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; padding:32px 20px 72px; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:15px; line-height:1.75;
+  }
+  .wrap{max-width:960px;margin:0 auto;}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-0.2px;}
+  .sub{color:var(--ink3);font-size:13.5px;margin-bottom:26px;}
+  h2{font-size:19px;margin:38px 0 12px;padding-bottom:7px;border-bottom:2px solid var(--line);}
+  h3{font-size:16px;margin:24px 0 8px;}
+  p{margin:9px 0;}
+  code{background:var(--code);padding:1.5px 6px;border-radius:4px;
+       font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px;color:#243b53;}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+      padding:13px 15px;overflow-x:auto;font-size:12.5px;line-height:1.6;margin:11px 0;}
+  pre code{background:none;padding:0;font-size:12.5px;color:#1f2328;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:18px 20px;margin:14px 0;}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top;}
+  th{background:#f0f2f5;font-weight:600;}
+  td code{font-size:12.5px;}
+  .note{border-left:4px solid var(--accent);background:var(--accent-bg);
+        padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .warn{border-left:4px solid var(--warn);background:var(--warn-bg);
+        padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .bad{border-left:4px solid var(--bad);background:var(--bad-bg);
+       padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .ok{border-left:4px solid var(--ok);background:var(--ok-bg);
+      padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .tag{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:20px;
+       background:var(--accent);color:#fff;margin-right:6px;vertical-align:1px;}
+  .tag.g{background:var(--ok);} .tag.r{background:var(--bad);} .tag.y{background:var(--warn);}
+  ul,ol{margin:9px 0;padding-left:24px;} li{margin:5px 0;}
+  .flow{margin:16px 0;}
+  .step{display:flex;gap:13px;margin:0 0 0 0;align-items:flex-start;}
+  .step .n{flex:0 0 30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;
+           display:flex;align-items:center;justify-content:center;font-size:13.5px;font-weight:600;}
+  .step .b{flex:1;padding-bottom:14px;}
+  .step .b .t{font-weight:600;}
+  .step .b .d{color:var(--ink2);font-size:13.5px;}
+  .step .n.gray{background:#9aa4b0;}
+  .stepline{width:2px;background:var(--line);flex:0 0 2px;}
+  .step:not(:last-child) .b{border-left:2px dashed var(--line);margin-left:-1px;padding-left:0;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px;}
+  @media(max-width:700px){.grid2{grid-template-columns:1fr;}}
+  .kv{font-size:13.5px;}
+  .kv b{color:var(--ink);}
+  .small{font-size:12.5px;color:var(--ink3);}
+  .markerhit{background:#fff3cd;border-radius:3px;padding:0 4px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>D26 · 自研 MCP Server：一个工具调用在服务端内部怎么走</h1>
+<div class="sub">
+  2026-10-02 · mcp 2.2.0 / Python 3.12 · 所有结论均由本机实测得出，取证脚本与日志在 <code>/tmp/d26_probe/</code>
+</div>
+
+<div class="note">
+  <b>这张图解决什么疑问？</b><br>
+  D25 已经弄清「谁负责什么」：<b>模型选工具 · Host 放行 · Client 搬运 · Server 执行</b>。
+  今天往下一层：<b>Server 拿到一次 <code>tools/call</code> 之后，它内部做了哪几件事，才把一个调用变成一次 Python 函数执行？</b>
+  顺带把一个"人人都说但没人验过"的说法当场验掉（§4）。
+</div>
+
+<h2>§1 先补两个名词（本图首次出现，先注解再用）</h2>
+<table>
+  <tr><th>名词</th><th>它是什么 / 解决什么问题</th><th>在本项目里长什么样</th></tr>
+  <tr>
+    <td><b>stdio</b><br><span class="small">standard input / output，标准输入输出</span></td>
+    <td>进程天生自带的一对数据通道：<code>stdin</code>（读）与 <code>stdout</code>（写）。
+        不占端口、不走网络，两个进程靠"一个写另一读"对话。MCP 用它做<b>最省事的本地传输</b>。</td>
+    <td>Client 与 Server 是<b>父子进程</b>：Client 写子进程的 stdin，读子进程的 stdout</td>
+  </tr>
+  <tr>
+    <td><b>JSON-RPC</b></td>
+    <td>一种"调用约定"：每条消息都是一个 JSON，里面写清<b>我要调用谁（<code>method</code>）、参数是什么、这次请求的编号（<code>id</code>）</b>，
+        对方回一条同 <code>id</code> 的 JSON。解决"两个进程怎么把函数调用说清楚"这件事。</td>
+    <td>MCP 的每一条报文都是它。<code>initialize</code> / <code>tools/list</code> / <code>tools/call</code> 都是 <code>method</code> 的取值</td>
+  </tr>
+  <tr>
+    <td><b>fd</b><br><span class="small">file descriptor，文件描述符</span></td>
+    <td>操作系统给每个进程的一张小表，每一行是"一个可读写的东西"的编号。<b>约定：<code>0</code> = stdin，<code>1</code> = stdout，<code>2</code> = stderr</b>。
+        程序里的 <code>print()</code> 最终就是往 <b>1 号</b>写。</td>
+    <td>§4 的判决证据就是比较 <code>fd 1</code> 与 <code>fd 2</code> 指向的是不是同一样东西</td>
+  </tr>
+  <tr>
+    <td><b>schema</b><br><span class="small">inputSchema / outputSchema，模式</span></td>
+    <td>一份"参数说明书"：这个工具<b>要什么参数、什么类型、哪个必填</b>。它的作用是<b>让调用方不用读源码就知道怎么调</b> —— 模型就是靠读它来决定传什么参数的。</td>
+    <td>本项目<b>不手写</b>它：由 Python 函数签名自动生成（见 §5）</td>
+  </tr>
+</table>
+
+<h2>§2 Server 的最小骨架：只有三件事</h2>
+
+<p>一个 MCP Server 从头到尾只有三段，多出来的都是细节：</p>
+
+<pre><code>from mcp.server import MCPServer          # ← ① 建盒子
+
+server = MCPServer("inventory")
+
+@server.tool()                            # ← ② 往盒子里放工具
+def query_inventory(min_stock: int | None = None) -&gt; list[dict]:
+    """查询库存商品。"""                    #    这行 docstring 会被当成工具描述
+    ...
+
+if __name__ == "__main__":
+    server.run(transport="stdio")          # ← ③ 开张营业（此处开始阻塞）</code></pre>
+
+<div class="flow">
+  <div class="step"><div class="n">①</div><div class="b">
+    <div class="t">建盒子 —— <code>MCPServer("inventory")</code></div>
+    <div class="d">只是造了个对象，还没连任何人。<code>name</code> 是第一个位置参数（实测签名确认）。</div>
+  </div></div>
+  <div class="step"><div class="n">②</div><div class="b">
+    <div class="t">放工具 —— <code>@server.tool()</code> 装饰器</div>
+    <div class="d">装饰器在<b>函数定义的那一刻</b>就把工具写进盒子里的一张字典。
+        <b>这是"登记"，不是"调用"</b> —— 函数体此刻一行都没跑。</div>
+  </div></div>
+  <div class="step"><div class="n">③</div><div class="b">
+    <div class="t">开张 —— <code>server.run(transport="stdio")</code></div>
+    <div class="d">从这里开始<b>阻塞</b>：一直读 stdin、处理、写 stdout，直到 stdin 被关闭才返回。
+        实测：Client 断开后 server 进程正常退出（存活 <b>0.94s</b>）。<b>生命周期由 Host 掌管</b> —— D25 讲的那条在这里落地。</div>
+  </div></div>
+</div>
+
+<div class="note">
+  <b>给前端背景的类比：</b><code>server.run()</code> 之于 MCP Server，正如 <code>app.listen()</code> 之于 Express / <code>http.createServer().listen()</code> 之于 Node。
+  <b>之前全是"配置"，它才是"开始接客"。</b>区别只有一个：HTTP 服务监听<b>端口</b>，stdio 服务监听<b>管道</b>。
+</div>
+
+<h2>§3 一次 <code>tools/call</code> 在 Server 内部走的路</h2>
+
+<p>D25 讲的是"层与层之间谁把东西交给谁"。现在把 <b>Server 这个进程切开</b>，看它内部：</p>
+
+<div class="flow">
+  <div class="step"><div class="n">1</div><div class="b">
+    <div class="t">从 stdin 读到一行 JSON</div>
+    <div class="d">形如 <code>{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"query_inventory","arguments":{...}}}</code>
+        —— <b>一行就是一条完整消息</b>（这叫 newline-delimited JSON）。</div>
+  </div></div>
+  <div class="step"><div class="n">2</div><div class="b">
+    <div class="t">看 <code>method</code> 是什么，决定走哪条分支</div>
+    <div class="d"><code>initialize</code> → 回自己的能力；<code>tools/list</code> → 回工具清单；<code>tools/call</code> → 往下走。</div>
+  </div></div>
+  <div class="step"><div class="n">3</div><div class="b">
+    <div class="t">拿 <code>params.name</code> 去字典里查</div>
+    <div class="d">Server 内部维护一张<b>字典</b>：<code>工具名 → 工具对象</code>（工具对象上挂着那个真正的 Python 函数）。
+        <b>所谓"路由"，就是一次字典查表。</b>查不到 → 返回"工具不存在"，但<b>不抛异常</b>（见下方 §5 末）。</div>
+  </div></div>
+  <div class="step"><div class="n">4</div><div class="b">
+    <div class="t">用 <code>inputSchema</code> 校验参数</div>
+    <div class="d">类型不符就直接拒绝，<b>根本不会进入你的函数体</b>。
+        实测：给一个要 <code>str</code> 的参数传 <code>123</code>，Server 回 <code>rejected arguments: ['text']</code>。</div>
+  </div></div>
+  <div class="step"><div class="n">5</div><div class="b">
+    <div class="t">调用真正的 Python 函数</div>
+    <div class="d">到这一步才执行你写的业务代码。<b>函数的返回值就是工具的返回值</b>。</div>
+  </div></div>
+  <div class="step"><div class="n">6</div><div class="b">
+    <div class="t">把返回值包成"双层结构"</div>
+    <div class="d">同一个结果发两份：<code>content</code>（给人/模型读的自然语言）+ <code>structuredContent</code>（给程序读的结构化值）。见 §5 真实报文。</div>
+  </div></div>
+  <div class="step"><div class="n">7</div><div class="b">
+    <div class="t">写回 stdout，带上同一个 <code>id</code></div>
+    <div class="d">Client 靠 <code>id</code> 把"回复"对上"请求"。<b>一次调用至此往返完毕。</b></div>
+  </div></div>
+</div>
+
+<div class="ok">
+  <b>一句话记住这个进程：</b>它是个<b>常驻的、只会读写管道的循环</b> ——
+  读一行 → 看方法 → 查表 → 校验 → 执行 → 包结果 → 写一行。没有端口、没有 URL。
+</div>
+
+<h2>§4 <span class="tag y">今天最值钱的一节</span>往 stdout 打印会不会毁掉协议？</h2>
+
+<p>
+  写 server 的人<b>一定会</b>想在工具里 <code>print()</code> 调试。而"stdout 是协议通道，打印会污染协议"是一句流传很广的话。
+  <b>我们把它当场验了，结论跟"流传的说法"不完全一样。</b>
+</p>
+
+<h3>实验设计（对照法：只改一个变量）</h3>
+<ul>
+  <li><b>A 干净版</b>：工具内不打印。</li>
+  <li><b>B 吵闹版</b>：与 A <b>逐字相同，只多一行</b> <code>print("DEBUG: ...", flush=True)</code>。</li>
+  <li>若两者行为有差 → 成因只能是那一行 <code>print</code>。</li>
+  <li>同时挂一个 <b>stdout 监听中继</b>（tee），把 Server 的 stdout <b>逐行原样</b>抄进日志（不截断），并对每一行判一次"是不是合法 JSON"。</li>
+</ul>
+
+<h3>结果</h3>
+
+<div class="grid2">
+  <div class="card">
+    <div class="kv"><b>A 干净版</b></div>
+    <div class="kv">initialize ✅ &nbsp; tools/list ✅ &nbsp; tools/call ✅</div>
+  </div>
+  <div class="card">
+    <div class="kv"><b>B 吵闹版</b></div>
+    <div class="kv">initialize ✅ &nbsp; tools/list ✅ &nbsp; tools/call ✅</div>
+  </div>
+</div>
+
+<p><b>两者都成功</b> —— <code>print</code> 没有造成任何可观测故障。协议流日志里，两个版本都<b>只有 3 行、行行是合法 JSON</b>，
+那行 <code>DEBUG</code> <b>一行都没进协议流</b>。它去了哪？去<b>终端</b>了。</p>
+
+<h3>追它去了哪：投三枚可区分的标记</h3>
+
+<p>光看"没坏"不够 —— 得知道<b>是谁把它挡下的</b>。于是在工具函数里用三种方式各投一枚标记：</p>
+
+<table>
+  <tr><th>标记</th><th>投法</th><th>落点（实测）</th></tr>
+  <tr><td><code>MARKER-M1-PRINT</code></td><td><code>print(...)</code>（Python 层）</td><td><b>终端 stderr</b>，协议流里无</td></tr>
+  <tr><td><code>MARKER-M2-SYS-STDOUT</code></td><td><code>sys.stdout.write(...)</code>（Python 层，绕过 print 包装）</td><td><b>终端 stderr</b>，协议流里无</td></tr>
+  <tr><td><code>MARKER-M3-OS-WRITE-FD1</code></td><td><code>os.write(1, ...)</code>（<b>fd 层</b>，直接写描述符 1）</td><td><b>终端 stderr</b>，协议流里无</td></tr>
+</table>
+
+<p>连 <b>fd 层</b>直写都被改道了 —— 这说明不是 Python 层的包装在挡，而是<b>fd 本身被换了指向</b>。同一时刻量到的 fd 事实：</p>
+
+<pre><code>{
+  "fd1_ino": 845803477511856773,
+  "fd2_ino": 845803477511856773,      ← 与 fd1 完全相同
+  "fd1_mode": "0o10660",
+  "fd2_mode": "0o10660",
+  "fd1_same_as_fd2": true
+}</code></pre>
+
+<div class="ok">
+  <b>判决：</b><code>MCPServer.run()</code> 在启动时把 <b>fd 1 改道到了 fd 2</b>（两者指向同一个对象）。
+  → 用户代码里写到 stdout 的任何东西，<b>实际都流向了 stderr</b>，因此落不到协议通道上。
+</div>
+
+<h3>但别急着记成"随便打印没事" —— 三条边界</h3>
+
+<table>
+  <tr><th>#</th><th>要点</th></tr>
+  <tr><td>1</td><td><b>这是 SDK 的保护，不是协议的许可。</b>协议的规定是"stdio 通道上只能有协议消息"。
+      换一个 SDK、换一个语言实现、或自己手写 stdio server，<b>就没有这层保护</b> —— 那时 <code>print</code> 真的会毁掉会话。</td></tr>
+  <tr><td>2</td><td><b>"没坏"属于"没测出坏"</b>，不等于"设计上安全"。本实验只覆盖了 <b>mcp 2.2.0 + MCPServer + 工具函数内打印</b>这一种情形，
+      并且在 Client 端做的是高层调用（<code>ClientSession</code>）。<b>更底层或别的实现下会不会坏，本次没测。</b></td></tr>
+  <tr><td>3</td><td><b>副作用仍在：调试输出会混进 stderr。</b>因为 fd1 与 fd2 已合流，
+      Server 的 stderr 现在是"业务噪音 + 真正的错误日志"混在一起 ——
+      排查问题时要能区分，别把调试文本当成故障。</td></tr>
+</table>
+
+<div class="warn">
+  <b>这条为什么值得单独讲？</b>
+  因为它是一个"<b>差点被当成常识直接讲出去</b>"的例子。我原本准备的说法是"print 会污染协议"——听起来完全合理、人人都这么说。
+  <b>跑完发现：在当前 SDK 下它被主动挡住了。</b><br>
+  → 规矩：<b>凡"会导致 X 故障"这类断言，先问"我在这个版本上真见过它发生吗"。</b>没见过的，就写成"风险存在，但当前实现有防护"，
+  而不是当成结论复述。<b>转述一个未经自己验证的故障，比不转述更危险 —— 它带着别人的权威感。</b>
+</div>
+
+<h2>§5 装饰器替你做了哪些事（真实报文，一字未改）</h2>
+
+<p>下面这段是 §4 实验里 <b>B 吵闹版</b>的 <code>tools/list</code> 原始响应（从协议流日志里逐字复制）：</p>
+
+<pre><code>{"jsonrpc":"2.0","id":2,"result":{"tools":[
+  {
+    "name":"echo",
+    "description":"原样回显传入的文本。",
+    "inputSchema":{
+      "properties":{"text":{"title":"Text","type":"string"}},
+      "required":["text"], "type":"object", "title":"echoArguments"
+    },
+    "outputSchema":{
+      "properties":{"result":{"title":"Result","type":"string"}},
+      "required":["result"], "type":"object", "title":"echoOutput"
+    }
+  }
+]}}</code></pre>
+
+<p>而工具函数只写了这样几行 —— <b>上面那一大坨全是自动生成的</b>：</p>
+
+<pre><code>@server.tool()
+def echo(text: str) -&gt; str:
+    """原样回显传入的文本。"""
+    return f"echo:{text}"</code></pre>
+
+<table>
+  <tr><th>报文里的字段</th><th>它从哪来</th></tr>
+  <tr><td><code>name: "echo"</code></td><td>函数名</td></tr>
+  <tr><td><code>description</code></td><td><b>函数的第一行 docstring</b> —— 模型靠这句判断"什么时候该用它"</td></tr>
+  <tr><td><code>inputSchema</code></td><td><b>参数签名 + 类型标注</b>。<code>text: str</code> → <code>{"type":"string"}</code>；
+      带默认值的参数会变成 <code>anyOf:[..., null]</code></td></tr>
+  <tr><td><code>outputSchema</code></td><td><b>返回类型标注</b>。<code>-&gt; str</code> → <code>{"result": {"type":"string"}}</code></td></tr>
+  <tr><td><code>title: "echoArguments"</code></td><td>工具名 + <code>Arguments</code> / <code>Output</code> 自动拼接（注意：是<b>直接拼接</b>，不是转驼峰）</td></tr>
+</table>
+
+<p>调用一次 <code>tools/call</code> 后，返回也是双层的（同样是原始报文，逐字复制）：</p>
+
+<pre><code>{"jsonrpc":"2.0","id":3,"result":{
+  "content":[{"text":"echo:hi","type":"text"}],     ← 给模型读的自然语言
+  "structuredContent":{"result":"echo:hi"},          ← 给程序读的结构化值
+  "isError":false
+}}</code></pre>
+
+<div class="note">
+  函数只 <code>return "echo:hi"</code> 了一个字符串，SDK 自动把它包成
+  <code>content</code>（文本块）与 <code>structuredContent: {"result": ...}</code> 两份 ——
+  <b>这正是 D25 说的"工具返回值是双层的"在服务端的落地形态。</b>
+</div>
+
+<h3>顺带一条：<code>initialize</code> 的响应里能看到 Server 自报的三样</h3>
+<pre><code>{"result":{
+  "protocolVersion":"2025-11-25",                    ← 谈定的协议版本
+  "capabilities":{
+    "tools":{"listChanged":false},                   ← 我提供工具
+    "resources":{"listChanged":false,"subscribe":false},  ← 我提供资源（D25 讲的三原语之一）
+    "prompts":{"listChanged":false}                  ← 我提供提示模板
+  },
+  "serverInfo":{"name":"noisy","version":""}
+}}</code></pre>
+
+<p><b>这段报文本身就是</b>"D25 说的三原语（Tools / Resources / Prompts）"<b>在服务端的真实样子</b>：
+Server 在握手时把"我会这三样里的哪些、会不会主动通知变更"报给 Client。
+本项目<b>只用 Tools</b>，所以三样里只有它是我们真正在用的。</p>
+
+<div class="warn">
+  <b>关于 <code>isError</code>（D25 已测，这里补一句服务端视角）：</b>
+  参数校验失败、工具名不存在 —— 这两种错<b>都不抛异常</b>，而是装在一条正常的 <code>result</code> 里、把 <code>isError</code> 置为 <code>true</code> 返回。
+  <b>这是有意的设计：错误要能被模型看见</b>，模型才有机会自己修正参数重试一次。
+  所以 Client 端的 <code>call_tool</code> <b>不抛异常</b> —— 判断成功与否要看返回对象的 <code>is_error</code> 字段，
+  <b>不能用 try/except 包着调用就当验过了。</b>
+</div>
+
+<h2>§6 验收项「服务独立可调」到底在验什么</h2>
+
+<p>PRD 给 D26 的验收是<b>四个字</b>，容易看轻它。它的真实含义是：</p>
+
+<table>
+  <tr><th>「独立」指</th><th>怎么证</th></tr>
+  <tr>
+    <td><b>不依赖 Agent</b> —— 不需要 LLM 决定调不调它</td>
+    <td rowspan="3">
+      拿一个<b>最简客户端</b>直接连上去，跑通三件事：<br>
+      <code>initialize</code> 握手 → <code>tools/list</code> 拿到工具清单 → <code>tools/call</code> 真的取回数据。<br>
+      <span class="small">（Client 里不出现任何"库存"业务逻辑，也不出现 LLM）</span>
+    </td>
+  </tr>
+  <tr><td><b>不依赖 FastAPI</b> —— 不需要先启动本项目后端</td></tr>
+  <tr><td><b>不依赖数据库</b> —— 数据是进程内的 mock</td></tr>
+</table>
+
+<div class="ok">
+  <b>为什么这条验收值得认真做？</b>因为它是"<b>解耦</b>"这个词的<b>可运行证据</b>。
+  "我的工具是个 MCP Server"这句话，如果不能<b>撇开 Agent 单独跑起来</b>，那就只是一句说法 ——
+  它仍然只是 Agent 代码里的一个普通函数，套了个 MCP 的壳。
+  <br><br>
+  反过来说：<b>能被别人独立调用 = 它是真 Server。</b>这正是 D25 那条判据（"需要被启动吗？被连接吗？被问『你有什么』吗？"）在 D26 的落地检验。
+</div>
+
+<div class="small" style="margin-top:34px;border-top:1px solid var(--line);padding-top:14px;">
+  <b>取证文件</b>（均在 <code>/tmp/d26_probe/</code>，按项目规矩<b>探测件不入库</b>）：<br>
+  <code>probe_mcpserver_api.py</code> · <code>srv_clean.py</code> · <code>srv_noisy.py</code> ·
+  <code>cli_probe_stdout.py</code> · <code>tee_stdout.py</code> · <code>srv_marker_probe.py</code> ·
+  <code>srv_stdout_probe.py</code>；日志 <code>cli_probe_stdout.log</code> · <code>tee_clean.log</code> ·
+  <code>tee_noisy.log</code> · <code>tee_marker.log</code> · <code>probe_init_result.log</code> ·
+  <code>find_version_consts.log</code>。<br>
+  <b>协议版本常量源码</b>：<code>mcp_types/version.py</code>（mcp 2.2.0 已把 types 拆为独立顶层包 <code>mcp_types</code>）。
+</div>
+
+</div>
+</body>
+</html>
