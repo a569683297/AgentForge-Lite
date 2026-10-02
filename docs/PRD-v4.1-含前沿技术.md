@@ -269,7 +269,7 @@ v4.0 只写了对照流程，没写**怎么比才公平**。v4.1 补入四条前
 1. LLM Gateway（DeepSeek + OpenAI 双通道，统一接口，Langfuse 埋点）
 2. Agent 引擎（LangGraph ReAct，5 步上限，工具/检索决策）
 3. RAG 引擎（解析 → 切片 → 向量化 → 混合检索 → 重排 → 引用生成）
-4. 工具注册中心 + MCP 接入（FastMCP 库存服务 demo）
+4. 工具注册中心 + MCP 接入（自研 MCP 库存服务 demo，官方 SDK `MCPServer`）
 5. 记忆系统（滑窗 8 轮 + 20 轮摘要 + Redis/PG 持久化）
 6. 评测体系（**基础 50 条**评测集 + LLM-as-judge + 消融实验 + 报告；D36 追加类型 D 10 条后共 60 条）
 7. Langfuse 可观测（LLM/检索/工具三层埋点）
@@ -366,7 +366,7 @@ v4.0 只写了对照流程，没写**怎么比才公平**。v4.1 补入四条前
 - **F6.1** ToolRegistry：`name/description/parameters(schema)/handler` 四元组注册制
 - **F6.2** 内置工具：`current_time`（时间/计算）、`web_search`（可选）
 - **F6.3** MCP 客户端：官方 `mcp` Python SDK
-- **F6.4** MCP demo 服务：`mcp_servers/inventory_server.py`（FastMCP，内存 mock 数据），暴露 `query_inventory(filters)`
+- **F6.4** MCP demo 服务：`mcp_servers/inventory_server.py`（官方 SDK 的 `MCPServer`，内存 mock 数据），暴露 `query_inventory(filters)`
 - **F6.5** 工具调用失败不影响主流程
 - **验收（原）**：对话中问"查库存数量小于 10 的商品"→ 走通 MCP 工具 → 返回 mock 数据
 
@@ -376,14 +376,14 @@ v4.0 只写了对照流程，没写**怎么比才公平**。v4.1 补入四条前
 - **F6.7 生命周期管理**：MCP Client 必须管理子进程全生命周期——启动、`initialize` 握手、健康检查、**崩溃自动重启（含退避）**、应用退出时清理。**防止 Node 子进程泄漏**
 - **F6.8 Server 持久化**：`mcp_servers` 表记录已注册 server 的配置与状态，应用重启后**自动重连**，无需重复注册
 - **F6.9 工具动态发现**：工具清单**运行时**从 server 的 `tools/list` 获取并注册（**不写死在代码中**）。新增 server 不需要改 Agent 代码
-- **F6.10 toolset 裁剪**：支持只启用部分 toolset（Harness 有 41 个）。理由：**工具数量膨胀会降低 LLM 选工具的准确率**
+- **F6.10 toolset 裁剪**：支持只启用部分 toolset（Harness 实测 **42** 个）。理由：**工具数量膨胀会降低 LLM 选工具的准确率**
 - **F6.11 写操作风险分级**：工具按风险分级（`read` / `low_write` / `medium_write` / `high_write`），写操作需**显式确认**才执行。参考 Harness 的 `HARNESS_AUTO_APPROVE_RISK` 设计，阶段 1 默认**只读**
 - **F6.12 凭据安全**：外部 server 的密钥（如 `HARNESS_API_KEY`）**只从 `.env` 读取**，不写入数据库、不写入代码、不打印日志
 - **验收（新增）**：
   - 启动后 `/api/tools` 能列出 Harness 的 11 个工具（名称 + 描述 + 参数 schema）
   - 问"我最近哪些流水线失败了"→ Agent 选中 `harness_list` / `harness_diagnose` → 返回真实数据 → Langfuse 可见该 span
   - 手动 kill 子进程 → 客户端自动重启并恢复可用
-  - 用只读 PAT 尝试写操作 → 被拦截并给出明确提示
+  - 用 PAT 尝试**写操作** → 被服务端 `HARNESS_READ_ONLY=true` **拦截**并给出明确提示（**⚠ 修正 ④：不是靠「只读 PAT」**，个人 PAT 没有只读档，见 §9.6.2 汇总）
 
 ### F7 评测体系（P0，差异化核心）— **v4.0 扩展**
 
@@ -640,7 +640,7 @@ AgentForge-Lite/
 │       ├── analytics.py    🆕  # 多步分析引导 prompt
 │       └── mcp_tools.py    🆕  # 外部工具使用约束 prompt
 ├── mcp_servers/
-│   └── inventory_server.py     # FastMCP 库存服务（自研 demo）
+│   └── inventory_server.py     # 自研 MCP 库存服务（官方 SDK MCPServer）
 ├── metrics.yaml            🆕  # ★ 指标语义层（口径唯一来源）
 ├── tests/
 │   ├── test_chat.py
@@ -714,8 +714,8 @@ AgentForge-Lite/
 | 重排 | bge-reranker-base | 中文效果好，可本地/API |
 | 缓存 | Redis | 会话热窗口、后续缓存 |
 | 可观测 | Langfuse | 海外远程岗点名；开源自托管 |
-| MCP | 官方 mcp SDK + FastMCP | 标准协议，JD 必考 |
-| **MCP Server（外部）** 🆕 | **Harness 官方 `harness-mcp-v2`** | **真实企业系统；官方开源；MIT；11 工具 × 252 资源类型** |
+| MCP | 官方 `mcp` SDK（服务端入口 `MCPServer`，**原 FastMCP**；客户端 `Client`） | 标准协议，JD 必考 |
+| **MCP Server（外部）** 🆕 | **Harness 官方 `harness-mcp-v2`** | **真实企业系统；官方开源；MIT；11 工具 × 259 资源类型**（2026-10-01 实测，原写 252） |
 | **运行时（外部 Server）** 🆕 | **Node 22+（`npx`）** | Harness MCP Server 的运行时要求。对纯 Python 项目是一次受控引入 |
 | **指标语义层** 🆕 | **YAML + Jinja 风格模板** | 无新框架依赖；可读、可 review、可版本化 |
 | **图表** 🆕 | **ECharts（echarts-for-react）** | 用户前端主力；中文生态完善 |
@@ -827,38 +827,67 @@ query → 向量检索（pgvector cosine top20）
 
 ### 9.6 MCP 接入 — v4.0 大幅扩展
 
+> **⚠ v4.1 修订说明（2026-10-01，依据 D25 实测）**：本节原按 2026-09-22 的官方文档写成，
+> D25 实测后发现**四处**已不成立，已在原地逐条修正（`FastMCP` 改名 / 协议两代 / Harness 规模数字 / 「只读 PAT」口径）。
+> 凡修正处均带 **「v4.1 修正」** 标记，并保留原说法以便对照 —— **不要只看结论，要看它为什么变**。
+
 #### 9.6.1 自研 Server（保留，理解协议两端）
 
-**mcp_servers/inventory_server.py**（FastMCP）：
-```python
-from fastmcp import FastMCP
-mcp = FastMCP("inventory")
+> **⚠ v4.1 修正 ①**：原写 `from fastmcp import FastMCP`，在 **`mcp` 2.2.0** 下**已失效** ——
+> 官方把 `FastMCP` 改名为 **`MCPServer`**，旧 import 路径直接 `ImportError`
+> （实测报错原文含 *"FastMCP was renamed to MCPServer"*）。
+> 而 `FastMCP` 这个名字现在是 **PrefectHQ 维护的独立第三方框架**（`uv add fastmcp`），
+> 与官方 SDK **同源分家** → **本项目不使用它**（选了与「官方 SDK」口径一致的官方入口）。
 
-@mcp.tool()
+**mcp_servers/inventory_server.py**（官方 SDK 的 `MCPServer`）：
+```python
+from mcp.server import MCPServer          # ← mcp 2.2.0 的正确入口（旧路径 mcp.server.fastmcp 已失效）
+
+mcp = MCPServer("inventory")              # name 是第一个位置参数（实测签名确认）
+
+@mcp.tool()                               # 装饰器名未变，仍是 .tool()
 def query_inventory(min_stock: int | None = None, category: str | None = None) -> list[dict]:
     """查询库存商品。min_stock: 库存下限过滤; category: 品类过滤"""
     # mock 数据：返回商品列表
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")            # run() 默认就是 stdio，这里显式写出以免歧义
 ```
+
+**四项实测确认**（2026-10-01，`mcp` 2.2.0 / Python 3.12）：
+
+| 项 | 实测结果 |
+|---|---|
+| `MCPServer("inventory")` | ✅ 可构造，`name` 是第一个位置参数 |
+| `@mcp.tool()` | ✅ 可注册；**`inputSchema` 由函数签名自动生成**（可选参数被表达成 `anyOf: [integer, null]`） |
+| `mcp.run()` 的默认 transport | ✅ **`stdio`**（签名即 `transport="stdio"`） |
+| `from fastmcp import FastMCP` | ❌ `ImportError: No module named 'fastmcp'` |
+
 - 运行：`python mcp_servers/inventory_server.py`（stdio）
-- 客户端：`mcp_client.py` 连接 → 动态发现工具 → 注册进 ToolRegistry
+- 客户端：`mcp_client.py` 连接 → 动态发现工具 → 注册进 ToolRegistry（客户端入口是 `from mcp import Client`，D27 落地）
 
 #### 9.6.2 外部 Server 接入（v4.0 新增）★
 
 **目标**：接入 Harness 官方 MCP Server。
 
-**核心事实**（来源：`github.com/harness/mcp-server` README，2026-09-22 读取）：
+**核心事实**（来源：`github.com/harness/mcp-server` README 2026-09-22 读取；**数字部分已于 2026-10-01 D25 实测覆盖**）：
 
 | 项 | 内容 |
 |---|---|
-| 包 / 许可 | npm `harness-mcp-v2`（MIT） |
-| 规模 | **11 个工具 × 252 种资源类型**，41 个 toolsets，35 个 prompt 模板 |
+| 包 / 许可 | npm `harness-mcp-v2`（MIT），实测版本 **3.2.31** |
+| 规模 | **11 个工具**（`tools/list` 实测）· **259 种资源类型** · **42 个 toolsets**（server 启动日志 + `harness_describe({})` **双重确证**） |
+| **⚠ 口径警告（v4.1 新增）** | 「这个 server 有多少资源类型」**本身是欠定的** —— **各动词支持数不同**：`list` **198** / `get` **174** / `create` **92** / `update` **77** / `delete` **84** / `execute` **66** / `diagnose` **6**。**报数必须带动词口径**，否则数字之间无法比较 |
+| **⚠ 已过时数字（v4.1 新增）** | 官方**文档页**现写「11 个合并工具 / 139 资源类型 / 30 toolsets」→ **已过时**；PRD 原写的 **252 / 41** 更旧。三者互不相同，**以实测（11 / 259 / 42）为准** |
+| **⚠ 未实测项** | **prompt 模板数量**（原文写 35）本次**未验证** → D26/D27 若要用到再测，**在那之前不许引用这个数** |
 | 工具 | `harness_list / get / create / update / delete / execute / search / diagnose / status / describe / schema` |
-| 起法 | `HARNESS_API_KEY=pat.xxx npx -y harness-mcp-v2@latest`（stdio 默认） |
-| 认证 | PAT，格式 `pat.<accountId>.<tokenId>.<secret>`（account id 自动提取） |
+| 起法 | `HARNESS_API_KEY=pat.xxx npx -y harness-mcp-v2@latest`（stdio 默认）。⚠️ **国内环境必须加镜像**：`npm_config_registry=https://registry.npmmirror.com` —— 实测直连 `registry.npmjs.org` **超时**（curl 12s 返回 000），加镜像后 **2 分 31 秒**拉完；不加会**挂住 5 分钟以上且无任何输出** |
+| 认证 | PAT，格式 `pat.<accountId>.<tokenId>.<secret>`（account id **自动从 token 提取**，不需另配 `HARNESS_ACCOUNT_ID`）。⚠️ **第二段是 API 层的 accountId（如 `BCGcUpagTjKhYuqnJWe83Q` 22 字符），不是界面上那个数字账号名** —— 两者不同，实测用错会得到 403 `account identifier mismatch` |
 | 写操作护栏 | `HARNESS_AUTO_APPROVE_RISK` = none / low_write / medium_write / high_write / all |
-| 诊断能力 | `harness_diagnose` 附 6 类失败分类：infra_flake / test_failure / config_error / dependency_failure / permission_error / timeout |
+| **🆕 v4.1 全局只读开关** | **`HARNESS_READ_ONLY=true`** —— 服务端**屏蔽一切写操作**（create / update / delete / execute），只放行 list / get。官方原文：*"Block all mutating operations (create, update, delete, execute). Only list and get operations are allowed."* **这是本项目实现「只读」的正解**（见下方修正 ④） |
+| 诊断能力 | `harness_diagnose` 附 6 类失败分类：infra_flake / test_failure / config_error / dependency_failure / permission_error / timeout。⚠️ **实测补充**：该分类能力依赖 **`TYPESAFE_API_KEY`**，**未配置时静默跳过**（不报错、只不返回分类）|
 
 > ⚠️ **规模数字会变**：该仓库 commit 频率接近每日，引用前须以 README 当日口径为准。
+> **本项目已改为以「实测」为准**，并在 `docs/tutorials/README.md` 的「Harness 接入实测」段留存取证记录。
 
 **注册流程**（走 PRD 已有的 `POST /api/mcp/register`）：
 
@@ -874,10 +903,23 @@ curl -X POST http://localhost:8000/api/mcp/register \
 
 **MCP Client 内部动作**（此段是 D27 原计划内容，非为 Harness 新写）：
 1. `subprocess` 启动子进程
-2. stdio 发 `initialize` 握手（协议版本协商）
+2. stdio 发 `initialize` 握手（协议版本协商）—— ⚠ 见下方【修正 ②】
 3. 发 `tools/list` 取回工具清单
 4. 逐个 `ToolRegistry.register(name, description, schema, handler, risk_level)`
 5. 子进程常驻；Agent 触发调用时把 LangGraph 的 `tool_call` 翻译成 JSON-RPC `tools/call`
+
+> **⚠ v4.1 修正 ②：第 2 条对「默认路径」仍然成立，但说法不完整 —— 协议现在有两代。**
+>
+> | 代际 | 版本 | 行为 |
+> |---|---|---|
+> | **Legacy** | ≤ `2025-11-25` | 发 `initialize` 握手协商 → **本 SDK 走 stdio 时的默认路径就是它**，实测谈定版本 = **`2025-11-25`** |
+> | **Modern** | `2026-07-28` 起 | **取消握手**，版本 / 身份 / 能力改走**逐请求的 `_meta`**。规范原文 *"There is no negotiation handshake"* |
+>
+> - ⚠️ **关键区分**：SDK 里 `LATEST_PROTOCOL_VERSION = 2026-07-28`，而 `LATEST_HANDSHAKE_VERSION = 2025-11-25`
+>   —— **「最新的一代」和「默认走的那一代」是两个不同的值**。**规范里有什么 ≠ 实现默认用什么**，后者只能靠实测得到。
+> - **双重实证**：本机 Python 自研 server 与 **Harness 官方 Node server 都谈定 `2025-11-25`**
+>   → 「stdio 默认走握手代」**不是某一家 SDK 的怪癖**。
+> - **本项目不手写握手**，交给官方 `Client`（自带代际探测与自动回退，`mode="auto"`）。
 
 **四个必须处理的工程细节**：
 
@@ -886,7 +928,30 @@ curl -X POST http://localhost:8000/api/mcp/register \
 | 1 | stdio = 常驻子进程，非 HTTP | 实现生命周期管理：启动/健康检查/**崩溃重启（退避）**/退出清理，防子进程泄漏 |
 | 2 | 首次启动慢（拉 npm 包 + 可选下载 ~23MB ONNX 模型） | `scripts/warmup_mcp.py` 预热；**锁版本**；演示前必跑 |
 | 3 | 写操作风险分级 | 阶段 1 默认只读（`none` 或 `low_write`）；F6.11 显式确认门 |
-| 4 | 41 个 toolset 全开会塞满上下文 | 按需裁剪（F6.10）。官方理由：**工具数膨胀降低 LLM 选型准确率** |
+| 4 | **42** 个 toolset 全开会塞满上下文 | 按需裁剪（F6.10）。官方理由：**工具数膨胀降低 LLM 选型准确率** |
+
+---
+
+#### 9.6.3 v4.1 修正汇总（四处，2026-10-01）
+
+本节原按 2026-09-22 的官方 README 写成，**D25 实测后四处已不成立**。集中列在这里，方便一处看全：
+
+| # | 原写 | 实测事实 | 改法 |
+|---|---|---|---|
+| **①** | `from fastmcp import FastMCP` | **`mcp` 2.2.0 下直接 `ImportError`**；官方已把 `FastMCP` 改名为 `MCPServer`，`fastmcp` 这个名字现在是 **PrefectHQ 的独立第三方框架** | 改为 `from mcp.server import MCPServer`；**代码里出现 `from fastmcp import FastMCP` 即为跑偏** |
+| **②** | 「stdio 发 `initialize` 握手」 | **对默认路径仍然成立**（实测谈定 `2025-11-25`），但**协议已新增无握手的 Modern 代**（`2026-07-28`） | **保留原句 + 补一代与适用边界**，不删（删了就变成"只讲新的一代"，同样不准） |
+| **③** | 252 资源类型 / 41 toolsets / 35 prompt 模板 | **259 / 42**，版本 **3.2.31**；官方**文档页**写的 139 / 30 也已过时；**prompt 模板数本次未测** | 改数字；**并注明"资源类型数需带动词口径"**（各动词 174~198 不等） |
+| **④** | 「生成**只读** PAT」 | **个人 PAT 做不到只读** —— 官方原文 *"API keys and their tokens inherit the permissions of the account under which they are created"*，创建过程里没有只读选项 | 验收口径改为「**PAT + 服务端 `HARNESS_READ_ONLY=true`**」；另注：本账号 `admin=false`，**「建只读服务账号」这条路走不通** |
+
+**取证位置**：`docs/tutorials/README.md` 的「🔌 Harness 接入实测」段（含证据链、259/42 定案、路由实证、错误语义、账号到期风险）。
+
+> **⚠️ 修正 ③ 的教训值得单独记**：同一个「规模」被**三个来源**写成三个不同的数（PRD 252 / 官方文档页 139 / 实测 259）。
+> 三份都自称权威 —— **只有一份是实测**。→ **凡引用外部系统的规模数字，必须标明"读取日期 + 来源层级（文档 / 实测）"**，
+> 否则无法判断谁该覆盖谁。
+
+> **⚠️ 修正 ④ 的教训**：「只读」这个词被放在**错误的层**上（凭证层），而它其实在**服务端层**。
+> 这类"**能力挂在哪个层**"的错**不会报错** —— 拿着全权 token 去调只读接口，测试照样全绿。
+> → 写风控设计时，每一道护栏都要写明它**实施在哪个进程**。
 
 ### 9.7 Web UI（React + TS + Vite）— v4.0 扩展
 
@@ -1419,8 +1484,8 @@ CREATE TABLE mcp_servers (
 | | D22 | LLM-as-judge 评分器 + **🆕v4.1 明细落库 `eval_case_results`** | 单条可评分；**🆕 明细表有行、按类别可聚合** |
 | | D23 | 消融脚本 3×**50** 自动跑 | 3 配置全跑通 |
 | | D24 | 报告生成（失败案例抽样依赖 D22 明细表） | 对比表+失败案例 |
-| **M5 MCP+观测** | D25 | 学 MCP 协议（重点学习日）+ **🆕 注册 Harness 免费账号、建最小流水线、生成只读 PAT** | 能讲清 MCP 价值；**PAT 已入 .env** |
-| | D26 | FastMCP 库存服务（**自研 server**） | 服务独立可调 |
+| **M5 MCP+观测** | D25 | 学 MCP 协议（重点学习日）+ **🆕 注册 Harness 免费账号、建最小流水线、生成 PAT**（**⚠ 修正 ④**：「只读」不在 PAT 上 —— 个人 PAT 无只读档，靠服务端 `HARNESS_READ_ONLY=true`） | 能讲清 MCP 价值；**PAT 已入 .env** ✅ 2026-10-01 |
+| | D26 | **自研 MCP 库存服务**（官方 SDK `MCPServer`；原写 FastMCP → **修正 ①**） | 服务独立可调（客户端 `tools/list` 能列出工具、`tool_call` 能取数） |
 | | D27 | MCP 客户端接入（**含 🆕 外部 Server 生命周期 + 注册 Harness + toolset 裁剪 + 只读风控**） | 对话可调库存工具；**🆕 /api/tools 可见 11 个 harness 工具** |
 | | D28 | 三层埋点补全（**🆕 含 MCP span 与来源标识**）+ **🆕v4.1 Langfuse 取数通道 `langfuse_client.py`（F8.5）** | 全链路可追踪；**🆕 能指出某次调用来自 harness**；**🆕v4.1 能经 API 拉回 observations** |
 | **M6 UI（React）** | D29 | React 脚手架（Vite+TS+AntD）+ API client | dev server 起，/health 打通 |
@@ -1470,7 +1535,7 @@ CREATE TABLE mcp_servers (
 
 **mock 策略**：
 - LLM 层用 `MockLLM`（确定性回复）测逻辑；真实模型用于最终评测
-- **🆕 MCP 层用 `MockMCPServer`**（本地 FastMCP 假 server）测客户端逻辑，避免 CI 依赖外部网络与 PAT
+- **🆕 MCP 层用 `MockMCPServer`**（本地自研 `MCPServer` 假 server，**修正 ①**）测客户端逻辑，避免 CI 依赖外部网络与 PAT
 - **🆕 Harness 侧集成测试标记为 `@pytest.mark.external`**，默认跳过，本地手动执行
 
 ---
@@ -1482,7 +1547,7 @@ CREATE TABLE mcp_servers (
 | LangGraph API 学习曲线 | 中 | 高 | 只用最简 ReAct 图；先 AgentExecutor 兜底 |
 | bge-reranker 部署成本 | 中 | 中 | 本地 ONNX 或 API；失败降级不重排 |
 | 评测集质量影响可信度 | 中 | 高 | 3 类分布固定；judge 规则写死；人工抽查 10% |
-| MCP SDK 版本兼容 | 中 | 中 | 锁版本；FastMCP 最小实现 |
+| MCP SDK 版本兼容 | 中 | 中 | 锁版本；用官方 `MCPServer` 最小实现（**修正 ①**：不用第三方 `fastmcp`，见 §9.6.1） |
 | 时间超支 | 高 | 高 | P1 全砍；每日红线；D19 冻结；5 天缓冲兜底 |
 | API key 泄漏 | 中 | 高 | .env 不入 git；用户重置 DeepSeek key |
 | **🆕 D10 欠账未补** | **高** | **高** | **数据丢失风险（Redis 单层，>8 轮/>24h/重启即丢）。补账优先级最高，建议在 D14 前插入或与 D14 合并** |
@@ -1530,7 +1595,7 @@ CREATE TABLE mcp_servers (
 | 检索不准怎么办？ | 展示消融实验：混合+重排提升 X%，失败案例已分析 |
 | 怎么证明效果？ | 评测集 + LLM-as-judge + 失败案例分析 |
 | 工具怎么扩展？ | MCP 标准协议，**不写死函数**。**🆕 实证：我加了 Harness 的 server，Agent 代码一行没改** |
-| **🆕 你做过 MCP 互操作吗？** | **做过。接入了 Harness 官方 MCP Server（11 工具 × 252 资源类型），工具是运行时 `tools/list` 动态发现的；我用 toolset 裁剪控制上下文膨胀，并按风险分级把写操作限制为只读** |
+| **🆕 你做过 MCP 互操作吗？** | **做过。接入了 Harness 官方 MCP Server（11 工具 × 259 资源类型），工具是运行时 `tools/list` 动态发现的；我用 toolset 裁剪控制上下文膨胀，并按风险分级把写操作限制为只读** |
 | **🆕 Agent 生成的 SQL 出错了怎么办？** | **我的设计里 Agent 不写 SQL。它只能从 `metrics.yaml` 选指标名和维度，SQL 由模板渲染 + 参数绑定，维度走白名单——所以不存在"生成错 SQL"这个失败模式** |
 | **🆕 多步分析和普通问答有什么区别？** | **普通问答是一次工具调用；多步是 Agent 拿到初步结果后自己决定再下钻。我的评测集类型 D 专门判"调用序列是否合理"，而不是只看最终答案** |
 | 多 Agent 怎么做？ | 架构已预留：LangGraph 图嵌子图 + 工具集隔离（阶段 2 roadmap） |
