@@ -910,16 +910,20 @@ curl -X POST http://localhost:8000/api/mcp/register \
 
 > **⚠ v4.1 修正 ②：第 2 条对「默认路径」仍然成立，但说法不完整 —— 协议现在有两代。**
 >
-> | 代际 | 版本 | 行为 |
-> |---|---|---|
-> | **Legacy** | ≤ `2025-11-25` | 发 `initialize` 握手协商 → **本 SDK 走 stdio 时的默认路径就是它**，实测谈定版本 = **`2025-11-25`** |
-> | **Modern** | `2026-07-28` 起 | **取消握手**，版本 / 身份 / 能力改走**逐请求的 `_meta`**。规范原文 *"There is no negotiation handshake"* |
+> | 代际 | 版本 | 行为 | 谁走这条 |
+> |---|---|---|---|
+> | **Legacy** | ≤ `2025-11-25` | 发 `initialize` 握手协商 | **低层** `ClientSession.initialize()`；**高层** `Client(mode="legacy")`。实测谈定 = **`2025-11-25`** |
+> | **Modern** | `2026-07-28` 起 | **取消握手**，版本 / 身份 / 能力改走**逐请求的 `_meta`**（规范原文 *"There is no negotiation handshake"*） | **高层 `Client` 的默认 `mode="auto"`** —— 先探 `server/discover`，成功即谈定 `2026-07-28` |
 >
 > - ⚠️ **关键区分**：SDK 里 `LATEST_PROTOCOL_VERSION = 2026-07-28`，而 `LATEST_HANDSHAKE_VERSION = 2025-11-25`
 >   —— **「最新的一代」和「默认走的那一代」是两个不同的值**。**规范里有什么 ≠ 实现默认用什么**，后者只能靠实测得到。
-> - **双重实证**：本机 Python 自研 server 与 **Harness 官方 Node server 都谈定 `2025-11-25`**
->   → 「stdio 默认走握手代」**不是某一家 SDK 的怪癖**。
-> - **本项目不手写握手**，交给官方 `Client`（自带代际探测与自动回退，`mode="auto"`）。
+> - ⚠️ **2026-10-02 D26 补充（本文档上一版的口径被这次实测推翻）**：上一版把「**stdio 默认走握手代**」写成了通例。
+>   抓包对照（`scripts/d26_verify.py` F 段：同一个 server、同一个 Client，只改 `mode`）证明它**只对低层与 legacy 路径成立**：
+>   **高层 `Client` 的默认 `mode="auto"` 根本不发 `initialize`**，第一封报文是 `server/discover`，谈定 `2026-07-28`。
+>   → 正确说法是 **「默认走哪一代，取决于用哪一层客户端」**，而不是「默认走握手代」。
+> - **双重实证（legacy 侧）**：本机 Python 自研 server 与 **Harness 官方 Node server，在 legacy 路径下都谈定 `2025-11-25`**
+>   → 这一代的行为**不是某一家 SDK 的怪癖**。
+> - **本项目不手写协商**，交给官方 `Client`（自带代际探测与自动回退，`mode="auto"`）→ **本项目实际落在 Modern 代**。
 
 **四个必须处理的工程细节**：
 
@@ -932,18 +936,22 @@ curl -X POST http://localhost:8000/api/mcp/register \
 
 ---
 
-#### 9.6.3 v4.1 修正汇总（四处，2026-10-01）
+#### 9.6.3 v4.1 修正汇总（五处，2026-10-01 / 10-02）
 
-本节原按 2026-09-22 的官方 README 写成，**D25 实测后四处已不成立**。集中列在这里，方便一处看全：
+本节原按 2026-09-22 的官方 README 写成，**D25/D26 实测后多处已不成立**。集中列在这里，方便一处看全：
 
 | # | 原写 | 实测事实 | 改法 |
 |---|---|---|---|
 | **①** | `from fastmcp import FastMCP` | **`mcp` 2.2.0 下直接 `ImportError`**；官方已把 `FastMCP` 改名为 `MCPServer`，`fastmcp` 这个名字现在是 **PrefectHQ 的独立第三方框架** | 改为 `from mcp.server import MCPServer`；**代码里出现 `from fastmcp import FastMCP` 即为跑偏** |
-| **②** | 「stdio 发 `initialize` 握手」 | **对默认路径仍然成立**（实测谈定 `2025-11-25`），但**协议已新增无握手的 Modern 代**（`2026-07-28`） | **保留原句 + 补一代与适用边界**，不删（删了就变成"只讲新的一代"，同样不准） |
+| **②** | 「stdio 发 `initialize` 握手」 | **只对低层 `ClientSession` 与 `Client(mode="legacy")` 成立**（实测谈定 `2025-11-25`）；**高层 `Client` 默认 `mode="auto"` 不发 `initialize`** —— 首封报文是 `server/discover`，谈定 `2026-07-28`（2026-10-02 抓包修正，详见 **⑤**） | **保留原句 + 补一代与适用边界**，不删；**但不许再把「握手」写成通例默认** |
 | **③** | 252 资源类型 / 41 toolsets / 35 prompt 模板 | **259 / 42**，版本 **3.2.31**；官方**文档页**写的 139 / 30 也已过时；**prompt 模板数本次未测** | 改数字；**并注明"资源类型数需带动词口径"**（各动词 174~198 不等） |
 | **④** | 「生成**只读** PAT」 | **个人 PAT 做不到只读** —— 官方原文 *"API keys and their tokens inherit the permissions of the account under which they are created"*，创建过程里没有只读选项 | 验收口径改为「**PAT + 服务端 `HARNESS_READ_ONLY=true`**」；另注：本账号 `admin=false`，**「建只读服务账号」这条路走不通** |
+| **⑤** | 「stdio **默认**走握手代 `2025-11-25`」（= 本文档上一版对 ② 的表述） | **高层 `Client(mode="auto")` 默认走 Modern 代**（`2026-07-28`，**无握手**）；只有 legacy 路径才发 `initialize`。证据：同一个 server、同一个 Client，只改 `mode` → 报文序列 `['server/discover','tools/list']` vs `['initialize','notifications/initialized','tools/list']` | 改成「**默认走哪一代，取决于用哪一层客户端**」。★ 这是"**把一个在特定路径上成立的观测，写成了通例**"的第二次同族犯错（第一次是 10-01 的「规范版本 ≠ 实现默认路径」） |
 
-**取证位置**：`docs/tutorials/README.md` 的「🔌 Harness 接入实测」段（含证据链、259/42 定案、路由实证、错误语义、账号到期风险）。
+**取证位置**：
+- ①③④ 与 Harness 相关部分 → `docs/tutorials/README.md` 的「🔌 Harness 接入实测」段（含证据链、259/42 定案、路由实证、错误语义、账号到期风险）。
+- ②⑤ 代际与默认路径 → **可复现**：`uv run python -m scripts.d26_verify` 的 **F 段**（抓包对照 `mode="auto"` / `mode="legacy"`，
+  F0 是一条守门断言，确保引用的报文没被截断）。
 
 > **⚠️ 修正 ③ 的教训值得单独记**：同一个「规模」被**三个来源**写成三个不同的数（PRD 252 / 官方文档页 139 / 实测 259）。
 > 三份都自称权威 —— **只有一份是实测**。→ **凡引用外部系统的规模数字，必须标明"读取日期 + 来源层级（文档 / 实测）"**，

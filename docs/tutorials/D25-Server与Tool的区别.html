@@ -288,6 +288,26 @@ server.run("stdio")   # ← 常驻，等请求</pre>
   </div>
 
   <div class="fix">
+    <strong>纠正 1-b（2026-10-02 D26 抓包补正）：「默认」必须带主语 —— 上面那条「纠正 1」本身也不完整。</strong><br>
+    上面写「走 stdio 时客户端<strong>默认</strong>发 <code>initialize</code>」——
+    <strong>这个「默认」只对一部分客户端成立</strong>。同一个 server、同一个 Client，
+    <strong>只改 <code>mode</code></strong>，抓包结果完全不同：
+    <table style="margin:8px 0">
+      <thead><tr><th><code>mode</code></th><th>谈定版本</th><th>Client → Server 的 method 序列</th></tr></thead>
+      <tbody>
+        <tr><td><code>auto</code>（<strong>高层 <code>Client</code> 的默认值</strong>）</td><td><strong><code>2026-07-28</code></strong></td><td><code>server/discover</code> → <code>tools/list</code></td></tr>
+        <tr><td><code>legacy</code></td><td><code>2025-11-25</code></td><td><code>initialize</code> → <code>notifications/initialized</code> → <code>tools/list</code></td></tr>
+      </tbody>
+    </table>
+    → <strong>高层 <code>Client</code> 默认落 Modern 代，不发 <code>initialize</code></strong>；
+    只有<strong>低层 <code>ClientSession.initialize()</code></strong> 与 <code>Client(mode="legacy")</code> 走握手。
+    而<strong>业务报文两边一模一样</strong>。<br>
+    ★ 这一串很有意思：<strong>10-01 我纠了「过度外推」，10-02 发现那次纠正自己也把「特定路径的观测」写成了「默认」</strong> ——
+    同一个错型的第二次。正确说法：<strong>「默认走哪一代，取决于用哪一层客户端。」</strong><br>
+    <span class="tag">可复现：<code>uv run python -m scripts.d26_verify</code> 的 F 段</span>
+  </div>
+
+  <div class="fix">
     <strong>纠正 2（我自己的脚本硬编码了错结论）</strong><br>
     第一版脚本里我写了 <code>print("调 echo(123): 未报错（Server 接受了错类型）")</code>，
     而它上一行打印的报文明明白白写着 <code>Tool 'echo' rejected arguments</code>。
