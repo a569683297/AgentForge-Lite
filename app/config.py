@@ -25,6 +25,16 @@ RETRIEVER_CONFIGS: tuple[str, ...] = ("pure_vector", "hybrid", "hybrid_rerank")
 # ② 校验器要在 settings 构造时就拦住拼错的名字，不能等到跑评测时才发现
 LLM_CHANNELS: tuple[str, ...] = ("deepseek", "openai")
 
+# Harness 写操作的人工确认阈值（D27）。存在的理由与前两个常量完全对称：
+# 它是**唯一合法取值清单**，配置校验与文档都从这里取，不各写一份。
+HARNESS_RISK_LEVELS: tuple[str, ...] = (
+    "none",
+    "low_write",
+    "medium_write",
+    "high_write",
+    "all",
+)
+
 
 class Settings(BaseSettings):
     """全局配置。字段名与 .env 中的键一一对应（不区分大小写）。"""
@@ -96,6 +106,32 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"
+
+    # ---- MCP 客户端（D27）----
+    # 总开关。关掉 = 不接任何外部 server，注册表只剩项目内静态注册的工具。
+    mcp_enabled: bool = True
+
+    # 外部 server（Harness 官方 MCP）的开关，**默认关**。
+    # 为什么默认关：它每次启动都要拉一个常驻 npm 子进程（冷启动可能几分钟），
+    # 而绝大多数开发/回归根本用不到它。演示与验收时才打开 —— 这也正是 PRD 里
+    # 「scripts/warmup_mcp.py 预热、演示前必跑」这条要求的由来。
+    mcp_harness_enabled: bool = False
+    mcp_harness_command: str = "npx"
+    # 空格分隔即可 —— 不引 shlex，因为这里有 shell 元字符的风险为零（我们自己配的）
+    mcp_harness_args: str = "-y harness-mcp-v2@latest"
+    # ⚠ 国内环境必须走镜像：实测直连 registry.npmjs.org **超时**（curl 12s 返回 000），
+    #   加镜像后 2 分 31 秒拉完；不加会挂住 5 分钟以上且没有任何输出。
+    mcp_npm_registry: str = "https://registry.npmmirror.com"
+    # **只读的正解**：个人 PAT 做不到只读（它继承账号全权，创建时没有只读档），
+    # 只读靠服务端这个变量屏蔽写操作（create/update/delete/execute）。
+    mcp_harness_read_only: bool = True
+    # 写操作的人工确认阈值：none=全部要确认（最保守）/ low_write / medium_write / high_write / all
+    mcp_harness_auto_approve_risk: str = "none"
+
+    # Harness 凭证。**只从 .env 读，绝不入库、绝不打印**。
+    # 格式 `pat.<accountId>.<tokenId>.<secret>`；第二段才是 API 层的 accountId，
+    # 与界面上那个数字账号名不是一回事（用错会得到 403 account identifier mismatch）。
+    harness_api_key: str = ""
 
     # ---- 便捷属性（拼好的连接串，业务层直接用）----
     @property
@@ -232,6 +268,24 @@ class Settings(BaseSettings):
         if normalized not in LLM_CHANNELS:
             raise ValueError(
                 f"judge_model 只能是 {LLM_CHANNELS} 之一，收到 {value!r}"
+            )
+        return normalized
+
+    @field_validator("mcp_harness_auto_approve_risk")
+    @classmethod
+    def _validate_harness_risk(cls, value: str) -> str:
+        """
+        拦非法写操作阈值 —— 理由与上面两条完全一致，但**后果更重**。
+
+        这个值决定"哪些写操作可以不问人就执行"。写错（比如把 `none` 打成 `all`）
+        的后果是**防护静默降级**：系统照常启动、照常跑，只是把危险操作放行了。
+        `.env` 里少打一个字母，换来的是一道门没了 —— 必须在启动时就拦住。
+        """
+        normalized = value.strip().lower()
+        if normalized not in HARNESS_RISK_LEVELS:
+            raise ValueError(
+                f"mcp_harness_auto_approve_risk 只能是 {HARNESS_RISK_LEVELS} 之一，"
+                f"收到 {value!r}"
             )
         return normalized
 

@@ -17,6 +17,7 @@ FastAPI 应用入口
    - GET    http://localhost:8000/api/eval/cases                    （评测集列表，D21）
    - GET    http://localhost:8000/api/eval/cases/{case_key}         （单条详情，D21）
    - GET    http://localhost:8000/api/eval/dataset                  （评测集指纹，D21）
+   - GET    http://localhost:8000/api/tools                         （工具清单+来源，D27）
    - 交互式文档 http://localhost:8000/docs
 """
 
@@ -30,6 +31,7 @@ from app.api.documents import router as documents_router
 from app.api.eval import router as eval_router
 from app.api.health import router as health_router
 from app.api.sessions import router as sessions_router
+from app.api.tools import router as tools_router
 from app.config import settings
 from app.core.logging import logger
 
@@ -47,7 +49,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Redis 连接失败，请检查 redis 容器是否启动")
 
+    # D27：接入外部 MCP Server（动态发现工具 → 注册进 ToolRegistry）
+    # ⚠ 这里**不能**让接入失败拖死启动：外部 server 要网络/要 npm/要 PAT，
+    #   全是本应用控制不了的东西。失败由 manager 收敛成 status，只记日志。
+    if settings.mcp_enabled:
+        from app.mcp import build_specs, get_manager
+
+        # ⚠ start() 返回的是 dict[str, dict]（按 server 名索引），
+        #   直接迭代 dict 拿到的是**键**，不是值 —— 第一次写成了 `for s in status`，
+        #   于是 `s["connected"]` 报 TypeError: string indices must be integers。
+        #   是这个错误让 lifespan 崩掉、TestClient 起不来，被 d27_verify 的 E 段抓出来的。
+        status = await get_manager().start(build_specs(settings))
+        ok = [name for name, s in status.items() if s["connected"]]
+        bad = [name for name, s in status.items() if not s["connected"]]
+        logger.info("MCP 接入完成 成功=%s 失败=%s", ok or "无", bad or "无")
+
     yield
+
+    # D27：断开全部 MCP server。
+    # 不主动 kill 子进程 —— 断开 stdin 即为 EOF，子进程自行退出（D26 实测：
+    # `server.run()` 阻塞但会正常返回，生命周期归宿主）。
+    # 同时会把各 server 的工具从注册表摘掉，避免留下"调不通的工具"。
+    from app.mcp import get_manager
+
+    await get_manager().stop()
     logger.info("AgentForge 已关闭")
 
 
@@ -75,6 +100,7 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(documents_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")   # D14 新增
 app.include_router(eval_router, prefix="/api")       # D21 新增
+app.include_router(tools_router, prefix="/api")      # D27 新增（含动态发现的 MCP 工具）
 
 
 if __name__ == "__main__":
