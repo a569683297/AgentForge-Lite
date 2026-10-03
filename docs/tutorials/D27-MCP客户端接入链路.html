@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>D27 · MCP 客户端接入：从「本进程的工具」到「另一个进程的工具」</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1f2328; --ink2:#4a5259; --ink3:#6b7480;
+    --line:#e3e6ea; --accent:#2f6fd0; --accent-bg:#eef4fd;
+    --ok:#1a7f45; --ok-bg:#eaf6ee; --warn:#a8620a; --warn-bg:#fdf4e6;
+    --bad:#b3261e; --bad-bg:#fdecea; --code:#f2f4f7;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; padding:32px 20px 72px; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:15px; line-height:1.75;
+  }
+  .wrap{max-width:980px;margin:0 auto;}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-0.2px;}
+  .sub{color:var(--ink3);font-size:13.5px;margin-bottom:26px;}
+  h2{font-size:19px;margin:38px 0 12px;padding-bottom:7px;border-bottom:2px solid var(--line);}
+  h3{font-size:16px;margin:24px 0 8px;}
+  p{margin:9px 0;}
+  code{background:var(--code);padding:1.5px 6px;border-radius:4px;
+       font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px;color:#243b53;}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+      padding:13px 15px;overflow-x:auto;font-size:12.5px;line-height:1.6;margin:11px 0;}
+  pre code{background:none;padding:0;font-size:12.5px;color:#1f2328;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:18px 20px;margin:14px 0;}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top;}
+  th{background:#f0f2f5;font-weight:600;}
+  td code{font-size:12.5px;}
+  .note{border-left:4px solid var(--accent);background:var(--accent-bg);
+        padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .warn{border-left:4px solid var(--warn);background:var(--warn-bg);
+        padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .bad{border-left:4px solid var(--bad);background:var(--bad-bg);
+       padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .ok{border-left:4px solid var(--ok);background:var(--ok-bg);
+      padding:11px 15px;border-radius:0 8px 8px 0;margin:13px 0;}
+  .tag{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:20px;
+       background:var(--accent);color:#fff;margin-right:6px;vertical-align:1px;}
+  .tag.g{background:var(--ok);} .tag.r{background:var(--bad);} .tag.y{background:var(--warn);}
+  ul,ol{margin:9px 0;padding-left:24px;} li{margin:5px 0;}
+  .flow{margin:16px 0;}
+  .step{display:flex;gap:13px;margin:0;align-items:flex-start;}
+  .step .n{flex:0 0 30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;
+           display:flex;align-items:center;justify-content:center;font-size:13.5px;font-weight:600;}
+  .step .b{flex:1;padding-bottom:14px;}
+  .step .b .t{font-weight:600;}
+  .step .b .d{color:var(--ink2);font-size:13.5px;}
+  .step .n.gray{background:#9aa4b0;}
+  .step .n.red{background:var(--bad);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px;}
+  @media(max-width:700px){.grid2{grid-template-columns:1fr;}}
+  .kv{font-size:13.5px;}
+  .small{font-size:12.5px;color:var(--ink3);}
+  .lane{border:2px solid var(--line);border-radius:10px;padding:12px 14px;background:#fcfdfe;}
+  .lane h4{margin:0 0 8px;font-size:14px;color:var(--ink2);letter-spacing:.3px;}
+  .cross{border:2px dashed var(--bad);border-radius:10px;padding:12px 14px;background:#fff8f7;}
+  .cross h4{margin:0 0 8px;font-size:14px;color:var(--bad);}
+  .mono{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>D27 · MCP 客户端接入</h1>
+<div class="sub">
+  从「工具跑在我自己的进程里」到「工具跑在另一个进程里」—— AgentForge-Lite，2026-10-03 · M5 第 3 天
+</div>
+
+<div class="card">
+  <p><b>这张图回答一个问题：</b>MCP 客户端接入，到底在我这条已有的链路上<b>加了什么、没加什么</b>？</p>
+  <p class="small">
+    前置两天：<b>D25</b> 学协议（三方角色、报文长什么样）→ <b>D26</b> 写 server（一台能独立跑、能被陌生调用方驱动的库存服务）。
+    <b>D27 是反过来的一天</b>：我不再是"写服务的人"，而是"写调用方的人" —— 让 Agent 变成客户端。
+  </p>
+</div>
+
+<h2>§0 先注解名词（后面全部用得到，按首次出现顺序）</h2>
+
+<table>
+  <tr><th style="width:170px">名词</th><th>一句话定义（它是什么、解决什么问题）</th></tr>
+  <tr>
+    <td><b>Host（宿主）</b></td>
+    <td>装着模型、决定"哪些工具能被模型看见"的那个程序。<b>在本项目里 = FastAPI 这个进程（<code>app/main.py</code> 起的服务）</b>。它有<b>放行权与否决权</b>。</td>
+  </tr>
+  <tr>
+    <td><b>Client（客户端）</b></td>
+    <td>一个<b>只负责搬运</b>的通道对象：<b>1 个 Client 恰好连 1 个 Server</b>。它不决策、不执行，只把调用送过去、把结果带回来。在本项目里 = 我这次要写的 <code>app/services/mcp_client.py</code> 里的那段连接。</td>
+  </tr>
+  <tr>
+    <td><b>Server（服务端）</b></td>
+    <td>装着工具的<b>独立进程</b>，四件事：启动常驻 / 接线（读 stdin 写 stdout）/ 报目录（<code>tools/list</code>）/ 校验调度（<code>tools/call</code>）。D26 的 <code>mcp_servers/inventory_server.py</code> 就是一台。</td>
+  </tr>
+  <tr>
+    <td><b>Tool Registry（工具注册表）</b></td>
+    <td>项目里的<b>工具总目录</b>：<code>app/tools/registry.py</code> 的一个全局字典 <code>_registry</code>，键 = 工具名、值 = 函数 + 描述 + 参数 schema。Agent 引擎只认它，不认工具从哪来。</td>
+  </tr>
+  <tr>
+    <td><b>stub（存根）</b></td>
+    <td>一个<b>本地占位函数</b>：自己不干活，只把收到的调用转发到远端、再把结果带回来。类比前端：<code>const api={getUsers:p=&gt;fetch('/users',p)}</code> —— 名字和签名在本地，实现在对端。</td>
+  </tr>
+  <tr>
+    <td><b>命名空间（namespace）</b></td>
+    <td>给名字加<b>前缀分组</b>，避免两套东西撞名。这里解决的是：两台 server 都可能有叫 <code>get</code> / <code>list</code> 的工具，而注册表<b>重名会直接抛错</b>。</td>
+  </tr>
+  <tr>
+    <td><b>toolset（工具集）</b></td>
+    <td>服务端把工具<b>按用途分组</b>的篮子（Harness 有 42 个，如 <code>pipeline</code> / <code>execution</code>）。全开 = 几百个工具挤进 prompt；裁剪 = 只留这次的场景要用的。</td>
+  </tr>
+  <tr>
+    <td><b>Modern / Legacy 两代协议</b></td>
+    <td>两套"开场方式"：<b>Legacy</b> 先发 <code>initialize</code> 握手（谈定 <code>2025-11-25</code>）；<b>Modern</b> 无握手、版本走每条报文的 <code>_meta</code>（谈定 <code>2026-07-28</code>）。<b>本项目走高层 <code>Client</code>，默认 <code>mode="auto"</code> → 落在 Modern 代</b>（D26 抓包实测）。</td>
+  </tr>
+</table>
+
+<h2>§1 今天真正要加的只有一件事：第二条进注册表的路</h2>
+
+<div class="lane">
+  <h4>路径 A · 静态注册（D8 就有了，今天的基线）</h4>
+  <div class="flow">
+    <div class="step"><div class="n gray">1</div><div class="b"><div class="t">写一个工具文件</div>
+      <div class="d"><code>app/tools/current_time.py</code>，函数体写在<b>本进程内</b>。</div></div></div>
+    <div class="step"><div class="n gray">2</div><div class="b"><div class="t">加一个装饰器</div>
+      <div class="d"><code>@register(name=…, description=…, parameters=…)</code> —— 名字、描述、schema <b>全部由我手写</b>。</div></div></div>
+    <div class="step"><div class="n gray">3</div><div class="b"><div class="t">在 <code>app/tools/__init__.py</code> import 一次</div>
+      <div class="d">装饰器<b>只在模块被导入时执行</b>；没人 import，注册表里就没有它。</div></div></div>
+    <div class="step"><div class="n gray">4</div><div class="b"><div class="t">进了同一个字典 <code>_registry</code></div>
+      <div class="d"><b>时机 = 进程启动时（import 期）</b>，来源 = 我自己写的函数。</div></div></div>
+  </div>
+  <p class="small">→ 加一个工具的成本：<b>改代码 + 重启进程</b>。</p>
+</div>
+
+<div class="lane" style="border-color:var(--accent);margin-top:14px">
+  <h4 style="color:var(--accent)">路径 B · 动态发现（D27 新增，MCP 的意义所在）</h4>
+  <div class="flow">
+    <div class="step"><div class="n">1</div><div class="b"><div class="t">启动子进程</div>
+      <div class="d"><code>subprocess</code> 拉起 server（自研的 <code>inventory_server.py</code>，或 Harness 的 <code>npx harness-mcp-v2</code>）。</div></div></div>
+    <div class="step"><div class="n">2</div><div class="b"><div class="t">问它「你有什么」</div>
+      <div class="d">发 <code>tools/list</code> → 拿回一份<b>目录</b>：每个工具的<b>名字、描述、参数 schema 都是它给的，不是我写的</b>。</div></div></div>
+    <div class="step"><div class="n">3</div><div class="b"><div class="t">为每个工具现造一个 stub</div>
+      <div class="d">名字加前缀（命名空间）→ <code>registry.register(...)</code> 注册进<b>同一个</b> <code>_registry</code>。</div></div></div>
+    <div class="step"><div class="n">4</div><div class="b"><div class="t">Agent 引擎零改动</div>
+      <div class="d"><code>get_tools_schema()</code> 遍历的还是那个字典 → 新工具<b>自动出现在 LLM 的工具清单里</b>。</div></div></div>
+  </div>
+  <p class="small">→ 加一个工具的成本：<b>在 server 那边加</b>。我这边一行不改、不重启 —— 这就是 PRD 里说的「接新 server 不改 Agent 代码」。</p>
+</div>
+
+<table>
+  <tr><th style="width:150px">对比项</th><th>路径 A 静态</th><th>路径 B 动态（MCP）</th></tr>
+  <tr><td>注册时机</td><td>进程启动时（import 期）</td><td><b>运行期</b>（连上之后）</td></tr>
+  <tr><td>函数体在哪</td><td><b>本进程内</b></td><td><b>另一个进程里</b></td></tr>
+  <tr><td>名字/描述/schema 谁写</td><td>我手写</td><td><b>server 的 <code>tools/list</code> 给</b></td></tr>
+  <tr><td>注册进哪</td><td colspan="2" style="text-align:center"><b>同一个 <code>_registry</code></b>（→ 下游 plan / execute 节点完全不用知道区别）</td></tr>
+  <tr><td>加工具要不要改我这边</td><td>要（改文件 + 重启）</td><td><b>不要</b></td></tr>
+  <tr><td>调用怎么发生</td><td>Python 直接调用（微秒级）</td><td>跨进程 JSON-RPC 往返（毫秒级）</td></tr>
+</table>
+
+<div class="note">
+  <b>一句话记住两条路的区别：</b>不是"名字从哪来"，而是 <b>"函数体在哪、什么时候被发现"</b>。
+  <div style="margin-top:8px">
+    ⚠️ <b>但"接新 server 不改 Agent 代码"这条结论，靠的不是"函数体在别处"。</b>
+    "函数体不在本进程"只说明 <b>代价从哪来</b>（必须跨进程往返，微秒 → 毫秒）；
+    能不能不改代码，取决于<b>契约够不够窄</b>：
+    <ul style="margin:6px 0 0 0">
+      <li>注册表只要求「<b>三样描述信息 + 一个可调用对象</b>」：<code>_registry[name] = {function, description, parameters}</code></li>
+      <li>下游 plan / execute 只认 <code>get_tools_schema()</code> 与 <code>execute_tool(name, args)</code> —— <b>两个函数、两个签名</b></li>
+      <li>而且它<b>从不检查</b> <code>function</code> 到底是本地的真函数，还是一个只会转发报文的代理</li>
+    </ul>
+    → 只要 stub 满足这份契约，<b>上游（LLM）和下游（引擎）都看不出区别</b>。
+    "<b>注册表是一个运行期也能写的进程内字典</b>"才是这条结论真正的支点。
+  </div>
+</div>
+
+<h2>§2 stub 为什么必须存在：Python 的函数调用不跨进程</h2>
+
+<p>
+  远端工具的<b>真实函数</b>住在子进程里，我这边拿不到它的函数对象 —— <code>import</code> 不到、也调用不了。
+  两个进程之间<b>唯一的通道</b>，就是子进程的 <code>stdin</code> 和 <code>stdout</code> 两根管子。
+  所以本地必须放一个"替身"，它的职责只有三件：
+</p>
+
+<div class="grid2">
+  <div class="card">
+    <h3 style="margin-top:0">stub 的三件事</h3>
+    <ol>
+      <li><b>冒充</b>：用 server 给的名字 / 描述 / schema 注册，让 LLM 以为这是个普通工具</li>
+      <li><b>打包</b>：把参数包成一条 JSON-RPC 报文 <code>tools/call</code>，写进子进程的 stdin</li>
+      <li><b>等回</b>：在 stdout 上等<b>同一个 <code>id</code></b> 的响应，取出文本层返回</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">对上已有的契约</h3>
+    <p class="kv">
+      <code>execute_tool(name, args) -&gt; str</code> —— 注册表要求 handler <b>收 dict、回字符串</b>。
+      stub 正好满足它：<b>对内像本地函数，对外是一次远程调用</b>。
+    </p>
+    <p class="small">
+      注意 <code>execute_tool</code> 出错时返回的是<b>错误字符串而不是抛异常</b>（源码设计如此）——
+      stub 也要遵守这条：<b>把远端错误翻译成一段文字还回去</b>，让模型看得见、能自己改。
+    </p>
+  </div>
+</div>
+
+<h2>§3 一次调用的完整往返（含两条进程边界）</h2>
+
+<div class="flow">
+  <div class="step"><div class="n">1</div><div class="b"><div class="t">用户提问</div>
+    <div class="d">「哪些物料库存低于 20？」→ <code>POST /api/chat</code></div></div></div>
+  <div class="step"><div class="n">2</div><div class="b"><div class="t">plan 节点取工具清单</div>
+    <div class="d"><code>get_tools_schema()</code> ← 现在里面<b>多了带前缀的库存工具</b>（Agent 引擎的代码一个字没改）</div></div></div>
+  <div class="step"><div class="n">3</div><div class="b"><div class="t">LLM 决定调哪个工具</div>
+    <div class="d">返回 <code>tool_calls: [{name:"inventory_query_inventory", arguments:{...}}]</code></div></div></div>
+  <div class="step"><div class="n red">4</div><div class="b"><div class="t">execute 节点 → <code>execute_tool()</code> → 查到 stub</div>
+    <div class="d">到这一步为止，和 D10 的知识库检索工具<b>走的是同一段代码</b>。</div></div></div>
+  <div class="step"><div class="n red">5</div><div class="b"><div class="t">★ 进程边界 1：stub 把报文写进子进程 stdin</div>
+    <div class="d"><code>{"jsonrpc":"2.0","id":N,"method":"tools/call","params":{"name":…,"arguments":{…}}}</code></div></div></div>
+  <div class="step"><div class="n">6</div><div class="b"><div class="t">子进程内部（D26 讲过的七步）</div>
+    <div class="d">读 stdin → 看 method → 查自己的工具表 → schema 校验参数 → 执行真函数 → 包成 <code>content</code> + <code>structuredContent</code></div></div></div>
+  <div class="step"><div class="n">7</div><div class="b"><div class="t">★ 进程边界 2：响应回到 stub 的 stdout</div>
+    <div class="d">带<b>同一个 <code>id</code></b>，所以并发多路调用也不会串（id 是配对的钥匙）</div></div></div>
+  <div class="step"><div class="n">8</div><div class="b"><div class="t">结果当字符串返回 → 以 tool 消息写回 → 回到 plan 节点</div>
+    <div class="d">LLM 读到工具结果 → 生成最终回答</div></div></div>
+</div>
+
+<div class="ok">
+  <b>这条链路的价值在于"没变的部分"：</b>plan / execute / 消息写回 / 引用收集 —— <b>一条都没动</b>。
+  新增的只有第 4→7 步之间那一小段（stub + 两根管子）。<b>这就是分层：工具的来源换了，Agent 的骨架没换。</b>
+</div>
+
+<h2>§4 四个工程细节：能跑 ≠ 能用</h2>
+
+<table>
+  <tr><th style="width:40px">#</th><th style="width:230px">问题</th><th>对策（今天要做成代码的部分）</th></tr>
+  <tr>
+    <td>1</td><td>子进程是<b>常驻</b>的，谁管它的生死？</td>
+    <td>启动 / 健康检查 / <b>崩溃重启（退避）</b> / 退出清理，防子进程泄漏。
+      <div class="small">依据（D26 实测）：<code>server.run()</code> <b>不是永不返回</b> —— stdin 收到 EOF 就正常退出，<b>生命周期归 Host 管</b>。</div></td>
+  </tr>
+  <tr>
+    <td>2</td><td>首次启动慢（要拉 npm 包 / 下模型）</td>
+    <td>预热脚本 + <b>锁版本</b> + 国内必须走镜像 <code>registry.npmmirror.com</code>（直连 npmjs 实测超时）。</td>
+  </tr>
+  <tr>
+    <td>3</td><td>写操作有风险（create / update / delete / execute）</td>
+    <td>服务端 <b><code>HARNESS_READ_ONLY=true</code></b> 屏蔽一切写操作；另有 <code>HARNESS_AUTO_APPROVE_RISK</code> 设"人工确认阈值"。
+      <div class="small">口径更正（D25）：<b>「只读」不在 PAT 上</b> —— 个人 PAT 继承账号全权、创建时没有只读档。</div></td>
+  </tr>
+  <tr>
+    <td>4</td><td>工具数膨胀会塞满上下文</td>
+    <td>按需<b>裁剪 toolset</b>（Harness 有 42 个）。官方理由：<b>工具数膨胀会降低 LLM 选型准确率</b>。</td>
+  </tr>
+</table>
+
+<div class="lane" style="border-color:var(--bad,#c0392b);margin-top:14px">
+  <h4>⚠️ 补一条机制：server 挂了，注册表里的 stub <u>不会消失</u></h4>
+  <p>
+    <code>_registry</code> 是一个<b>内存字典</b>，而 <code>registry.py</code> 里<b>根本没有回收逻辑</b>
+    （没有 <code>unregister</code>、没有"健康检查后再摘除"）。子进程死掉只是让<b>那根管子断了</b>，
+    字典里的键值对<b>原样留着</b> → <code>get_tools_schema()</code> 照样把它报给 LLM，
+    <b>LLM 依然以为这个工具可用、会继续尝试调它</b>。
+  </p>
+  <p><b>"挂了"要分两种，形状完全不同：</b></p>
+  <table style="margin:8px 0">
+    <tr><th style="width:170px">怎么挂的</th><th>调用时会发生什么</th></tr>
+    <tr>
+      <td><b>① 进程没了</b>（崩溃 / 被 kill）</td>
+      <td>往已经死掉的子进程 stdin 写 → 写失败（管道已断）→ 被 <code>execute_tool</code> 的 <code>except</code> 接住 → <b>变成一段错误字符串喂回 LLM</b></td>
+    </tr>
+    <tr>
+      <td><b>② 进程还活着但卡住</b></td>
+      <td>写入成功，但<b>等不到响应</b> → <b>超时才是命门</b>。没有超时机制，整个 Agent 循环会被一起挂住 —— 这比报错严重得多</td>
+    </tr>
+  </table>
+  <p class="small">
+    → 这是 <b>D24 那条「覆盖面型静默失效」的又一个实例</b>：<b>注册表声称的能力 ≠ 真实能调通的能力</b>。
+    而现有的关注点（工具清单齐不齐、schema 对不对）<b>没有一条在检查"报出来的工具是不是真能调通"</b>。
+    修法与 D24 同源：<b>新增一个维度（健康检查 / 来源标注），不是收紧原有断言</b>。
+  </p>
+  <p class="small">
+    ⚠️ <b>以上全部是源码推演，尚未实测</b>（路径 B 还没写）。今天编码时会用真实场景验一次（杀掉子进程再调），
+    <b>验完才升格为结论</b>。
+  </p>
+</div>
+
+<div class="lane" style="border-color:var(--bad,#c0392b);margin-top:14px">
+  <h4>⚠️ 补一条机制：命名空间不加前缀会怎样 ——「<u>静默覆盖</u>」比「抛错」难查得多</h4>
+  <p>
+    <code>register</code> 现在是<b>重名直接 <code>raise ValueError</code></b>（<code>registry.py</code> 48–49 行），
+    且发生在<b>进程启动时</b> —— 这是<b>快速失败</b>，问题会<b>自己喊出来</b>。
+    假设把它改成「后注册的覆盖先注册的」，同一件事就换了一副面孔：
+  </p>
+  <table style="margin:8px 0">
+    <tr><th style="width:180px">层次</th><th>真正会发生什么</th></tr>
+    <tr>
+      <td><b>① 能力静默消失</b><div class="small">（最根本的一层）</div></td>
+      <td>键相同 → <b>整条记录被顶掉</b>，被覆盖那台 server 的工具<b>从 <code>_registry</code> 里彻底没了</b>。
+        <code>get_tools_schema()</code> 只报存活的那一个 → <b>LLM 连它存在都不知道，根本不会去调它</b>。
+        → 所以第一层后果<b>不是「调用了、返回错结果」</b>，而是「<b>这个能力不存在了，而且没有任何人告诉你</b>」。</td>
+    </tr>
+    <tr>
+      <td><b>② 调了也拿到不搭的东西</b></td>
+      <td>两边<b>名字同、语义不同</b>时（inventory 的 <code>get</code> = 查物料 / harness 的 <code>get</code> = 查资源），
+        LLM 拿 A 域的问题去调 B 域的同名工具 → 返回<b>语义对不上</b>的结果。这是<b>第二层</b>，不是第一层。</td>
+    </tr>
+    <tr>
+      <td><b>③ 谁活下来由顺序决定</b><div class="small">（最毒的一层）</div></td>
+      <td>取决于 <b>import 顺序 / 启动顺序 / 连接快慢</b>（动态发现时还受<b>网络</b>影响）
+        → <b>同一份代码在不同机器、不同次启动，活下来的可能不是同一个工具</b> → <b>本地复现不了</b>。</td>
+    </tr>
+    <tr>
+      <td><b>④ 为什么「无法排查」</b></td>
+      <td>日志里只有工具名，而<b>名字又相同</b> → <b>分不清这次调用到底打到了哪台 server</b>。
+        （<code>_registry</code> 现在存的是 <code>{function, description, parameters}</code>，<b>没有 source 字段</b> ——
+        这正是今天要「让注册表记住来源」的直接动因。）</td>
+    </tr>
+  </table>
+  <p class="small">
+    ★ 对照：<b>抛错的世界</b>与<b>覆盖的世界</b>，差别不在「有没有 bug」，而在「<b>bug 会不会自己喊出来</b>」。
+    → 与 D24「覆盖面型静默失效」同源。
+  </p>
+  <p>
+    <b>顺带钉一个口径：加前缀只动「名字」这一个字段。</b>
+    <code>description</code> 与 <code>parameters</code> 都是 server 给的原文、<b>原样透传</b>。
+    「<b>在描述里补上来源</b>」是我<b>额外要做的另一个动作</b>（因为名字变了、描述里得留线索），
+    <b>不是加前缀的必然结果</b> —— 这两件事是两步，别混成一步。
+  </p>
+</div>
+
+<div class="warn">
+  <b>今天的验收里有一条卡在时限上：</b>「<code>/api/tools</code> 能看到 Harness 的 <b>11 个工具</b>」需要 <b>PAT 仍然有效</b>，
+  而 Harness 的 <b>TRIAL 账号 2026-10-06 07:59:59 到期</b>（今天 10-03）。
+  → 所以 <b>Harness 那一半要么今天排进去，要么先把账号问题解决掉</b>，不能拖到 D28。
+</div>
+
+<h2>§5 两条"默认值/边界"必须先说清（D26 的教训）</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h3 style="margin-top:0">① 本项目落在哪一代协议</h3>
+    <p class="kv">走<b>高层 <code>Client</code></b>，它默认 <code>mode="auto"</code>：<b>先探 <code>server/discover</code>，成功就不再发 <code>initialize</code></b> → 谈定 <b>Modern（<code>2026-07-28</code>）</b>。</p>
+    <p class="small">⚠ 这句话<b>必须带主语</b>：「默认走哪一代，取决于用哪一层客户端」。低层 <code>ClientSession.initialize()</code> 与 <code>mode="legacy"</code> 才走握手代。</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">② 子进程的生死</h3>
+    <p class="kv"><code>server.run()</code> 阻塞着，但<b>不是永不返回</b>：客户端一断开 → stdin EOF → 它正常退出（D26 实测 0.94s）。</p>
+    <p class="small">→ 「常驻」是<b>我们这边不断开</b>造成的，不是 server 自己赖着不走。所以清理逻辑必须写在<b>我们</b>这边。</p>
+  </div>
+</div>
+
+<h2>§6 今天要落的东西（对照 PRD §13.2 D27 行）</h2>
+
+<table>
+  <tr><th style="width:260px">产物</th><th>干什么</th></tr>
+  <tr><td><code>app/services/mcp_client.py</code></td><td>连一台 server：起子进程 → <code>tools/list</code> 发现 → 造 stub → 注册进 Registry（带命名空间与来源标识）</td></tr>
+  <tr><td>扩展 <code>app/tools/registry.py</code></td><td>支持「带来源/前缀注册」与查询来源，让 <code>/api/tools</code> 能报出每个工具属于哪台 server</td></tr>
+  <tr><td><code>app/api/tools.py</code> + 挂载</td><td><code>GET /api/tools</code>：列出全部工具（本地 + 各 server），标注来源</td></tr>
+  <tr><td>server 配置（Harness / inventory）</td><td>命令、参数、env（PAT 从 <code>.env</code> 读）、toolset 裁剪、只读开关</td></tr>
+  <tr><td><code>scripts/d27_verify.py</code></td><td>当天验证脚本（零硬编码工具名）：发现 / 前缀 / 来源 / 往返 / 生命周期 / 对话可调</td></tr>
+</table>
+
+<div class="note">
+  <b>验收（PRD 口径，两条）</b>：① <b>对话可调库存工具</b>（问一句库存问题，Agent 自己决定调它并答对）；
+  ② <b><code>/api/tools</code> 可见 11 个 harness 工具</b>。
+</div>
+
+<div class="bad">
+  <b>本图尚未实测的部分（不许当结论引用）</b>
+  <ul style="margin-bottom:0">
+    <li>Harness server 在 <b>token 失效</b>时的具体行为（是启动就失败、还是 <code>tools/list</code> 才失败）—— <b>没测过</b>。</li>
+    <li><code>tools/list</code> 返回里每个工具的 <b>真实 schema 形状</b>（11 个工具逐个）—— D25 只看了数量与清单，没逐个核对 schema。</li>
+    <li>子进程<b>崩溃重启</b>的最佳退避策略 —— 要等今天写完代码、真的杀掉子进程试一次再说。</li>
+    <li><b>server 挂掉之后注册表与调用的真实行为</b>（stub 是否仍在清单里 / 写管道失败报什么错 / 有没有超时）—— 见 §4 那条补注，<b>目前全是源码推演</b>。</li>
+  </ul>
+</div>
+
+<p class="small" style="margin-top:26px">
+  本图与当天教程同一套口径；图里出现的每个事实，都能在 <code>app/tools/registry.py</code>（源码）、
+  <code>docs/tutorials/D26-总结.md</code>（抓包与实测）或 <code>docs/PRD-v4.1-含前沿技术.md</code> §9.6 里追到出处。
+</p>
+
+</div>
+</body>
+</html>
