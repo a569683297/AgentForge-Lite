@@ -118,6 +118,27 @@ def list_tools() -> list[str]:
     return list(_registry.keys())
 
 
+def get_tool_source(name: str) -> str:
+    """
+    查一个工具**从哪来**（D28 新增）。
+
+    为什么单独给一个函数（而不是让调用方遍历 `describe_tools()`）：
+      D28 的观测层要往工具 span 的 metadata 里写 `source`，而它手上只有
+      LLM 给的**工具名**。遍历 `describe_tools()` 也能查到（工具只有十几个），
+      但那等于每次都重新构造整个列表；更重要的是 ——
+      **注册表才是"工具元信息的唯一出处"**，查出身这种事不该在调用点重造一遍。
+
+    ⚠ 未知工具返回 `"unknown"`，**不是** `"local"`：
+      调用方会拿这个值去填 span 的 metadata。把"没有这个工具"谎报成"本地工具"，
+      会在 Langfuse 上留下一条**看起来正常的假调用记录** ——
+      而真实情况是"LLM 编了个不存在的工具名"。排障时这两者必须能区分。
+    """
+    meta = _registry.get(name)
+    if meta is None:
+        return "unknown"
+    return meta.get("source", "local")
+
+
 def describe_tools() -> list[dict]:
     """
     导出全部工具的**描述信息**（不含函数对象），供 `/api/tools` 与调试使用。

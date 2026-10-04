@@ -39,6 +39,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.core.logging import logger
+from app.services.observability import SPAN_RERANK, span
 
 # 模型缓存目录：与 embedding 共用项目内 models/（见 embedding_service 的同名常量）
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]      # app/services/x.py → 项目根
@@ -160,56 +161,92 @@ async def rerank(
         # 空候选不加载模型：否则一次注定没结果的检索也要白付 634ms 的加载成本
         return [], False
 
-    documents = [item.get("content") or "" for item in candidates]
+    # D28：重排这一格 —— 它是整条链路里**最贵的一段**（20 候选 @300 字 ≈ 750~820ms），
+    # 也是唯一会走降级的分支。span 包住**三条降级路径**，让"降级可归因"落到 trace 上：
+    # 只写日志的话，"最近怎么都不重排了"在 Langfuse 上看不见
+    # （P95 反而会因为跳过重排而变好看 —— 一个朝错误方向优化的信号）。
+    with span(
+        SPAN_RERANK,
+        as_type="retriever",
+        input={"query": query, "candidates": len(candidates), "top_n": top_n},
+    ) as obs:
+        documents = [item.get("content") or "" for item in candidates]
 
-    try:
-        scores = await asyncio.wait_for(
-            # 丢线程：ONNX 推理里一个 await 都没有，留在事件循环里就是把循环钉住 750ms
-            asyncio.to_thread(_rerank_sync, query, documents),
-            timeout=settings.rerank_timeout_s,
+        try:
+            scores = await asyncio.wait_for(
+                # 丢线程：ONNX 推理里一个 await 都没有，留在事件循环里就是把循环钉住 750ms
+                asyncio.to_thread(_rerank_sync, query, documents),
+                timeout=settings.rerank_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            # 注意：wait_for 只让**请求**提前返回，工作线程停不下来 ——
+            # Python 线程无法被强制中断，它会把这次推理算完再丢弃结果。
+            # 所以超时保护的是"请求延迟"，不是 CPU；持续超时会让线程池里越堆越多。
+            logger.warning(
+                "重排超时降级 timeout=%.1fs 候选=%d query=%r",
+                settings.rerank_timeout_s, len(candidates), query[:20],
+            )
+            obs.update(
+                output={"reranked": False, "reason": "timeout"},
+                level="WARNING",
+                status_message="重排超时降级（返回融合序）",
+            )
+            return [dict(item) for item in candidates[:top_n]], False
+        except Exception as e:
+            # 降级日志**不带堆栈**（铁律 13④）：这是高频可预期事件（模型没起来时每个请求都会走这里），
+            # 带 exc_info 会把真正的故障埋进噪音里。只留异常消息。
+            logger.warning("重排失败降级 err=%s 候选=%d query=%r", e, len(candidates), query[:20])
+            obs.update(
+                output={"reranked": False, "reason": f"{type(e).__name__}: {e}"},
+                level="WARNING",
+                status_message="重排失败降级（返回融合序）",
+            )
+            return [dict(item) for item in candidates[:top_n]], False
+
+        if len(scores) != len(candidates):
+            # 防御性断言：分数与候选错位会让「内容 A 配上分数 B」静默发生，
+            # 排序全乱但不报错。宁可降级。
+            logger.warning(
+                "重排分数条数不匹配 scores=%d candidates=%d，降级", len(scores), len(candidates)
+            )
+            obs.update(
+                output={"reranked": False, "reason": "score_count_mismatch"},
+                level="WARNING",
+                status_message="重排分数条数与候选数不匹配，降级",
+            )
+            return [dict(item) for item in candidates[:top_n]], False
+
+        # 排序键：① 分数降序 ② chunk_id 升序兜底
+        # 第②档的存在理由和 D17 融合一样 —— 只需保证"同一份数据两次跑出同一顺序"，
+        # 不让并列的先后交给 Python 的稳定排序去碰运气。
+        paired = sorted(
+            zip(scores, candidates),
+            key=lambda pair: (-pair[0], pair[1].get("chunk_id") or ""),
         )
-    except asyncio.TimeoutError:
-        # 注意：wait_for 只让**请求**提前返回，工作线程停不下来 ——
-        # Python 线程无法被强制中断，它会把这次推理算完再丢弃结果。
-        # 所以超时保护的是"请求延迟"，不是 CPU；持续超时会让线程池里越堆越多。
-        logger.warning(
-            "重排超时降级 timeout=%.1fs 候选=%d query=%r",
-            settings.rerank_timeout_s, len(candidates), query[:20],
+
+        results: list[dict] = []
+        for score, item in paired[:top_n]:
+            enriched = dict(item)                        # 浅拷贝，见 docstring 的⚠
+            enriched["rerank_score"] = round(float(score), 4)
+            results.append(enriched)
+
+        # 记分数区间：它是"重排到底有没有把分数拉开"的直接证据。
+        # D18 实测重排分是 logit、**跨 query 不可比**，所以只记本次的区间，不跨次求平均。
+        obs.update(
+            output={
+                "reranked": True,
+                "top_n": len(results),
+                "score_range": [
+                    results[0]["rerank_score"] if results else 0.0,
+                    results[-1]["rerank_score"] if results else 0.0,
+                ],
+            }
         )
-        return [dict(item) for item in candidates[:top_n]], False
-    except Exception as e:
-        # 降级日志**不带堆栈**（铁律 13④）：这是高频可预期事件（模型没起来时每个请求都会走这里），
-        # 带 exc_info 会把真正的故障埋进噪音里。只留异常消息。
-        logger.warning("重排失败降级 err=%s 候选=%d query=%r", e, len(candidates), query[:20])
-        return [dict(item) for item in candidates[:top_n]], False
-
-    if len(scores) != len(candidates):
-        # 防御性断言：分数与候选错位会让「内容 A 配上分数 B」静默发生，
-        # 排序全乱但不报错。宁可降级。
-        logger.warning(
-            "重排分数条数不匹配 scores=%d candidates=%d，降级", len(scores), len(candidates)
+        logger.info(
+            "重排完成 候选=%d 返回=%d 分数区间=[%.4f, %.4f] query=%r",
+            len(candidates), len(results),
+            results[0]["rerank_score"] if results else 0.0,
+            results[-1]["rerank_score"] if results else 0.0,
+            query[:20],
         )
-        return [dict(item) for item in candidates[:top_n]], False
-
-    # 排序键：① 分数降序 ② chunk_id 升序兜底
-    # 第②档的存在理由和 D17 融合一样 —— 只需保证"同一份数据两次跑出同一顺序"，
-    # 不让并列的先后交给 Python 的稳定排序去碰运气。
-    paired = sorted(
-        zip(scores, candidates),
-        key=lambda pair: (-pair[0], pair[1].get("chunk_id") or ""),
-    )
-
-    results: list[dict] = []
-    for score, item in paired[:top_n]:
-        enriched = dict(item)                        # 浅拷贝，见 docstring 的⚠
-        enriched["rerank_score"] = round(float(score), 4)
-        results.append(enriched)
-
-    logger.info(
-        "重排完成 候选=%d 返回=%d 分数区间=[%.4f, %.4f] query=%r",
-        len(candidates), len(results),
-        results[0]["rerank_score"] if results else 0.0,
-        results[-1]["rerank_score"] if results else 0.0,
-        query[:20],
-    )
-    return results, True
+        return results, True

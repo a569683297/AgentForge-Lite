@@ -70,6 +70,9 @@ from app.core.logging import logger
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.services.embedding_service import embed_query
+
+# D28：观测层（span 名用 SPAN_* 常量，不就地写字符串）
+from app.services.observability import SPAN_BM25, SPAN_RETRIEVAL, SPAN_VECTOR, span
 from app.services.rerank_service import rerank
 from app.services.tokenizer import build_or_tsquery, tokenize
 
@@ -141,48 +144,58 @@ async def search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     Returns:
         [{"content":..., "source":..., "page_ref":..., "similarity":...}, ...]（按相似度降序）
     """
-    # 两个阶段必须用同一个 embedding 模型：只有同一模型的向量才在同一语义空间
-    query_vec = await embed_query(query)
+    # D28：向量检索这一格。它的子节点是 `embedding`（下面 embed_query 建的）——
+    # 因此在 Langfuse 上"向量这一段花了多久"能拆成"算向量"+"查库排序"两块。
+    with span(
+        SPAN_VECTOR,
+        as_type="retriever",
+        input={"query": query, "top_k": top_k},
+    ) as obs:
+        # 两个阶段必须用同一个 embedding 模型：只有同一模型的向量才在同一语义空间
+        query_vec = await embed_query(query)
 
-    # 用 SQLAlchemy 表达 pgvector 的距离排序
-    distance = DocumentChunk.embedding.cosine_distance(query_vec)
-    stmt = (
-        select(
-            DocumentChunk.id,
-            DocumentChunk.content,
-            DocumentChunk.page_ref,
-            Document.filename,
-            distance.label("distance"),
+        # 用 SQLAlchemy 表达 pgvector 的距离排序
+        distance = DocumentChunk.embedding.cosine_distance(query_vec)
+        stmt = (
+            select(
+                DocumentChunk.id,
+                DocumentChunk.content,
+                DocumentChunk.page_ref,
+                Document.filename,
+                distance.label("distance"),
+            )
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(Document.status == DocumentStatus.READY)
+            .order_by(distance)          # 距离升序 = 相似度降序
+            .limit(top_k)
         )
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .where(Document.status == DocumentStatus.READY)
-        .order_by(distance)          # 距离升序 = 相似度降序
-        .limit(top_k)
-    )
 
-    async with async_session_factory() as session:
-        rows = (await session.execute(stmt)).all()
+        async with async_session_factory() as session:
+            rows = (await session.execute(stmt)).all()
 
-    results = [
-        {
-            # D17：切片的唯一身份。融合（RRF）要判断"两路返回的这两条是不是同一片"，
-            # 靠 content 字符串比对是脆的（空白/截断差异会静默配对失败，
-            # 表现为"本该合并的一条变成两条并列"）。身份只能来自主键。
-            "chunk_id": str(row.id),
-            "content": row.content,
-            # 沿用 "source" 这个键名：工具层与引用收集器都按它取来源展示名
-            "source": row.filename,
-            "page_ref": row.page_ref,
-            "similarity": round(1 - row.distance, 4),   # 距离 → 相似度
-            # D19：标明这条是谁产的。
-            # D17 只给 BM25 与融合打了标记，向量路**漏了** —— 于是 A 配置
-            # （pure_vector）在消融实验里无法归因。三配置都要能自报家门。
-            "retriever": "pure_vector",
-        }
-        for row in rows
-    ]
-    logger.info("检索完成 query=%r 命中=%d 条", query[:20], len(results))
-    return results
+        results = [
+            {
+                # D17：切片的唯一身份。融合（RRF）要判断"两路返回的这两条是不是同一片"，
+                # 靠 content 字符串比对是脆的（空白/截断差异会静默配对失败，
+                # 表现为"本该合并的一条变成两条并列"）。身份只能来自主键。
+                "chunk_id": str(row.id),
+                "content": row.content,
+                # 沿用 "source" 这个键名：工具层与引用收集器都按它取来源展示名
+                "source": row.filename,
+                "page_ref": row.page_ref,
+                "similarity": round(1 - row.distance, 4),   # 距离 → 相似度
+                # D19：标明这条是谁产的。
+                # D17 只给 BM25 与融合打了标记，向量路**漏了** —— 于是 A 配置
+                # （pure_vector）在消融实验里无法归因。三配置都要能自报家门。
+                "retriever": "pure_vector",
+            }
+            for row in rows
+        ]
+        # 只记条数、**不记 content**：切片正文最长 300 字 × top20，
+        # 全塞进 span 会把 trace 撑大且没有增量信息（要看内容去 PG 查）。
+        obs.update(output={"hits": len(results)})
+        logger.info("检索完成 query=%r 命中=%d 条", query[:20], len(results))
+        return results
 
 
 # ============================================================
@@ -305,45 +318,57 @@ async def search_keywords(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
           [0,1] 不是一个量纲，混用同一个键名会在 D17 做 RRF 时埋雷
         - `retriever="bm25"`：标明这一路是谁产的，便于调试与消融实验归因
     """
-    tokens = tokenize(query)
-    if not tokens:
-        # 全是标点/空白的问题，清洗后没有任何有效 token。
-        # 必须提前返回：空 tsquery 虽然不会报错（@@ 结果为 False），但白跑一次数据库。
-        logger.info("BM25 检索跳过：query=%r 清洗后无有效 token", query[:20])
-        return []
+    with span(
+        SPAN_BM25,
+        as_type="retriever",
+        input={"query": query, "top_k": top_k},
+    ) as obs:
+        tokens = tokenize(query)
+        if not tokens:
+            # 全是标点/空白的问题，清洗后没有任何有效 token。
+            # 必须提前返回：空 tsquery 虽然不会报错（@@ 结果为 False），但白跑一次数据库。
+            #
+            # D28：这一支也要在 trace 上留痕 —— 它会让融合退化成向量单路，
+            # 而"这次混合检索为什么只有一半"在结果里看不出来（结果照样返回）。
+            obs.update(output={"hits": 0, "reason": "清洗后无有效 token"})
+            logger.info("BM25 检索跳过：query=%r 清洗后无有效 token", query[:20])
+            return []
 
-    async with async_session_factory() as session:
-        rows = (await session.execute(
-            _BM25_SQL,
+        async with async_session_factory() as session:
+            rows = (await session.execute(
+                _BM25_SQL,
+                {
+                    "terms": " ".join(tokens),
+                    "tsq": build_or_tsquery(tokens),
+                    "k1": BM25_K1,
+                    "b": BM25_B,
+                    "top_k": top_k,
+                },
+            )).all()
+
+        results = [
             {
-                "terms": " ".join(tokens),
-                "tsq": build_or_tsquery(tokens),
-                "k1": BM25_K1,
-                "b": BM25_B,
-                "top_k": top_k,
-            },
-        )).all()
+                # D17：与向量路用同一个键名、同一种类型（str），融合时才能直接对齐
+                "chunk_id": str(row.id),
+                "content": row.content,
+                # 与向量检索保持同一个键名 "source"：工具层与引用收集器按它取展示名
+                "source": row.filename,
+                "page_ref": row.page_ref,
+                "score": round(float(row.score), 4),
+                "retriever": "bm25",
+            }
+            for row in rows
+        ]
 
-    results = [
-        {
-            # D17：与向量路用同一个键名、同一种类型（str），融合时才能直接对齐
-            "chunk_id": str(row.id),
-            "content": row.content,
-            # 与向量检索保持同一个键名 "source"：工具层与引用收集器按它取展示名
-            "source": row.filename,
-            "page_ref": row.page_ref,
-            "score": round(float(row.score), 4),
-            "retriever": "bm25",
-        }
-        for row in rows
-    ]
-
-    candidate_count = rows[0].candidate_count if rows else 0
-    logger.info(
-        "BM25 检索完成 query=%r terms=%s 候选=%d 返回=%d",
-        query[:20], tokens, candidate_count, len(results),
-    )
-    return results
+        candidate_count = rows[0].candidate_count if rows else 0
+        # 同时记"候选宽度"：召回为 0 和召回 200 条都会返回同样条数的 top_k，
+        # 只看 hits 分不出"OR 太窄"还是"BM25 打分把相关的排下去了"。
+        obs.update(output={"hits": len(results), "candidates": candidate_count})
+        logger.info(
+            "BM25 检索完成 query=%r terms=%s 候选=%d 返回=%d",
+            query[:20], tokens, candidate_count, len(results),
+        )
+        return results
 
 
 # ============================================================
@@ -580,28 +605,40 @@ async def retrieve(
     if name not in RETRIEVER_CONFIGS:
         raise ValueError(f"未知检索配置：{name!r}，可选 {RETRIEVER_CONFIGS}")
 
-    reranked = False
+    # D28：检索父 span。它包住下面所有的子段（向量 / BM25 / 重排），
+    # 于是它的 latency **就是这一次检索的总耗时** —— 不用在面板上手工把几条拼起来。
+    # ⚠ 它是**嵌套计时**（包含子 span 的耗时），算"各段占比"时不能与子段相加。
+    with span(
+        SPAN_RETRIEVAL,
+        as_type="retriever",
+        input={"query": query, "config": name, "top_k": top_k},
+    ) as obs:
+        reranked = False
 
-    if name == "pure_vector":
-        results = await search(query, top_k=top_k)
+        if name == "pure_vector":
+            results = await search(query, top_k=top_k)
 
-    elif name == "hybrid":
-        results = await hybrid_search(query, top_k=top_k)
+        elif name == "hybrid":
+            results = await hybrid_search(query, top_k=top_k)
 
-    else:  # hybrid_rerank
-        # 窗口是 RERANK_CANDIDATE_K（20），不是 top_k（5）—— 见常量处的说明
-        fused = await hybrid_search(query, top_k=RERANK_CANDIDATE_K)
-        results, reranked = await rerank(query, fused, top_n=top_k)
+        else:  # hybrid_rerank
+            # 窗口是 RERANK_CANDIDATE_K（20），不是 top_k（5）—— 见常量处的说明
+            fused = await hybrid_search(query, top_k=RERANK_CANDIDATE_K)
+            results, reranked = await rerank(query, fused, top_n=top_k)
 
-        # 按**实际走通的路径**打标：降级时是 "hybrid"，不是 "hybrid_rerank"。
-        # 同时把 rerank_score 补齐为 None，让 C 配置的键集恒定
-        # （上层做 `item.get("rerank_score")` 之外的直接下标时不会 KeyError）。
-        for item in results:
-            item["retriever"] = "hybrid_rerank" if reranked else "hybrid"
-            item.setdefault("rerank_score", None)
+            # 按**实际走通的路径**打标：降级时是 "hybrid"，不是 "hybrid_rerank"。
+            # 同时把 rerank_score 补齐为 None，让 C 配置的键集恒定
+            # （上层做 `item.get("rerank_score")` 之外的直接下标时不会 KeyError）。
+            for item in results:
+                item["retriever"] = "hybrid_rerank" if reranked else "hybrid"
+                item.setdefault("rerank_score", None)
 
-    logger.info(
-        "检索完成 config=%s reranked=%s 返回=%d query=%r",
-        name, reranked, len(results), query[:20],
-    )
-    return results
+        # 记下**实际走通的路径**（与上面 `retriever` 字段同一条原则）：
+        # `reranked=False` 时配置名义上还是 hybrid_rerank —— 这个差别
+        # 只有写进 trace 才不会被误读成"重排的成绩"（D19 的降级可归因）。
+        obs.update(output={"hits": len(results), "reranked": reranked})
+        logger.info(
+            "检索完成 config=%s reranked=%s 返回=%d query=%r",
+            name, reranked, len(results), query[:20],
+        )
+        return results

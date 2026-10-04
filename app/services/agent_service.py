@@ -25,6 +25,7 @@ assistant 消息带 tool_calls → tool 消息带 tool_call_id 关联返回
 Edge=固定路由 / 条件边=动态路由
 """
 
+import json
 import uuid
 from typing import Literal, NotRequired, TypedDict
 
@@ -34,7 +35,11 @@ from app.core.citation import check_citations, get_sources, reset_sources
 from app.core.logging import logger
 from app.schemas.chat import ChatResult, SourceItem
 from app.services.llm_gateway import chat_with_tools
+
+# D28：观测层唯一出口（span 命名规范、根 span、trace 级属性都从这里取）
+from app.services.observability import SPAN_ROOT, span, tool_span_name, trace_attrs
 from app.tools import execute_tool, get_tools_schema  # 注册表：工具能力集中管理
+from app.tools.registry import get_tool_source
 
 
 # 单轮对话内最多走多少个节点（LangGraph 的 recursion_limit；不传则是库默认值 25）。
@@ -135,16 +140,51 @@ async def execute_node(state: AgentState) -> AgentState:
 
     tool_messages = []
     for tc in tool_calls:
-        try:
-            import json
+        # D28：工具名必须在 try **外面**先取到 —— span 的名字依赖它。
+        # 取值用 `.get` 链而不是 `tc["function"]["name"]`：名字提到 try 外之后，
+        # 就必须自己保证它不会抛（原代码的取名在 try 内，结构异常会被吞成
+        # "解析失败"；换个位置而不换写法，就会把一个可恢复的失败升级成节点崩溃）。
+        fn_name = (tc.get("function") or {}).get("name") or "unknown"
 
-            fn_name = tc["function"]["name"]
-            args = json.loads(tc["function"]["arguments"] or "{}")
-            # 交给注册表执行（内部已处理未知工具/异常，返回字符串结果）
-            # D10：注册表改 async 后，这里必须 await——否则拿到的是 coroutine 对象
-            result = await execute_tool(fn_name, args)
-        except Exception as e:
-            result = f"工具调用解析失败: {e}"
+        # D28：MCP 来源标识 —— 验收②「能指出某次调用来自 harness」的地基。
+        # `source` 对 MCP 工具就是 server 名（"harness" / "inventory"），本地工具是 "local"。
+        # 本地工具**不该谎称**来自某台 MCP server，所以映射成 None
+        # （PRD F8.4 要的是"这一次是外部 server 的调用，不是自研工具"）。
+        source = get_tool_source(fn_name)
+        mcp_server_name = source if source != "local" else None
+
+        with span(
+            tool_span_name(fn_name),
+            as_type="tool",
+            # 三个字段一起写：回答"调了哪个具体工具"（tool_name）
+            # 与"它属于哪台 server"（mcp_server_name / source）。
+            # ⚠ 只能放 metadata —— tool 属 span-like 类型，
+            #   带不了 model / usage 那几个字段（传了也会静默丢弃）。
+            metadata={
+                "tool_name": fn_name,
+                "mcp_server_name": mcp_server_name,
+                "source": source,
+            },
+        ) as tool_span:
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+                # 交给注册表执行（内部已处理未知工具/异常，返回字符串结果）
+                # D10：注册表改 async 后，这里必须 await——否则拿到的是 coroutine 对象
+                result = await execute_tool(fn_name, args)
+            except Exception as e:
+                args = {}          # 给 span 的 input 一个确定值，避免 UnboundLocalError
+                result = f"工具调用解析失败: {e}"
+
+            out = str(result)
+            # 失败也要留在 trace 上（与 rerank 的"降级可归因"同一条原则）：
+            # 只写日志的话，"这台 server 的工具最近一直失败"这件事
+            # 在 Langfuse 上是看不见的 —— 而它恰恰是运维最该看见的。
+            tool_span.update(
+                input=args,
+                output=out,
+                level="ERROR" if ("执行失败" in out or "未知工具" in out) else "DEFAULT",
+            )
+
         # tool 消息必须带 tool_call_id 关联（否则 400）
         tool_messages.append(
             {
@@ -260,50 +300,74 @@ async def run_agent(
         "summary": summary,
     }
 
-    # ③ 跑图（recursion_limit 见文件顶部常量说明）
-    result = await get_agent().ainvoke(
-        state, config={"recursion_limit": RECURSION_LIMIT}
-    )
+    # ③ 跑图 + ④~⑥.5 取结果（D28：这一段就是「用户等待的全部」，包进**一条 trace**）
+    #
+    #   ⚠ 范围刻意**到 ⑥.5 为止，不含下面的 ⑦⑧ 写回**：写回是副作用，不占用户等待时间。
+    #     把它算进根 span 的 latency，会让"这一轮慢在哪"失真 ——
+    #     而 D28 之后这个 latency 是要被当指标读的（D35 的 latency_p95）。
+    #
+    #   ⚠ `trace_attrs` 必须在**根 span 之外** —— 官方硬约束："Pre-existing spans
+    #     will NOT be retroactively updated"。实测把根 span 建在它之前时，
+    #     根 span 的 session/user 是 None 而子 span 有值 ——
+    #     那种"看起来设了、其实只设了一半"的状态最难查。
+    with trace_attrs(session_id=session_id, trace_name=SPAN_ROOT):
+        with span(
+            SPAN_ROOT,
+            as_type="agent",
+            input={"user_input": user_input},
+            metadata={"persist": persist},
+        ) as root_span:
+            # ③ 跑图（recursion_limit 见文件顶部常量说明）
+            result = await get_agent().ainvoke(
+                state, config={"recursion_limit": RECURSION_LIMIT}
+            )
 
-    # ④ 取最终回答
-    #   注意：中间会有带 tool_calls 的 assistant 消息（content 可能为空，也可能只有一句
-    #   "我来查一下"），所以要从后往前找"第一条 content 非空的 assistant 消息"。
-    #   D14 修复后 plan 输出的就是最终答案，这条规则依然成立、而且更稳：
-    #   不会再出现"plan 抢答 + answer 正式答"两条并列、需要从里面挑一条的情况。
-    final_answer = ""
-    for msg in reversed(result["messages"]):
-        if msg["role"] == "assistant" and msg.get("content"):
-            final_answer = msg["content"]
-            break
+            # ④ 取最终回答
+            #   注意：中间会有带 tool_calls 的 assistant 消息（content 可能为空，也可能只有一句
+            #   "我来查一下"），所以要从后往前找"第一条 content 非空的 assistant 消息"。
+            #   D14 修复后 plan 输出的就是最终答案，这条规则依然成立、而且更稳：
+            #   不会再出现"plan 抢答 + answer 正式答"两条并列、需要从里面挑一条的情况。
+            final_answer = ""
+            for msg in reversed(result["messages"]):
+                if msg["role"] == "assistant" and msg.get("content"):
+                    final_answer = msg["content"]
+                    break
 
-    # ⑤ 取出本请求累计的来源（结构通道）
-    raw_sources = get_sources()
-    sources = [SourceItem(**item) for item in raw_sources]
+            # ⑤ 取出本请求累计的来源（结构通道）
+            raw_sources = get_sources()
+            sources = [SourceItem(**item) for item in raw_sources]
 
-    # ⑥ 校验引用编号有没有越界（幻觉引用检测）
-    invalid = check_citations(final_answer, len(sources))
-    if invalid:
-        logger.warning(
-            "回答引用了不存在的来源编号 session=%s 越界编号=%s 实际来源数=%d",
-            session_id,
-            invalid,
-            len(sources),
-        )
+            # ⑥ 校验引用编号有没有越界（幻觉引用检测）
+            invalid = check_citations(final_answer, len(sources))
+            if invalid:
+                logger.warning(
+                    "回答引用了不存在的来源编号 session=%s 越界编号=%s 实际来源数=%d",
+                    session_id,
+                    invalid,
+                    len(sources),
+                )
 
-    # ⑥.5 收集本轮实际调用的工具序列（D22 新增）——
-    #      评测判「C 类题有没有选对工具」（tool_miss）的**唯一依据**。
-    #      这件事从答案文本里看不出来：答案可能答对，却完全没查库。
-    #      与 D11 的 sources 同族 ——「过程的结构化产物需要一条出口」。
-    #      「本轮新增了哪些消息」= 跑完图后的完整列表减去进图之前那一段；
-    #      可以直接按长度切，因为 history 是进图前的全部内容，图只会在后面追加。
-    new_messages = result["messages"][len(history):]
-    tool_names = [
-        (call.get("function") or {}).get("name", "")
-        for message in new_messages
-        if message.get("role") == "assistant"
-        for call in (message.get("tool_calls") or [])
-    ]
-    tool_names = [name for name in tool_names if name]
+            # ⑥.5 收集本轮实际调用的工具序列（D22 新增）——
+            #      评测判「C 类题有没有选对工具」（tool_miss）的**唯一依据**。
+            #      这件事从答案文本里看不出来：答案可能答对，却完全没查库。
+            #      与 D11 的 sources 同族 ——「过程的结构化产物需要一条出口」。
+            #      「本轮新增了哪些消息」= 跑完图后的完整列表减去进图之前那一段；
+            #      可以直接按长度切，因为 history 是进图前的全部内容，图只会在后面追加。
+            new_messages = result["messages"][len(history):]
+            tool_names = [
+                (call.get("function") or {}).get("name", "")
+                for message in new_messages
+                if message.get("role") == "assistant"
+                for call in (message.get("tool_calls") or [])
+            ]
+            tool_names = [name for name in tool_names if name]
+
+            # 根 span 的 output = 这一轮的最终产物。
+            # 记 answer 之外**也记 tool_calls**：一次调用里"答了什么"和
+            # "查了哪些库"是两件事，前者可能对而后者完全没查（D22 的 tool_miss 正是这个）。
+            root_span.update(
+                output={"answer": final_answer, "tool_calls": tool_names}
+            )
 
     # ---- 以下三步是「写回会话记忆」；评测模式（persist=False）整体跳过 ----
     #      跳过是安全的：它们在时间上全部排在 ④ 取答案之后，改不了已生成的文本。

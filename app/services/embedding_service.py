@@ -29,6 +29,7 @@ from typing import Protocol, runtime_checkable
 
 from app.config import settings
 from app.core.logging import logger
+from app.services.observability import SPAN_EMBEDDING, span
 
 # 模型缓存目录：放在项目内（而非用户目录 ~/.cache）
 # 理由：① 项目自包含，便于迁移/清理 ② 避免写入系统敏感目录
@@ -200,6 +201,27 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 async def embed_query(text: str) -> list[float]:
-    """单条文本向量化（检索时用）。"""
-    vectors = await embed_texts([text])
-    return vectors[0]
+    """
+    单条文本向量化（检索时用）。
+
+    D28：埋点**只包这一层**，不包 `embed_texts()` ——
+    因为 `embed_texts()` 也被入库路径（`document_service`）调用，那不是检索。
+    只包这里顺带把两件事在 Langfuse 上分开了：
+      「用户查询的向量化」（单条、每次检索都发生）
+      「文档入库的向量化」（整篇、批量、只在入库时发生）
+    两者的耗时口径完全不同，混在同一格会让 P95 变成一个没有意义的平均数。
+    """
+    with span(
+        SPAN_EMBEDDING,
+        as_type="embedding",
+        # ★ embedding 属 generation-like 类型 → **能带 model 名**
+        #   （tool / retriever 那几个类型带不了，传了会静默丢弃）。
+        #   这让"换 embedding 模型之后 P95 变了吗"变成一个能按模型分组的问题。
+        model=settings.embedding_config["model"],
+        input={"text": text[:200]},   # 截断：问题一般很短，防异常长输入撑大 trace
+    ) as obs:
+        vectors = await embed_texts([text])
+        # 记维度而不是向量本身：向量是 512 个浮点数，塞进 trace 既大又没有增量信息，
+        # 但"维度对不对"是个真实的排障信号（换模型忘了重建索引时维度会不匹配）。
+        obs.update(output={"dim": len(vectors[0]) if vectors else 0})
+        return vectors[0]

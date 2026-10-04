@@ -68,6 +68,7 @@ D24 的主任务是 **报告生成**（规划号 = 教程号 = D24）；此外�
 | D25 | D25 | **MCP 学习日**（MCP 是什么 + 四个角色权责 + 三原语 + 两代协议 · 工具进注册表的链路 · 注册 Harness 账号 + PAT） | ✅ **验收全过（2026-10-01 22:40）**：①「能讲清 MCP 价值」——判据 = **判据三问**（见下方分工表）；Q1–Q4 复述判定全部通过；②「**PAT 已入 `.env`**」**已完成并已实测跑通**（见下方「Harness 接入实测」：真连官方 server、真读到数据）。**学习日：`app/` 与 `scripts/` 一行未动**，产出 = **5 张自包含 HTML 图**（见下方分工表）；取证脚本全在 `/tmp/d25_demo/`，**不入库**。**PRD 三处过时描述已拍板推迟到 D26 一次性改**（见下方） |
 | D26 | D26 | **自研 MCP 库存服务**（server 端；官方 SDK `MCPServer`，原 `FastMCP`） | ✅ **已完成（2026-10-02，收尾 10-03）**：① 开工前收尾**已办完** —— PRD §9.6 **四处**过时描述一次性修正（提交 `3ecd213`，按铁律 12 附则四全仓搜旧值后 **11 处引用一并改齐**，新增 **§9.6.3 修正汇总表**）；② **原理环节已讲并落图** → [`D26-Server内部链路.html`](D26-Server内部链路.html)（六节：名词注解 → 最小骨架 → 一次调用的 7 步链路 → **§4 打印取证** → 装饰器自动生成了什么 → 「独立可调」在验什么）；③ **编码第 1 块**（提交 `27aded3`）：加 `mcp>=2.2.0` 依赖（`uv.lock` **+437/−0 纯新增**）+ `mcp_servers/inventory_server.py`（104 行 / 12 条 mock 物料 / 1 个工具）—— raw shell 手写报文 + 换 cwd 换环境**双重**跑通；④ **编码第 2 块**：新增 `scripts/d26_mitm.py`（**透明抓包器，可复用**）+ `scripts/d26_verify.py`（**36/36 全绿**，七段各答一个问题，含**零硬编码自证**与**进程独立性取证**），并**做了负测试**（注入两处破坏 → 对应断言如期报红，其余 34 条仍绿）。**本日两次实测推翻既有说法**：(a)「`print` 会污染协议流」—— 真因是 `MCPServer.run()` 把 **fd 1 改道到 fd 2**（`fd1_ino == fd2_ino`）；(b)「stdio **默认**走握手代」—— 抓包证明那只是**低层/legacy 路径**，**高层 `Client` 默认走 Modern（`2026-07-28`、无握手）**（见下方 §⑤ 与「过时点」表）。验收 = **服务独立可调**（撇开 Agent / FastAPI / DB，官方高层 `Client` 直接 `tools/list` + `tools/call` 取回数据）；⑤ **收尾**：新增 [`D26-总结.md`](D26-总结.md)（**当天唯一复习入口** —— 含 §2 名词集中注解、§11 自测题两组共 6 题、附录 B 实测数据速查、★ 附录 C「公开说法 vs 实测事实」）并登记进下表。**复述判定**：第一组（原理环节）Q1 过 · Q2 **过但要掰**（论证循环，已用 **raw shell 陌生调用方**实证掰正）· Q3 过；**第二组（编码环节）待答** —— 题目已随 `D26-总结.md` §11.2 落盘（⚠ 用户 2026-10-03 选择**跳过**，跳过 ≠ 掌握） |
 | D27 | D27 | **MCP 客户端接入**（把**外部** server 的工具接进 `ToolRegistry`；`/api/tools` 观测出口） | ✅ **验收①②全过（2026-10-04）**：① **接新 server 不改 Agent 代码** —— `plan` / `execute` 两个节点**一行未改**，装配层只多 lifespan 里一次 `start()` + 关闭时一次 `stop()` + 一条路由；② **`/api/tools` 可见 11 个 harness 工具** —— `total=14`（`local` 2 + `inventory` 1 + **`harness` 11**），`by_source` 三来源齐。提交 `322b5da`（9 文件 / **+1286 行**）：`app/mcp/{client,manager,__init__}.py` + `app/api/tools.py` + `registry` 加 `source` 字段与 `describe_tools()` / `unregister_source()` + `config` MCP 段 + `.env.example` + `scripts/d27_verify.py`（**8 段 / 36 条**；`--with-harness` 跑验收②）。★ **本日主要产出的三件事**：(a) 图上标「**未实测**」的两条**跑成了实测** —— `SIGKILL` 子进程 → **0ms** 返回 `MCPError: Connection closed`（**快速失败**，不等满超时）；卡死 server → **2.00s** 超时返回错误文本（= 配置值），且**断开卡死的 server 2.02s 完成、不拖住关闭流程**（G9 是现场才发现的生产场景）；(b) **推翻了原理图自己写下的一句话** —— 协议版本不是「本项目落在 `2026-07-28`」，而是**双方谈出来的**：同一 `auto` 模式，inventory → `2026-07-28`，harness → **`2025-11-25`**；(c) **补做负测试**（往 `app/mcp` 注入一个真工具名 → **H2 如期报红、H1 仍绿、35/36、退出码 1**；还原后 36/36、退出码 0）。图 [`D27-MCP客户端接入链路.html`](D27-MCP客户端接入链路.html) · 复习入口 [`D27-总结.md`](D27-总结.md)。**复述判定**：第一组（原理环节）Q1 三项**全不过**（已修正图中因果倒置的一处 + 补一节"server 挂了之后注册表状态"）· Q2 **整组过** · Q3 **一过两不过**；第二组（编码环节）**待答**（题目在 `D27-总结.md` §11.2） |
+| D28 | D28 | **可观测：三层（四层）埋点补全 + Langfuse 取数通道**（MCP span 与来源标识；`langfuse_client.py`） | ✅ **三条验收全过（2026-10-04）**：① **全链路可追踪** —— 一轮 `run_agent` = **9 个 span / 同一条 trace / 唯一根 `run_agent`**（★ 修好"D28 以前每调一次 LLM 就自成一条 trace"：2 个 generation 的父**都是根**）；② **能指出某次调用来自 harness** —— 真调 `harness_list`，那格 span `metadata.source = harness` + `mcp_server_name = harness`（**不靠工具名猜**，值来自 D27 的注册表 `source` 字段）；③ **能经 API 拉回 observations** —— 真拉回 **300 条** + 聚合（`agent-answer` 144193 tokens / 56 次）。**8 文件**（3 新 **1246 行** + 5 改 `+390/−209`）：`observability.py`（观测层唯一出口，**落定 span 命名规范** —— PRD §18 #5 的遗留待定项）+ `langfuse_client.py`（腿 B 读通道）+ `d28_verify.py`（**7 段 / 49 条**）+ `registry.get_tool_source()` + `agent_service`（根 span + 工具 span）+ `retrieval` / `embedding` / `rerank` 埋点。**验证**：**43/43（无 harness）/ 49/49（含 `--with-harness`）**、`EXIT=0`；**负测试**（注入 `get_tool_source` 恒返 `local` → **44/49、5 条如期红**〔A7/D6/D7/E3/E4〕、**D3「本地工具 source=local」仍绿**；还原后 **49/49**）；**全量回归 260/260**。★ **今天三次"以为 vs 实测"**：(a) **langfuse 4.15.1 没有** `update_current_trace` / `start_span` / `start_as_current_span`（网上教程常用的三个名字），trace 级属性入口是**模块级 `propagate_attributes`**；(b) **`tool` / `retriever` 带不了 `model` / token**（签名与 generation 完全一样，但**静默丢弃**）→ 来源标识**只能写 `metadata`**；(c) 两个 REST observations 端点**结构完全不同** —— v2 **没有 `usageDetails`**、游标分页 → 腿 B **当前用 v1**（否则 token 那一半永远没有；**v1 `_deprecation` 写明 2026-11-16 移除**，已登记）。**可复用技巧**：给 Langfuse 的 OTEL 管道挂内存 exporter，**在进程内读回整棵 span 树**（不依赖网络与服务端延迟）。复习入口 [`D28-总结.md`](D28-总结.md)。**复述判定**：第一组（原理环节）**6/6 全过**；第二组（**四组自测题 Q1–Q4**）**用户尚未作答**（题目在 `D28-总结.md` §11、**参考答案已在附录 A 落盘**） |
 
 **D22 的文件分工**（决策材料是开工前的、教程是开工后的，两份都要留）：
 
@@ -203,6 +204,24 @@ D24 的主任务是 **报告生成**（规划号 = 教程号 = D24）；此外�
 **回归（2026-10-04 收尾时跑）**：**260/260 全绿** —— `d21_delete_scope 27 + d21_eval 63 + d22 77 + d23_metrics 33 + d24_report 60`；
 并复核**长期语料未被动过**（8 篇 / 51 片，`d21_delete_scope` E1/E2 与 `d22_verify` F5 双向确认）。
 
+**D28（可观测：埋点补全 + 取数通道）的文件分工** —— 本日是**编码日**，产出 = 1 个观测层出口 + 1 个读通道 + 1 个验证脚本 + 5 个埋点插入点 + **1 份当天复习入口**：
+
+| 文件 | 内容 |
+|---|---|
+| [`D28-总结.md`](D28-总结.md) | **D28 当天唯一的复习入口**（自包含）：§0 三十秒版 · §1 目标与位置 · **§2 名词先注解（2.1 今天新出现 18 个 + 2.2 以前讲过 9 个）** · ★ **§3 埋点树（为什么以前"全链路"做不到 + 实测打印的真实树）** · ★ **§4 三条埋点纪律**（不加 try/except / 类型决定字段 / `with` 范围=计时范围 / ★ 顺序是硬约束）· §5 来源标识（`source` → `mcp_server_name` 映射 + 四条"不能靠名字猜"理由）· §6 取数通道（为什么必须补 + v1/v2 取舍 + 三个设计约束 + 429 不重试）· §7 八个文件逐行解读 + **§7.9 负测试** · §8 SDK 实测事实 · §9 验收与自我推翻 + **§9.5 一处代码走读发现、未实测的边界** · §10 踩坑 7 条 · **§11 自测题（四组 Q1–Q4，= D28 出题的唯一权威，含出处锚点）** · §12 文件索引与下一步 · 附录 A **四组参考答案**（⚠ 用户尚未作答）/ B 实测数据速查 / ★ C「公开说法 vs 实测事实」10 行 / **D 交付前机检三件套的真实报警与定性** |
+| `app/services/observability.py`（190 行） | **新建 · 观测层唯一出口**：6 个 `SPAN_*` 命名常量（PRD §18 #5 要求 D28 定下来）+ `span()`（上下文管理器）+ `trace_attrs()`（trace 级属性，跳过 None）+ `current_trace_id()`。**复用 `llm_gateway` 的实例，绝不新建**（否则两条独立导出管道） |
+| `app/services/langfuse_client.py`（350 行） | **新建 · 腿 B 读通道**：`_fetch_observations`（分页 + 60s 缓存，**只缓存成功**）+ `_aggregate`（p95/sum/avg/count，最近秩法对齐 `percentile_disc`）+ `_FIELD_PATHS`（`usage.totalTokens → usageDetails.total` 映射）+ `query()` **留空壳抛 `NotImplementedError`**（`MetricSpec` 属 D35）。⚠ 与 `llm_gateway.langfuse`（**写**通道）不是同一个东西 |
+| `scripts/d28_verify.py`（706 行） | **正式验证脚本（7 段 / 49 条）**：**A** 结构 · **B** 检索树 · **C** 对话树 · **D** 工具 span · **E ★ 验收②** · **F 腿 B** · **G ★ 自证**。★ 关键手法：**给 TracerProvider 挂内存 exporter，进程内读回整棵 span 树** |
+| `app/tools/registry.py`（+21/−0） | 新增 `get_tool_source(name)`（未知工具返回 `"unknown"`，**不谎报 local**） |
+| `app/services/agent_service.py`（+118/−54） | `run_agent` 包 `trace_attrs` + **根 span**；`execute_node` 包 `tool:<名>` span + `metadata{tool_name, mcp_server_name, source}`（工具名提到 `try` 外先取） |
+| `app/services/retrieval_service.py`（+140/−103） | `retrieve` 包 `retrieval` **父 span**；`search` 包 `vector_search`；`search_keywords` 包 `bm25`（无 token 支也留痕）。⚠ 增量多为**缩进** |
+| `app/services/embedding_service.py`（+25/−3） | 只包 `embed_query`（`embed_texts` 不包 —— 入库路径不该算进检索）；**唯一能带 `model` 名**的一格 |
+| `app/services/rerank_service.py`（+86/−49） | 包 `rerank`，**三条降级路径都 `update(level="WARNING")`**（降级可归因） |
+
+**复跑**：`uv run python -m scripts.d28_verify`（默认不接 harness，秒级）／
+`uv run python -m scripts.d28_verify --with-harness`（跑验收②，走 npm 镜像）。
+**回归（2026-10-04）**：**260/260 全绿** —— `d21_delete_scope 27 + d21_eval 63 + d22 77 + d23_metrics 33 + d24_report 60`。
+
 ---
 
 ### 🔌 Harness 接入实测（**2026-10-01 22:40** —— 为「确保 D26/D27 不会卡在这」而做）
@@ -310,6 +329,27 @@ D25 那次是"离线探针"（一个临时脚本连上去看看）。今天的�
 
 ⏳ **仍未定性**（承接上文那条）：harness token 失效时是**启动就失败**还是要到 `tools/list` 才失败 ——
 今天**没测**（账号还有效），**不许当结论讲**。
+
+#### ✅ D28 补充实测（**2026-10-04 20:35**）—— harness 现在能**被"标注来源"**了
+
+D25/D27 证的是"接得上、看得见"。D28 的增量是：**harness 的每一次工具调用，在 Langfuse 上都能被认出来自 harness**（验收②）。
+命令：`uv run python -m scripts.d28_verify --with-harness`（汇总 **49/49**）。
+
+| 项 | 实测 |
+|---|---|
+| server 自报 / 协议 | `harness-mcp-server` **3.2.32**（⚠ **从 D27 记的 3.2.31 漂上来了** —— `-y harness-mcp-v2@latest` 会动版本）/ **`2025-11-25`** |
+| 工具数 | **11 个**（与 D25 / D27 一致） |
+| 连接耗时 | 秒级（包已在 npm 缓存；冷启动仍是分钟级） |
+| **验收②** | 真调 `harness_list`（无必填参 → 被调）→ span `tool:harness_list` 的 `metadata.source = harness`、`mcp_server_name = harness` |
+| 顺带印证 | `harness_list` 因缺参数返回**业务错误**（`resource_type is required`），**但 span 照建、标着 harness** —— 正好印证验收②**不要求"调用成功"**，只要"能指出这一次来自 harness" |
+| 只读 | `HARNESS_READ_ONLY=true` 由**服务端**屏蔽写操作（PAT 本身做不到只读，见上文 accountId 定案） |
+
+★ **两条从 D28 学到的、与 harness 相关的新东西**：
+
+1. **MCP 客户端自带埋点** —— 埋点树里会多出一格 `MCP send tools/call <工具名>`（mcp SDK 的 instrumented span）。
+   它和我们的 `tool:<名>` 是**父子**关系（SDK 那格是内部传输动作），**不是重复埋点** —— 别误当成"埋了两遍"。
+2. **PAT 会随账号到期失效** —— 🚩 **TRIAL 账号 `2026-10-06 07:59:59` 到期** → 届时验收②只能靠 `inventory` server 间接证明，
+   说服力掉一档；**D37（Dify 对照）也在它后面**，需在 10-05 前定方案。
 
 ### 📌 评测体系总纲（**跨日文档，没有 D 编号**）
 
@@ -466,6 +506,11 @@ D19 起工具层改走 `retrieve()`，默认配置 `hybrid_rerank`，**检索链
 | [`D27-MCP客户端接入链路.html`](D27-MCP客户端接入链路.html) §1（**当天写、当天改**） | 「路径 B 的全部价值，都建立在『**函数体不在我这个进程里**』这一件事上」 | **已改为**：支点是「**契约够窄**」—— `register` 只要"三样描述信息 + 一个可调用对象"，下游只认两个签名，且**从不检查**这个 callable 是真函数还是代理。"函数体在别处"是**结果**，不是理由 | 2026-10-04 D27（用户复述答错后自查发现，见 `D27-总结.md` §3.3 / §11.1 Q1-L2） |
 | [`D27-MCP客户端接入链路.html`](D27-MCP客户端接入链路.html) §5①（**当天写、当天改**） | 「本项目落在 Modern（`2026-07-28`）」 | **已收窄**：见上两行。图上原文**保留**并加了修正说明（不悄悄替换） | 同上 |
 | 「注册表里那个『服务挂了、替身就没了』的说法」（原理环节 Q1-L3 的常见答法） | 以为替身会随进程一起消失 | **不会**：`_registry` 是进程内内存字典，**没有回收逻辑**，键值对**原样留着** → 会留下"调不通的工具"，LLM 基于假前提规划、**全程不报错**。D27 为此新增 `unregister_source()` | 同上 |
+| **PRD §18 遗留待定 #5**：「`latency_p95` 的 span `name` 规范未统一」（建议 embedding / vector_search / bm25 / rerank / generation） | 一直是个**待定项** | **D28 已定下来**：`app/services/observability.py` 的 **6 个 `SPAN_*` 常量是唯一权威出处**（多了一个 `retrieval` 父 span，**超出** PRD 建议清单，理由见 `D28-总结.md` §7.1 末）；工具层用 `tool:<工具名>` 前缀与检索层分开 | 2026-10-04 D28 |
+| 各处对「一轮对话 = 一条 trace」的隐含假设（含 `D14-*.md` 的 `/api/chat` 生命周期） | 描述"一轮对话"时，Langfuse 上其实是**多条互不相干的 trace**（每个 generation 自成根） | **D28 起**：`run_agent` 套了**根 span**，一轮对话的检索 / 工具 / LLM 各层**全部落在同一条 trace**（实测 9 span / trace 数 = 1 / 根唯一）。⚠ 这是**行为改变**（埋点结构变了），但**用户可见的回答行为一字未变** | 同上 |
+| 「Langfuse 埋点要 `try/except` 兜住，别影响业务」 | 直觉 | **不需要** —— 实测空 key 时 SDK 只打印 `Client will be disabled` 告警、**照常返回 no-op span**，`start_as_current_observation` 与 `propagate_attributes` **都不抛异常**。加了 try/except 反而**藏起"埋点静默失效"** | 同上 |
+| 「用 `update_current_trace` 设 Langfuse 的 session / user」（网上大量教程的写法） | 多处文档 / 教程 | **本版本（langfuse 4.15.1）没有这个方法**；入口是**模块级** `langfuse.propagate_attributes`（`hasattr(Langfuse, ...)` 为 **False**，实例上没有）。且**顺序是硬约束**（放晚了根 span 拿不到 session，官方原文 "Pre-existing spans will NOT be retroactively updated"） | 同上 |
+| 「Langfuse 取数走 `/api/public/observations` 就行」 | `D28` 落地的读通道当前实现 | **v1 已被官方标记弃用**：响应带 `_deprecation`，原文 **"will be removed on November 16, 2026"**，且"may have data delays of several minutes"。🚩 **当前仍用 v1**（v2 **拿不到 token 用量**，而 token 是 F8.5 要的一半数据）→ **2026-11-16 前必须重估**，届时改走 `/api/public/v2/metrics`（是**聚合接口**不是明细接口，口径会变） | 同上 |
 
 ⚠️ **这条与上面各行的性质不同**：上面是「教程正文被后续改动覆盖」，这一条是
 「**验证脚本自身陈旧**」。两者在日志里长得一模一样（都是一条 FAIL），
