@@ -1,0 +1,28 @@
+* { box-sizing: border-box; }
+
+html, body, #root { min-height: 100%; }
+
+body {
+  margin: 0;
+  min-width: 1120px;
+  font-family: var(--af-font-sans);
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--af-text-primary);
+  background: var(--af-canvas);
+}
+
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: var(--af-accent); }
+:focus-visible { outline: 2px solid var(--af-accent); outline-offset: 1px; }
+.af-num { font-family: var(--af-font-mono); font-variant-numeric: tabular-nums; }
+.af-mono { font-family: var(--af-font-mono); }
+.af-muted { color: var(--af-text-tertiary); }
+.af-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ant-layout, .ant-layout-content { background: var(--af-canvas) !important; }
+.ant-card, .ant-table-wrapper, .ant-collapse { border-radius: var(--af-radius-container); }
+.ant-btn { box-shadow: none !important; }
+.ant-table-thead > tr > th { font-weight: 500 !important; }
+.ant-table-cell .af-num { display: inline-block; min-width: 4ch; text-align: right; }

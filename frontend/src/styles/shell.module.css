@@ -1,0 +1,49 @@
+.appShell { min-height: 100vh; }
+.sidebar { border-right: 1px solid var(--af-border-subtle); }
+.brandRow { display: flex; align-items: center; gap: 8px; height: 48px; padding: 8px; font-size: 15px; }
+.brandRow strong { flex: 1; font-weight: 500; white-space: nowrap; }
+.brandMark { width: 24px; height: 24px; display: grid; place-items: center; color: var(--af-accent); border: 1px solid var(--af-accent); border-radius: 4px; }
+.brandRow .ant-btn { margin-left: auto; }
+.navLabel { padding: 18px 9px 6px; color: var(--af-text-tertiary); font-size: 11px; }
+.mainNav { display: grid; gap: 2px; padding: 0 8px; }
+.navItem { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 9px; border: 0; border-radius: 4px; background: transparent; color: var(--af-text-secondary); text-align: left; }
+.navItem:hover { background: var(--af-sunken); color: var(--af-text-primary); }
+.navItem span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navActive { background: var(--af-accent-soft); color: var(--af-accent); font-weight: 500; }
+.history { margin-top: 25px; padding: 0 8px; }
+.historyHeader { padding: 0 9px 7px; color: var(--af-text-tertiary); font-size: 11px; }
+.session { display: flex; flex-direction: column; width: 100%; padding: 5px 8px 5px 8px; border: 0; border-left: 2px solid transparent; border-radius: 0 4px 4px 0; background: transparent; color: var(--af-text-secondary); text-align: left; }
+.session:hover { background: var(--af-sunken); }
+.session small { color: var(--af-text-tertiary); font-size: 10px; }
+.sessionActive { border-left-color: var(--af-accent); background: var(--af-sunken); color: var(--af-text-primary); }
+.historyEmpty { display: block; padding: 5px 9px; color: var(--af-text-tertiary); font-size: 11px; }
+.sidebarBottom { margin-top: auto; padding: 16px; color: var(--af-text-tertiary); font-size: 11px; }
+.environmentBadge { display: inline-block; padding: 2px 6px; border: 1px solid var(--af-border-default); border-radius: 4px; font-family: var(--af-font-mono); }
+.topbar { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--af-border-subtle); }
+.topbarLeft, .topbarRight { display: flex; align-items: center; gap: 10px; }
+.topbarTitle { font-weight: 500; }
+.topbarSlash { color: var(--af-text-disabled); }
+.modelSelect { width: 140px; }
+.pageContent { padding: 20px 24px; overflow: auto; }
+.pageHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+.pageHeader h1 { margin: 0; font-size: 20px; line-height: 28px; font-weight: 500; }
+.pageHeader p { margin: 2px 0 0; color: var(--af-text-secondary); }
+.status { display: inline-flex; align-items: center; gap: 6px; color: var(--af-text-secondary); font-size: 11px; white-space: nowrap; }
+.statusDot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status_success { background: var(--af-success); }
+.status_warning { background: var(--af-warning); }
+.status_danger { background: var(--af-danger); }
+.status_info { background: var(--af-info); }
+.status_muted { background: var(--af-text-tertiary); }
+.emptyState, .errorState { display: grid; justify-items: center; padding: 48px 20px; color: var(--af-text-secondary); }
+.emptyState .ant-empty { margin: 0; }
+.errorState { justify-items: start; align-content: center; gap: 6px; border: 1px solid var(--af-border-default); border-radius: 6px; color: var(--af-danger); }
+.inlineMeta { color: var(--af-text-tertiary); font-size: 11px; }
+.metricCard { min-height: 110px; }
+.metricLabel { color: var(--af-text-secondary); font-size: 11px; }
+.metricValue { color: var(--af-text-primary); font: 500 24px/30px var(--af-font-mono); font-variant-numeric: tabular-nums; }
+.metricSuffix { margin-left: 5px; color: var(--af-text-secondary); font: 400 12px/20px var(--af-font-sans); }
+.metricNote { margin-top: 3px; color: var(--af-text-tertiary); font-size: 10px; }
+.tableSkeleton { display: grid; gap: 6px; padding: 16px; border: 1px solid var(--af-border-subtle); border-radius: 6px; background: var(--af-surface); }
+.skeletonRow { display: grid; grid-template-columns: 1.4fr 1fr .7fr .7fr 1fr; gap: 12px; height: 24px; }
+.skeletonRow .ant-skeleton-input { width: 100%; min-width: 0; }
