@@ -35,20 +35,31 @@ export function latestByConfig<T extends Pick<EvalRunOut, 'id' | 'config_name'>>
 
 export interface PairedToolCall {
   name: string;
-  arguments: Record<string, unknown>;
-  result: string;
+  /**
+   * `null` = **数据源根本没给入参**（如 `POST /api/chat` 只回工具名），
+   * 与「入参是空对象 `{}`」是两件事，渲染时必须分开。
+   */
+  arguments: Record<string, unknown> | null;
+  /** `null` = **数据源没给返回摘要**（同上）。 */
+  result: string | null;
+  /** 只在 `result` 存在时可判定；`result` 为 `null` 时恒为 `false`（**未知 ≠ 成功**）。 */
   failed: boolean;
 }
 
-function parseArguments(payload: ToolCallPayload): Record<string, unknown> {
+/** 解析 `tool_calls[].function.arguments`（一个 JSON 字符串）。解析不出来返回 `null`（= 未知），不返回 `{}`。 */
+function parseArguments(payload: ToolCallPayload): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(payload.function.arguments || '{}');
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
-      : {};
+      : null;
   } catch {
-    return {};
+    return null;
   }
+}
+
+function isFailed(result: string): boolean {
+  return result.includes('执行失败') || result.includes('未知工具');
 }
 
 export function pairToolMessages(messages: MessageItem[]): PairedToolCall[] {
@@ -57,12 +68,13 @@ export function pairToolMessages(messages: MessageItem[]): PairedToolCall[] {
     const message = messages[index];
     if (message.role !== 'assistant' || !message.tool_calls?.length) continue;
     const resultMessage = messages.slice(index + 1).find((candidate) => candidate.role === 'tool');
-    const result = resultMessage?.content ?? '未返回结果';
+    // 找不到配对的 tool 消息 = 结果未知，落 null —— 不写「未返回结果」那种读起来像结论的文案
+    const result = resultMessage?.content ?? null;
     pairs.push(...message.tool_calls.map((call) => ({
       name: call.function.name,
       arguments: parseArguments(call),
       result,
-      failed: result.includes('执行失败') || result.includes('未知工具'),
+      failed: result != null && isFailed(result),
     })));
   }
   return pairs;

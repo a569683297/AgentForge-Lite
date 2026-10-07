@@ -35,4 +35,21 @@ describe('pairToolMessages', () => {
       { name: 'search_documents', arguments: { query: 'RAG' }, result: '命中 3 个片段', failed: false },
     ]);
   });
+
+  it('keeps result null (unknown) when no tool message follows, instead of claiming success', () => {
+    expect(pairToolMessages([
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'current_time', arguments: '{}' } }], created_at: '2026-01-01' },
+    ])).toEqual([
+      { name: 'current_time', arguments: {}, result: null, failed: false },
+    ]);
+  });
+
+  it('keeps arguments null (unknown) when the arguments string is not valid JSON', () => {
+    expect(pairToolMessages([
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'broken', arguments: '{not json' } }], created_at: '2026-01-01' },
+      { role: 'tool', content: '执行失败', tool_calls: null, created_at: '2026-01-01' },
+    ])).toEqual([
+      { name: 'broken', arguments: null, result: '执行失败', failed: true },
+    ]);
+  });
 });

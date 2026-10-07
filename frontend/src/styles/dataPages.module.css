@@ -80,3 +80,19 @@
 .caseDetail p { margin: 0; line-height: 21px; white-space: pre-wrap; }
 .caseDetail pre { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-radius: 4px; background: var(--af-sunken); font: 11px/17px var(--af-font-mono); white-space: pre-wrap; }
 .caseScore { display: flex; justify-content: space-between; padding: 9px 10px; border: 1px solid var(--af-border-subtle); border-radius: 4px; background: var(--af-canvas); }
+.previewModalTitle { display: inline-flex; align-items: center; gap: 8px; }
+.documentPreview { display: grid; gap: 16px; }
+.documentMeta :global(.ant-descriptions-item-content) { word-break: break-word; }
+.previewHeader { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; border-bottom: 1px solid var(--af-border-subtle); }
+.previewLoading { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 180px; color: var(--af-text-tertiary); }
+.previewSurface { max-height: 460px; overflow: auto; padding: 16px; border: 1px solid var(--af-border-subtle); border-radius: 4px; background: var(--af-sunken); }
+.previewSurface pre { margin: 0; color: var(--af-text-primary); font: 12px/20px var(--af-font-mono); white-space: pre-wrap; word-break: break-word; }
+.markdownSurface { color: var(--af-text-primary); background: var(--af-surface); font-size: 13px; line-height: 21px; }
+.markdownSurface h1, .markdownSurface h2, .markdownSurface h3 { margin: 0 0 10px; font-weight: 500; line-height: 1.4; }
+.markdownSurface h1 { font-size: 18px; }
+.markdownSurface h2 { font-size: 16px; }
+.markdownSurface h3 { font-size: 14px; }
+.markdownSurface p { margin: 0 0 10px; }
+.markdownSurface ul, .markdownSurface ol { padding-left: 20px; }
+.markdownSurface code { padding: 1px 4px; border-radius: 3px; background: var(--af-sunken); font-family: var(--af-font-mono); }
+.markdownSurface pre { margin: 10px 0; padding: 10px; border-radius: 4px; background: var(--af-sunken); overflow: auto; }

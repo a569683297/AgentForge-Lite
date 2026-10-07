@@ -52,7 +52,9 @@ export function ChatPage({ sessionId, onNewSession, onSessionChange, onOpenKnowl
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, loading]);
 
-  const toolCallFactory = useMemo(() => (names: string[]): PairedToolCall[] => names.map((name) => ({ name, arguments: {}, result: '本轮工具调用已完成；详细参数请从会话历史查看。', failed: false })), []);
+  // POST /api/chat 只回工具名（tool_calls: string[]），不返回入参与结果 → 一律落 null，
+  // 由 ToolCallCard 显式渲染「接口未返回」；这里**不编造**入参对象与结果文案。
+  const toolCallFactory = useMemo(() => (names: string[]): PairedToolCall[] => names.map((name) => ({ name, arguments: null, result: null, failed: false })), []);
 
   async function submit() {
     const message = input.trim();

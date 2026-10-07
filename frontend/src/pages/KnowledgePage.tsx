@@ -2,6 +2,7 @@ import { DeleteOutlined, FileTextOutlined, InboxOutlined, ReloadOutlined, Upload
 import { Button, Card, Input, Popconfirm, Select, Space, Table, Tag, message } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { deleteDocument, listDocuments, uploadDocument } from '../api/documents';
+import { DocumentPreviewModal } from '../components/DocumentPreviewModal';
 import { EmptyState, ErrorState } from '../components/EmptyState';
 import { PageHeader } from '../components/PageHeader';
 import { StatusDot, type StatusTone } from '../components/StatusDot';
@@ -22,6 +23,7 @@ export function KnowledgePage() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<'all' | DocumentOut['status']>('all');
+  const [selectedDocument, setSelectedDocument] = useState<DocumentOut | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function refresh() {
@@ -79,18 +81,19 @@ export function KnowledgePage() {
     { title: '状态', dataIndex: 'status', key: 'status', render: (value: DocumentOut['status']) => <StatusDot tone={statusMeta[value].tone} label={statusMeta[value].label} /> },
     { title: '切片数', dataIndex: 'chunk_count', key: 'chunk_count', align: 'right' as const, render: (value: number) => <span className="af-num">{value || '—'}</span> },
     { title: '上传时间', dataIndex: 'created_at', key: 'created_at', render: (value: string) => <span className="af-num">{formatDateTime(value)}</span> },
-    { title: '', key: 'action', width: 72, render: (_: unknown, record: DocumentOut) => <Popconfirm title="确认删除这份文档？" onConfirm={() => void handleDelete(record.id)}><Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label={`删除 ${record.filename}`} /></Popconfirm> },
+    { title: '', key: 'action', width: 72, render: (_: unknown, record: DocumentOut) => <span onClick={(event) => event.stopPropagation()}><Popconfirm title="确认删除这份文档？" onConfirm={() => void handleDelete(record.id)}><Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label={`删除 ${record.filename}`} /></Popconfirm></span> },
   ];
 
   return (
     <div>
       <PageHeader title="知识库" description="管理可检索文档与索引处理状态。" action={<><input ref={inputRef} type="file" hidden accept=".pdf,.docx,.md,.txt" onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); event.target.value = ''; }} /><Button type="primary" icon={<UploadOutlined />} onClick={() => inputRef.current?.click()}>上传文档</Button></>} />
       <div className={styles.statStrip}><span><strong className="af-num">{stats.total}</strong> 份文档</span><i /><span><strong className="af-num">{stats.ready}</strong> 已就绪</span><i /><span><strong className="af-num">{stats.processing}</strong> 处理中</span><i /><span><strong className="af-num">{stats.chunks}</strong> 个切片</span></div>
-      <Card className={styles.tableCard} bodyStyle={{ padding: 0 }}>
+      <Card className={styles.tableCard} styles={{ body: { padding: 0 } }}>
         <div className={styles.tableToolbar}><Input allowClear prefix={<InboxOutlined />} placeholder="搜索文件名" value={query} onChange={(event) => setQuery(event.target.value)} className={styles.searchBox} /><Select value={status} onChange={setStatus} options={[{ value: 'all', label: '全部状态' }, { value: 'ready', label: '已就绪' }, { value: 'processing', label: '处理中' }, { value: 'failed', label: '失败' }]} /></div>
-        {loading ? <TableSkeleton rows={5} columns={6} /> : error ? <div className={styles.panelPadding}><ErrorState message={error} action="重新加载" onAction={() => void refresh()} /></div> : !filtered.length ? <EmptyState message={documents.length ? '没有匹配的文档。' : '还没有文档，上传一份开始建立知识库。'} action={documents.length ? undefined : '上传文档'} onAction={documents.length ? undefined : () => inputRef.current?.click()} /> : <Table rowKey="id" size="middle" pagination={false} dataSource={filtered} columns={columns} />}
+        {loading ? <TableSkeleton rows={5} columns={6} /> : error ? <div className={styles.panelPadding}><ErrorState message={error} action="重新加载" onAction={() => void refresh()} /></div> : !filtered.length ? <EmptyState message={documents.length ? '没有匹配的文档。' : '还没有文档，上传一份开始建立知识库。'} action={documents.length ? undefined : '上传文档'} onAction={documents.length ? undefined : () => inputRef.current?.click()} /> : <Table rowKey="id" size="middle" pagination={false} dataSource={filtered} columns={columns} onRow={(record) => ({ onClick: () => setSelectedDocument(record), style: { cursor: 'pointer' } })} />}
       </Card>
       <div className={styles.footnote}><ReloadOutlined /> 共 <span className="af-num">{stats.total}</span> 份文档 · 已就绪 <span className="af-num">{stats.ready}</span> · 处理中 <span className="af-num">{stats.processing}</span> · 共 <span className="af-num">{stats.chunks}</span> 个切片</div>
+      <DocumentPreviewModal document={selectedDocument} open={Boolean(selectedDocument)} onClose={() => setSelectedDocument(null)} />
     </div>
   );
 }

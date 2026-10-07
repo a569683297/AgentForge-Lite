@@ -26,6 +26,7 @@
 .toolResult { margin-left: auto; color: var(--af-text-tertiary); }
 .toolDetail { display: grid; grid-template-columns: 54px 1fr; gap: 5px 8px; padding: 8px; border-top: 1px solid var(--af-border-subtle); font-size: 11px; }
 .toolDetail code { overflow: auto; padding: 6px; border-radius: 4px; background: var(--af-sunken); font-family: var(--af-font-mono); white-space: pre-wrap; }
+.toolMissing { padding: 6px; color: var(--af-text-tertiary); }
 .thinking { padding: 0 0 12px; }
 .chatEmpty { padding: 48px 0; color: var(--af-text-tertiary); text-align: center; }
 .citationContent { display: grid; gap: 14px; }

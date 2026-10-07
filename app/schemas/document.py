@@ -32,3 +32,18 @@ class DocumentOut(BaseModel):
     chunk_count: int = Field(description="切片数（ready 后才有意义）")
     error_message: str | None = Field(default=None, description="失败原因（status=failed 时）")
     created_at: datetime = Field(description="上传时间")
+
+
+class DocumentChunkPreviewOut(BaseModel):
+    """供知识库详情弹窗展示的已解析文本切片。"""
+
+    chunk_index: int = Field(description="文档内切片序号")
+    content: str = Field(description="已解析的切片文本")
+    page_ref: str | None = Field(default=None, description="PDF 页码，如 p.3")
+
+
+class DocumentPreviewOut(BaseModel):
+    """文档元数据与已入库文本的预览出口。"""
+
+    document: DocumentOut
+    chunks: list[DocumentChunkPreviewOut]

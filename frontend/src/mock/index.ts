@@ -1,9 +1,22 @@
 import type { MetricPoint } from '../components/MetricChart';
 
+/**
+ * 注意：本文件是**全站唯一的 mock 出口**（`IMPL-SPEC.md` §6.3 的要求：无数据源的页面集中 mock，不得虚构接口）。
+ *
+ * 本文件里的三块数据分别等三个**尚不存在**的后端出口：
+ *   · `MOCK_TRACES`            —— Trace 页：**后端完全没有 trace 查询接口**（span 在 Langfuse，无 REST 出口）
+ *   · `MOCK_RETRIEVAL`         —— 检索检查器：现在只有 `retrieved_chunks: str`（**一段字符串**，无名次 / 无 logit / 无 gold）
+ *   · `MOCK_METRICS` / `MOCK_ANALYTICS_SUMMARY` —— 分析页：`GET /api/metrics` 属 **D35 语义层**
+ *
+ * 规矩：mock **可以**是编的数字，但**命名与形状必须照抄真实口径** —— 否则接真数据时形状对不上，
+ * 而且演示时会说出错的名字（比"数字是假的"更容易穿帮）。
+ */
+
 export interface MockSpan {
   id: string;
   name: string;
-  type: 'agent' | 'retrieval' | 'embedding' | 'rerank' | 'tool' | 'llm';
+  /** 取自 D28 真实埋点里的 `as_type`（见 `app/services/observability.py`）。 */
+  type: 'agent' | 'generation' | 'tool' | 'retriever' | 'embedding';
   start_ms: number;
   end_ms: number;
   depth: number;
@@ -21,27 +34,46 @@ export interface MockTrace {
   spans: MockSpan[];
 }
 
-/** 等后端暴露 trace 查询接口（当前 Langfuse 数据无 REST 出口）。 */
+/**
+ * Trace 页示例数据 —— **span 名与父子形状照抄 D28 的真实埋点**。
+ *
+ * 真实口径 = `app/services/observability.py` 的 6 个 `SPAN_*` 常量 + `tool_span_name()`：
+ *
+ *     run_agent                 ← 根，一整轮对话（as_type=agent，带 session_id）
+ *     ├─ agent-plan             ← generation（llm_gateway 建的）
+ *     ├─ tool:search_documents  ← tool，metadata.source = "local"
+ *     │   └─ retrieval          ← retriever 父（**嵌套计时**：它的耗时包含子段）
+ *     │       ├─ vector_search  ← retriever
+ *     │       │   └─ embedding  ← embedding（只有它能带 model 名）
+ *     │       ├─ bm25           ← retriever
+ *     │       └─ rerank         ← retriever
+ *     ├─ tool:harness_list / tool:harness_get / tool:current_time
+ *     └─ agent-answer           ← generation
+ *
+ * 四处最容易写错的地方（原示例数据就写错了四处）：
+ *   ① 向量那格叫 `vector_search`（下划线），**不是** `vector-search`；
+ *   ② BM25 那格就叫 `bm25`，**不是** `bm25-search`；
+ *   ③ 重排那格叫 `rerank`，**不是** `bge-reranker`（模型名 ≠ span 名）；
+ *   ④ 工具那格带 **`tool:` 前缀**（`tool_span_name()` 加的），**不是**光秃秃的工具名。
+ */
 export const MOCK_TRACES: MockTrace[] = [{
   trace_id: 'tr_20261007_8f31',
   name: '为什么混合检索优于纯向量？',
   created_at: '2026-10-07T10:24:16+08:00',
   total_ms: 842,
   spans: [
-    { id: 'sp-01', name: 'agent-plan', type: 'agent', start_ms: 0, end_ms: 54, depth: 0, status: 'ok', input: '用户问题', output: '需要查询知识库', tokens: 382 },
-    { id: 'sp-02', name: 'search_documents', type: 'tool', start_ms: 62, end_ms: 138, depth: 1, status: 'ok', input: '{"query":"混合检索"}', output: '命中 8 个片段', tokens: 0 },
-    { id: 'sp-03', name: 'embedding', type: 'embedding', start_ms: 67, end_ms: 111, depth: 2, status: 'ok', input: '查询文本', output: '向量维度 768', tokens: 0 },
-    { id: 'sp-04', name: 'vector-search', type: 'retrieval', start_ms: 114, end_ms: 182, depth: 2, status: 'ok', input: 'top_k=20', output: '候选 20 条', tokens: 0 },
-    { id: 'sp-05', name: 'bm25-search', type: 'retrieval', start_ms: 118, end_ms: 205, depth: 2, status: 'ok', input: 'query terms=2', output: '候选 20 条', tokens: 0 },
-    { id: 'sp-06', name: 'rrf-fusion', type: 'retrieval', start_ms: 212, end_ms: 238, depth: 2, status: 'ok', input: 'k=60', output: '融合 26 条', tokens: 0 },
-    { id: 'sp-07', name: 'bge-reranker', type: 'rerank', start_ms: 246, end_ms: 386, depth: 2, status: 'ok', input: '候选 20 条', output: '重排 top-5', tokens: 0 },
-    { id: 'sp-08', name: 'agent-answer', type: 'llm', start_ms: 402, end_ms: 690, depth: 1, status: 'ok', input: '工具结果 + 历史上下文', output: '生成带引用回答', tokens: 1_284 },
-    { id: 'sp-09', name: 'citation-check', type: 'agent', start_ms: 698, end_ms: 731, depth: 1, status: 'ok', input: '回答中的 [n]', output: '引用 3 条，合法', tokens: 0 },
-    { id: 'sp-10', name: 'trace-flush', type: 'agent', start_ms: 738, end_ms: 754, depth: 1, status: 'ok', input: 'observation spans', output: '已写入 Langfuse', tokens: 0 },
-    { id: 'sp-11', name: 'summary-write', type: 'agent', start_ms: 760, end_ms: 778, depth: 1, status: 'ok', input: '会话摘要', output: '已写入 PG', tokens: 0 },
-    { id: 'sp-12', name: 'response-serialize', type: 'agent', start_ms: 782, end_ms: 801, depth: 1, status: 'ok', input: 'ChatResponse', output: 'JSON', tokens: 0 },
-    { id: 'sp-13', name: 'http-send', type: 'agent', start_ms: 805, end_ms: 825, depth: 1, status: 'ok', input: 'JSON body', output: '200 OK', tokens: 0 },
-    { id: 'sp-14', name: 'client-render', type: 'agent', start_ms: 828, end_ms: 842, depth: 1, status: 'ok', input: 'response', output: '消息列表更新', tokens: 0 },
+    { id: 'sp-01', name: 'run_agent', type: 'agent', start_ms: 0, end_ms: 842, depth: 0, status: 'ok', input: '为什么混合检索优于纯向量？', output: '带引用的回答（3 条来源）', tokens: 0 },
+    { id: 'sp-02', name: 'agent-plan', type: 'generation', start_ms: 0, end_ms: 54, depth: 1, status: 'ok', input: '用户问题 + 系统提示', output: '决定调用 search_documents', tokens: 382 },
+    { id: 'sp-03', name: 'tool:search_documents', type: 'tool', start_ms: 62, end_ms: 470, depth: 1, status: 'ok', input: '{"query":"混合检索优于纯向量"}', output: '命中 20 个片段 → 重排后 5 条', tokens: 0 },
+    { id: 'sp-04', name: 'retrieval', type: 'retriever', start_ms: 66, end_ms: 462, depth: 2, status: 'ok', input: '{"query":"混合检索优于纯向量","config":"hybrid_rerank","top_k":5}', output: '实走 vector_search + bm25 + rerank', tokens: 0 },
+    { id: 'sp-05', name: 'vector_search', type: 'retriever', start_ms: 70, end_ms: 186, depth: 3, status: 'ok', input: '{"query":"混合检索优于纯向量","top_k":20}', output: '候选 20 条', tokens: 0 },
+    { id: 'sp-06', name: 'embedding', type: 'embedding', start_ms: 72, end_ms: 112, depth: 4, status: 'ok', input: '查询文本', output: '向量维度 768（model=bge-m3）', tokens: 0 },
+    { id: 'sp-07', name: 'bm25', type: 'retriever', start_ms: 74, end_ms: 205, depth: 3, status: 'ok', input: '{"query":"混合检索优于纯向量","top_k":20}', output: '候选 20 条（tsvector + 自算 BM25）', tokens: 0 },
+    { id: 'sp-08', name: 'rerank', type: 'retriever', start_ms: 214, end_ms: 448, depth: 3, status: 'ok', input: '{"candidates":26,"top_n":5}', output: '精排后 top-5', tokens: 0 },
+    { id: 'sp-09', name: 'tool:harness_list', type: 'tool', start_ms: 482, end_ms: 528, depth: 1, status: 'ok', input: '{"account":"…"}', output: '返回 6 条 pipeline', tokens: 0 },
+    { id: 'sp-10', name: 'tool:harness_get', type: 'tool', start_ms: 534, end_ms: 596, depth: 1, status: 'ok', input: '{"pipeline_id":"…"}', output: '返回 pipeline 详情', tokens: 0 },
+    { id: 'sp-11', name: 'tool:current_time', type: 'tool', start_ms: 602, end_ms: 610, depth: 1, status: 'ok', input: '{}', output: '2026-10-07T10:24:16+08:00', tokens: 0 },
+    { id: 'sp-12', name: 'agent-answer', type: 'generation', start_ms: 622, end_ms: 842, depth: 1, status: 'ok', input: '工具结果 + 检索片段 + 历史上下文', output: '生成带 [1][2][3] 引用的回答', tokens: 1_284 },
   ],
 }];
 
@@ -53,20 +85,31 @@ export interface MockRetrievalRow {
   is_gold: boolean;
 }
 
-/** 等后端返回结构化检索片段（当前只有 retrieved_chunks 一段字符串）。 */
+/**
+ * 检索检查器示例数据 —— 等后端返回**结构化**检索片段
+ * （现在 `EvalCaseResultDetailOut.retrieved_chunks` 只有一段字符串，没有名次 / logit / gold 命中）。
+ *
+ * 注意：`doc` 用的是 `docs/tutorials/` 里**真实存在**的教程文件名（2026-10-07 核对过），
+ * 换掉原示例里三个不存在的文件名 —— 这一页是把片段名摆给用户看的，名字编造等于误导。
+ */
 export const MOCK_RETRIEVAL: MockRetrievalRow[] = Array.from({ length: 20 }, (_, index) => {
   const order = [3, 1, 8, 2, 5];
   const rankAfter = order.indexOf(index + 1);
   return {
     rank_before: index + 1,
     rank_after: rankAfter >= 0 ? rankAfter + 1 : null,
-    doc: ['D17-RRF混合检索.md', 'D19-重排落地.md', 'D13-BM25与tsvector.md', 'PRD-v4.1.md'][index % 4],
+    doc: [
+      'D17-RRF混合检索.md',
+      'D19-重排落地与检索配置化.md',
+      'D13-BM25与tsvector原理.md',
+      'D18-重排原理与bge-reranker.md',
+    ][index % 4],
     score_logit: Number((1.92 - index * 0.071).toFixed(3)),
     is_gold: index === 1 || index === 7,
   };
 });
 
-/** 等 D35 的 GET /api/metrics（语义层）。 */
+/** 等后端 `GET /api/metrics`（属 **D35 语义层**）：分析页的曲线。 */
 export const MOCK_METRICS: Array<{ metric: string; dimension: string; points: MetricPoint[] }> = [{
   metric: 'agent_latency',
   dimension: 'daily',
@@ -77,7 +120,13 @@ export const MOCK_METRICS: Array<{ metric: string; dimension: string; points: Me
   ],
 }];
 
-/** 等后端 GET /api/metrics：分析页汇总卡与热门工具。 */
+/**
+ * 等后端 `GET /api/metrics`（属 **D35 语义层**）：分析页汇总卡与热门工具。
+ *
+ * 注意：四个工具名取自本机 `GET /api/tools` 的**真实** `tools[].name`
+ * （2026-10-07 实测：registry 共 14 个工具，harness 侧为本项目自己封装的 `harness_*`），
+ * 让示例数据至少与真实命名空间一致；**`count` 全是编的，不可当实测值引用**。
+ */
 export const MOCK_ANALYTICS_SUMMARY = {
   totalRequests: 1284,
   averageLatencyMs: 642,
@@ -85,7 +134,7 @@ export const MOCK_ANALYTICS_SUMMARY = {
   successRate: '98.4%',
   popularTools: [
     { name: 'search_documents', count: 72 },
-    { name: 'harness__list_pipelines', count: 46 },
+    { name: 'harness_list', count: 46 },
     { name: 'current_time', count: 24 },
     { name: 'inventory_query_inventory', count: 18 },
   ],

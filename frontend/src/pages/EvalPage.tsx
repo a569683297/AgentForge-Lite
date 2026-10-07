@@ -69,15 +69,15 @@ export function EvalPage() {
           <MetricCard label="完整性" value={formatScore(detail?.score_completeness)} note={`明细总行数 ${detail?.rows ?? '—'}`} />
         </div>
         <div className={styles.splitGrid}>
-          <Card className={styles.panel} bodyStyle={{ padding: 0 }} title={<span>分类聚合</span>}>
+          <Card className={styles.panel} styles={{ body: { padding: 0 } }} title={<span>分类聚合</span>}>
             <Table size="small" pagination={false} rowKey="category" dataSource={categories} columns={[{ title: '类别', dataIndex: 'category' }, { title: '题数', dataIndex: 'cases', align: 'right', render: (value: number) => <span className="af-num">{value}</span> }, { title: '明细行数', dataIndex: 'rows', align: 'right', render: (value: number) => <span className="af-num">{value}</span> }, { title: '通过行数', dataIndex: 'passed_rows', align: 'right', render: (value: number) => <span className="af-num">{value}</span> }, { title: '正确 / 忠实 / 完整', key: 'scores', align: 'right', render: (_: unknown, row) => <span className="af-num">{formatScore(row.avg_correctness)} / {formatScore(row.avg_faithfulness)} / {formatScore(row.avg_completeness)}</span> }]} />
             <div className={styles.panelNote}>工具题只看工具调用，不送 judge 判内容，因此三维分数显示为 —。</div>
           </Card>
-          <Card className={styles.panel} bodyStyle={{ padding: 0 }} title={<span>失败模式</span>}>
+          <Card className={styles.panel} styles={{ body: { padding: 0 } }} title={<span>失败模式</span>}>
             <div className={styles.failureList}>{Object.entries(detail?.failure_breakdown ?? {}).map(([name, count]) => <div className={styles.failureRow} key={name}><span>{name}</span><div className={styles.failureBar}><span style={{ width: `${(count / maxFailure) * 100}%` }} /></div><span className="af-num">{count}</span></div>)}{!Object.keys(detail?.failure_breakdown ?? {}).length ? <div className={styles.panelPadding}>当前运行没有失败记录。</div> : null}</div>
           </Card>
         </div>
-        <Card className={`${styles.panel} ${styles.casesPanel}`} bodyStyle={{ padding: 0 }} title={<div className={styles.filterRow}><span>逐题明细</span><Select allowClear placeholder="全部类别" value={category} onChange={setCategory} options={[{ value: 'doc_qa', label: '文档问答' }, { value: 'cross_doc', label: '跨文档' }, { value: 'tool_call', label: '工具调用' }]} /><Select allowClear placeholder="全部结果" value={passed == null ? undefined : passed ? 'passed' : 'failed'} onChange={(value) => setPassed(value == null ? undefined : value === 'passed')} options={[{ value: 'passed', label: '通过' }, { value: 'failed', label: '失败' }]} /></div>}>
+        <Card className={`${styles.panel} ${styles.casesPanel}`} styles={{ body: { padding: 0 } }} title={<div className={styles.filterRow}><span>逐题明细</span><Select allowClear placeholder="全部类别" value={category} onChange={setCategory} options={[{ value: 'doc_qa', label: '文档问答' }, { value: 'cross_doc', label: '跨文档' }, { value: 'tool_call', label: '工具调用' }]} /><Select allowClear placeholder="全部结果" value={passed == null ? undefined : passed ? 'passed' : 'failed'} onChange={(value) => setPassed(value == null ? undefined : value === 'passed')} options={[{ value: 'passed', label: '通过' }, { value: 'failed', label: '失败' }]} /></div>}>
           <Table size="small" pagination={{ pageSize: 15, size: 'small' }} rowKey="id" dataSource={cases} columns={caseColumns} />
         </Card>
         <Modal open={Boolean(selectedCase)} onCancel={() => setSelectedCase(null)} footer={null} title={selectedCase ? `${selectedCase.case_key} · ${selectedCase.failure_reason_label || '结果详情'}` : '结果详情'} width={720}>

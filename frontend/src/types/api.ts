@@ -30,6 +30,17 @@ export interface DocumentOut {
   created_at: string;
 }
 
+export interface DocumentChunkPreview {
+  chunk_index: number;
+  content: string;
+  page_ref: string | null;
+}
+
+export interface DocumentPreviewOut {
+  document: DocumentOut;
+  chunks: DocumentChunkPreview[];
+}
+
 export interface SessionItem {
   id: string;
   title: string;

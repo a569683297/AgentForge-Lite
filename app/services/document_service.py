@@ -208,6 +208,21 @@ async def get_document(document_id: uuid.UUID) -> Document | None:
         return await session.get(Document, document_id)
 
 
+async def get_document_preview(document_id: uuid.UUID) -> tuple[Document | None, list[DocumentChunk]]:
+    """读取文档元数据与按原始顺序排列的已解析切片。"""
+    async with async_session_factory() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            return None, []
+        stmt = (
+            select(DocumentChunk)
+            .where(DocumentChunk.document_id == document_id)
+            .order_by(DocumentChunk.chunk_index.asc())
+        )
+        chunks = list((await session.scalars(stmt)).all())
+        return document, chunks
+
+
 async def count_documents() -> int:
     """文档总数（health / 列表分页用）。"""
     async with async_session_factory() as session:

@@ -13,7 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Response, UploadFile, status
 
 from app.core.logging import logger
-from app.schemas.document import DocumentOut
+from app.schemas.document import DocumentOut, DocumentPreviewOut
 from app.services import document_service
 from app.services.document_parser import check_upload
 
@@ -72,6 +72,25 @@ async def list_documents(
     """按上传时间倒序列出文档；前端靠它轮询 processing → ready/failed 的变化。"""
     documents = await document_service.list_documents(limit=limit, offset=offset)
     return [DocumentOut.model_validate(doc) for doc in documents]
+
+
+@router.get("/documents/{document_id}/preview", response_model=DocumentPreviewOut, summary="文档详情与文本预览")
+async def preview_document(document_id: UUID) -> DocumentPreviewOut:
+    """返回文档元数据和已解析切片；不暴露原始文件或任何凭据。"""
+    document, chunks = await document_service.get_document_preview(document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+    return DocumentPreviewOut(
+        document=DocumentOut.model_validate(document),
+        chunks=[
+            {
+                "chunk_index": chunk.chunk_index,
+                "content": chunk.content,
+                "page_ref": chunk.page_ref,
+            }
+            for chunk in chunks
+        ],
+    )
 
 
 @router.delete(

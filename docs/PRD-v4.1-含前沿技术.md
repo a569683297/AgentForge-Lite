@@ -666,7 +666,10 @@ AgentForge-Lite/
 │   │   │   ├── ChatPage.tsx     # 对话页（流式/引用高亮/工具卡片）
 │   │   │   ├── KnowledgePage.tsx# 知识库管理
 │   │   │   ├── EvalPage.tsx     # 评测报告（含对照报告）
-│   │   │   └── AnalyticsPage.tsx 🆕 # ★ 分析页（ECharts）
+│   │   │   ├── AnalyticsPage.tsx 🆕 # ★ 分析页（ECharts）
+│   │   │   ├── ToolsPage.tsx     📌 # MCP 工具注册表
+│   │   │   ├── TracePage.tsx     📌 # ★ Trace 时间线（自绘瀑布图）
+│   │   │   └── RetrieverPage.tsx 📌 # RAG 检索检查器（重排前后并排）
 │   │   ├── components/
 │   │   │   ├── MessageList.tsx
 │   │   │   ├── Citation.tsx     # 引用高亮组件
@@ -700,6 +703,13 @@ AgentForge-Lite/
 ├── requirements.txt            # 🆕 显式依赖清单
 └── README.md
 ```
+
+> 📌 **2026-10-07 补注（前端 M6 = D29–D33 已落地）**：上面前端树是**目标草图**，实际实现有两处出入，均已登记：
+> ① `pages/` 由 **4 页扩为 7 页** —— 补入上面标 📌 的 `ToolsPage.tsx` / `TracePage.tsx` / `RetrieverPage.tsx`
+> （**页面集 7 页**由 `docs/frontend/DESIGN.md` §8 定义，代码见 `frontend/src/components/AppShell.tsx` 的 `navItems`）；
+> ② `components/` 实际多了布局与通用件（`AppShell.tsx` / `PageHeader.tsx` / `StatusDot.tsx` / `EmptyState.tsx` /
+> `Skeleton.tsx` / `MetricCard.tsx`），且 `Citation.tsx` 实际叫 `CitationDrawer.tsx`、`ChatInput.tsx` 未单独立文件。
+> **完整实际结构以 `docs/frontend/IMPL-SPEC.md` 与 `frontend/src/` 为准，本节不再逐件同步。**
 
 ### 8.4 技术选型与理由 — v4.0 补充
 
