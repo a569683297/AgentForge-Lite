@@ -1,11 +1,36 @@
 # ============================================================
-# AgentForge docker-compose（草稿）
-# 阶段1 目标：pgvector + redis + langfuse + api + web 一键起
-# D1 只定义基础设施（pg/redis），api/web 在 D24/D32 补充
-# 使用：docker compose up -d db redis
+# AgentForge docker-compose —— 一键起（D34 补全）
+# ============================================================
+# 目标：`docker compose up -d` 一条命令起齐 pgvector + redis + api + web
+#
+# ⚠ 与 PRD F10.1 的一处**有意偏差**（已登记，不是疏漏）：
+#    PRD 原写「pgvector + redis + langfuse + api + web」五服务，
+#    但本项目 **Langfuse 走 Cloud**（D5 起接入，见 app/config.py 的 langfuse_host），
+#    自托管要多一整套 pg + clickhouse，收益为零 → 故本文件**不含 langfuse**。
+#
+# 使用：
+#   docker compose up -d            # 起全部（db/redis 已在跑则直接复用，不会重建）
+#   docker compose up -d db redis   # 只起基础设施（本机跑 uvicorn 开发时用这个）
+#   docker compose ps               # 看状态与健康
+#   docker compose logs -f api      # 跟 api 日志
+#   docker compose down             # 停（数据在 pgdata 卷里，不丢）
+#
+# ★ 容器里的地址规则（今天最容易翻车的一处）：
+#   容器**不是**你的 mac。容器里的 `localhost` = **容器自己**，
+#   所以容器之间互访一律用**服务名**（db / redis / api / web）——
+#   由 compose 自动建的 `agentforge-lite_default` 网络负责把服务名解析成 IP。
+#   落到本项目，就是下面 api 的 `POSTGRES_HOST: db` / `REDIS_HOST: redis` 两行。
 # ============================================================
 
+# 固定项目名。不写的话项目名由**目录名**推导 —— 一旦改了目录名，
+# compose 会认为"这是个新项目" → 重建一整套容器 → 撞端口。
+name: agentforge-lite
+
 services:
+  # ---------- 基础设施（D1 起就在跑，本次**刻意不动**）----------
+  # ★ 为什么不给它们加 restart 策略：加了就等于改了配置，
+  #   `compose up` 会判定"需要一个新容器" → **重建** db/redis。
+  #   为省一次无谓的数据库重启，本次保持原样（要加就单独一次提交）。
   db:
     image: pgvector/pgvector:pg16
     container_name: agentforge-db
@@ -34,13 +59,87 @@ services:
       timeout: 3s
       retries: 5
 
-  # ---- 以下为占位，后续里程碑补充 ----
-  # langfuse:      # D4 起
-  #   image: langfuse/langfuse:latest
-  # api:           # D24 起（本地构建）
-  #   build: .
-  # web:           # D32 起（node 构建 + nginx）
-  #   build: ./frontend
+  # ---------- 应用（D34 新增）----------
+  api:
+    build:
+      context: .              # 上下文 = 项目根（Dockerfile 要拷 app/ scripts/ uv.lock）
+      dockerfile: Dockerfile
+    image: agentforge-api:local
+    container_name: agentforge-api
+
+    # 密钥（LLM key / Langfuse key / Harness PAT）从 .env 注入，**绝不进镜像**。
+    # app/config.py 的 Settings 直接读环境变量，且**环境变量优先级高于 .env 文件**，
+    # 因此下面 environment 里的覆盖一定生效（这正是我们要的：地址按环境换）。
+    env_file:
+      - .env
+
+    environment:
+      # ★ 容器内必须写服务名，不能写 localhost（理由见文件头）
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-agentforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentforge_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-agentforge}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # ★ api 镜像里**没有 Node**，`npx harness-mcp-v2` 起不来 → 容器内强制关掉。
+      #   Harness 相关（scripts/warmup_mcp.py、@pytest.mark.external 用例）在**宿主机**跑。
+      MCP_HARNESS_ENABLED: "false"
+
+    ports:
+      - "18000:8000"          # 宿主 18000 → 容器 8000（避本机 uvicorn dev 占用的 8000）
+
+    volumes:
+      # ★ 复用宿主机已下好的 1.1 GB 本地模型（embedding + rerank），不塞进镜像。
+      #   不挂的话容器首次调用会去 HuggingFace 重新下载 —— 国内直连不通，
+      #   还得另配 HF_ENDPOINT 镜像（见 app/config.py:78 的注释）。
+      #   容器内路径必须是 /app/models：代码里 MODEL_CACHE_DIR = 项目根/models
+      #   （app/services/embedding_service.py:37）。
+      #   ⚠ 别和 `app/models/`（ORM 包，容器内是 /app/app/models）搞混 —— 是两回事。
+      - ./models:/app/models
+
+    depends_on:
+      db:
+        condition: service_healthy     # "起了" ≠ "能用了"，等 pg_isready 通过再启动
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      # slim 镜像里没有 curl，用镜像自带的 python 打 /api/health
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s       # 启动只做 Redis 自检 + MCP 接入（不加载模型），给足冷启动余量即可
+
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend     # 只用前端目录当上下文；多阶段构建见 frontend/Dockerfile
+      dockerfile: Dockerfile
+    image: agentforge-web:local
+    container_name: agentforge-web
+
+    ports:
+      - "8080:80"             # 宿主 8080 → 容器 80（避本地 Dify 占用的 80）
+    depends_on:
+      api:
+        condition: service_healthy
+
+    healthcheck:
+      # nginx:alpine 基于 busybox，有 wget 没 curl
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    restart: unless-stopped
 
 volumes:
   pgdata:

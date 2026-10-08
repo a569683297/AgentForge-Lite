@@ -20,6 +20,10 @@ frontend/.vite/
 data/uploads/
 *.log
 
+# ===== 本地产物 =====
+# Makefile 的落盘日志（`make warmup` / `make verify`）—— 前导 / 锚定仓库根
+/logs/
+
 # ===== IDE / 系统 =====
 .idea/
 .vscode/

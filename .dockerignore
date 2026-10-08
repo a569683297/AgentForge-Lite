@@ -1,0 +1,52 @@
+# ============================================================
+# 构建上下文排除清单（D34）
+# ============================================================
+# ★ 先分清两个长得像、作用完全不同的文件：
+#     .gitignore    管「哪些文件不进 git」
+#     .dockerignore 管「哪些文件不进 docker build 的**上下文**」
+#   它们是**两套独立机制**，互不搭界 ——
+#   `.env` 被 .gitignore 挡在 git 外面，**但不写进 .dockerignore 就会被 docker build
+#   拷进镜像**。这是很多人第一次做 Docker 就泄密的经典路径。
+#
+# 另一个作用：docker build 会先把整个上下文打包发给 Docker 守护进程。
+#   node_modules / .venv / models 加起来上 GB → 不排除的话每次构建都先传几 GB。
+# ============================================================
+
+# ---- 1. 密钥（最要紧的一条）----
+.env
+
+# ---- 2. Python 本机环境与缓存 ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- 3. ★ 1.1 GB 本地模型缓存：绝不进镜像 ----
+#     改用 docker-compose 的 bind mount 复用它（容器内路径 /app/models）。
+#     注意这里锚定仓库根（前导 /）：写 `models/` 会连 `app/models/`（ORM 包）一起排除！
+#     —— .gitignore 里为同一个坑已经踩过一次（见该文件末尾的注释）。
+/models/
+
+# ---- 4. 前端：有自己的 Dockerfile，不归 api 镜像 ----
+#     node_modules 尤其要排掉（188 个包）
+frontend/
+
+# ---- 5. Docker 自身与版本控制 ----
+.git/
+.gitignore
+.DS_Store
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# ============================================================
+# 刻意**不排除**的：docs/ · data/ · tests/
+# 理由：容器内要能跑项目自带的脚本（`uv run python -m scripts.xxx` 里有些会读
+#   docs/ 下的评测集与样例文档）。这几项体积很小，
+#   为了省几 MB 而让某个脚本在容器里静默跑不了，不划算。
+#   → 若将来要出"最小生产镜像"，再回来把它们和 dev 依赖一起摘掉。
+# ============================================================

@@ -84,6 +84,31 @@ app = FastAPI(
 )
 
 
+# ---- 输入边界：路径里出现 NUL 字节（%00）直接 400 ----
+@app.middleware("http")
+async def reject_nul_byte_in_path(request: Request, call_next):
+    """
+    请求路径含 NUL 字节时直接 400，**不让它走到下游**。
+
+    为什么必须在这里拦：NUL 不是合法的 UTF-8 文本，PostgreSQL 会抛
+        asyncpg.exceptions.CharacterNotInRepertoireError:
+        invalid byte sequence for encoding "UTF8": 0x00
+    参数化查询**救不了**它 —— 这不是 SQL 注入（值没有被拼进 SQL），
+    而是"这个字符本身就非法"。不拦的话它会以 **500** 的形式冒出来，
+    把一个"用户输入问题"伪装成"服务端故障"，污染错误监控。
+
+    查两处是因为它们**不一定相同**：
+      · `request.url.path` 是 Starlette 解码后的路径
+      · `scope["raw_path"]` 是**原始未解码**的字节串
+    只查前者，某些百分号编码写法（如 `%2500`）会漏过去。
+    （本用例由 tests/security/test_injection.py 发现 —— 测试驱动出来的修复。）
+    """
+    if "\x00" in request.url.path or b"%00" in request.scope.get("raw_path", b"").lower():
+        logger.warning("拒绝含 NUL 字节的请求路径 path=%r", request.url.path)
+        return JSONResponse(status_code=400, content={"detail": "请求路径含非法字符"})
+    return await call_next(request)
+
+
 # ---- 全局异常处理：统一返回 JSON 错误，避免裸堆栈泄露 ----
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):

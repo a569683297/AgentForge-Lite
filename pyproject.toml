@@ -34,6 +34,19 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# ⚠ 必须让整个 session 共用一个事件循环（默认是"每个测试一个新的"）。
+#   理由：`app/core/db.py` 里的 engine 是**模块级**创建的，而 asyncpg 的连接池
+#   绑定"首次建立连接时所在的那个 loop"。若每个测试都换新 loop，
+#   前一个测试结束后 loop 被关闭，池里缓存的连接就绑在**已死**的 loop 上 ——
+#   后续任何碰数据库的用例都会报
+#       "got Future attached to a different loop" / "Event loop is closed"。
+#   这不是被测代码的问题，是"测试环境的生存期没和应用对齐"。
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+markers = [
+    "external: 需要外部服务（Harness SaaS / npx / PAT）。默认跳过，用 `-m external` 显式运行。",
+    "db: 需要真实 Postgres + Redis（本地 compose 起的 db/redis），走只读接口。",
+]
 
 [tool.ruff]
 line-length = 100

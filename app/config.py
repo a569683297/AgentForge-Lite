@@ -35,6 +35,25 @@ HARNESS_RISK_LEVELS: tuple[str, ...] = (
     "all",
 )
 
+# 绝不能出现在 `repr()` / 日志里的字段名（D34 安全层）。
+#
+# 为什么需要这份清单：pydantic 的 `repr()` 默认会打印**所有字段的实际值** ——
+# 于是任何一句 `logger.info("config=%s", settings)`、任何一次把 settings
+# 塞进异常消息、乃至调试时在终端敲一下变量名，都会把 API key 明文写出去。
+# 而它**完全不像"泄密"** —— 看起来只是打了一行配置。这是没有症状的泄露路径，
+# 只能靠"在出口处主动屏蔽"来堵。
+#
+# 它是**唯一出处**：`Settings.__repr_args__` 从这里取，新增密钥字段时改这一处。
+SENSITIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "deepseek_api_key",
+        "openai_api_key",
+        "langfuse_secret_key",
+        "harness_api_key",
+        "postgres_password",
+    }
+)
+
 
 class Settings(BaseSettings):
     """全局配置。字段名与 .env 中的键一一对应（不区分大小写）。"""
@@ -114,11 +133,18 @@ class Settings(BaseSettings):
     # 外部 server（Harness 官方 MCP）的开关，**默认关**。
     # 为什么默认关：它每次启动都要拉一个常驻 npm 子进程（冷启动可能几分钟），
     # 而绝大多数开发/回归根本用不到它。演示与验收时才打开 —— 这也正是 PRD 里
-    # 「scripts/warmup_mcp.py 预热、演示前必跑」这条要求的由来。
+    # 「scripts/warmup_mcp.py 预热、演示前必跑」这条要求的由来（入口 = `make warmup`）。
     mcp_harness_enabled: bool = False
     mcp_harness_command: str = "npx"
     # 空格分隔即可 —— 不引 shlex，因为这里有 shell 元字符的风险为零（我们自己配的）
-    mcp_harness_args: str = "-y harness-mcp-v2@latest"
+    #
+    # ★ 版本**锁死**，不写 `@latest`（D34 决策，2026-10-08）：
+    #   `latest` 是个**会动的指针** → npx 每次启动都要联网问 registry「latest 现在是哪个版本」，
+    #   于是"能不能起来"依赖网络抖动，而且版本会**静默地漂**
+    #   （实测：D27 记到 3.2.31 → 10-07 复查已是 3.2.32，没人改过配置）。
+    #   锁成具体版本号之后，npx 可以完全命中本地缓存（~/.npm/_npx/），离线也能起。
+    #   ⚠ 升级方式：改这一行 + `.env.example`，再跑 `make warmup` 把新版本拉到本地缓存。
+    mcp_harness_args: str = "-y harness-mcp-v2@3.2.33"
     # ⚠ 国内环境必须走镜像：实测直连 registry.npmjs.org **超时**（curl 12s 返回 000），
     #   加镜像后 2 分 31 秒拉完；不加会挂住 5 分钟以上且没有任何输出。
     mcp_npm_registry: str = "https://registry.npmmirror.com"
@@ -132,6 +158,26 @@ class Settings(BaseSettings):
     # 格式 `pat.<accountId>.<tokenId>.<secret>`；第二段才是 API 层的 accountId，
     # 与界面上那个数字账号名不是一回事（用错会得到 403 account identifier mismatch）。
     harness_api_key: str = ""
+
+    # ---- 密钥屏蔽（D34 安全层）----
+    def __repr_args__(self):
+        """
+        覆盖 pydantic 的 repr 字段生成：`SENSITIVE_FIELDS` 里的字段一律打码。
+
+        为什么在**这里**堵，而不是给每个字段加 `Field(repr=False)`：
+          ① 逐字段写会**漏** —— 新增密钥字段的人不会记得加，而漏了毫无症状
+          ② 集中一份清单让它有**唯一出处**，与 `RETRIEVER_CONFIGS` /
+             `LLM_CHANNELS` / `HARNESS_RISK_LEVELS` 是同一个设计手法
+             （"唯一合法取值清单必须有一个权威出处"，本项目反复在用）
+
+        覆盖 `__repr_args__` 而不是 `__repr__`：`str(settings)` 也走这条通道，
+        一处改完两条路径同时受保护。
+        """
+        for name, value in super().__repr_args__():
+            if name in SENSITIVE_FIELDS:
+                yield name, "***"
+            else:
+                yield name, value
 
     # ---- 便捷属性（拼好的连接串，业务层直接用）----
     @property

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D34 · AgentForge 容器拓扑（一张图看懂 compose 四服务）</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1f2328; --muted:#59636e; --line:#d8dee4;
+    --host:#fff8e6; --host-line:#e3b341;
+    --engine:#eef6ff; --engine-line:#4a90d9;
+    --net:#f3f0ff; --net-line:#8b7bd8;
+    --box:#ffffff; --box-line:#c8d1d9;
+    --accent:#0e6f63; --accent-soft:#e0f2ef;
+    --warn:#b3541e; --warn-soft:#fdf0e6;
+    --code:#f6f8fa;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --line:#30363d;
+      --host:#2b2416; --host-line:#8a6d1f;
+      --engine:#111d2b; --engine-line:#316d9e;
+      --net:#191430; --net-line:#5b4fa8;
+      --box:#161b22; --box-line:#30363d;
+      --accent:#4fd1b8; --accent-soft:#0f2a26;
+      --warn:#e3a06a; --warn-soft:#2b1f13;
+      --code:#161b22;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:32px 24px; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65; font-size:15px;
+  }
+  .wrap{max-width:1060px;margin:0 auto}
+  h1{font-size:21px;margin:0 0 6px;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:13.5px;margin-bottom:26px}
+  .note{color:var(--muted);font-size:13px}
+
+  .host{
+    border:2px dashed var(--host-line); background:var(--host);
+    border-radius:14px; padding:16px 18px 22px; position:relative;
+  }
+  .host > .lbl{
+    position:absolute; top:-11px; left:18px; background:var(--bg);
+    padding:0 8px; font-size:12.5px; font-weight:600; color:var(--warn);
+  }
+
+  .engine{
+    border:2px solid var(--engine-line); background:var(--engine);
+    border-radius:12px; padding:14px 16px 18px; position:relative; margin-top:18px;
+  }
+  .engine > .lbl{
+    position:absolute; top:-11px; left:16px; background:var(--engine);
+    padding:0 8px; font-size:12.5px; font-weight:600; color:var(--engine-line);
+  }
+
+  .net{
+    border:2px solid var(--net-line); background:var(--net);
+    border-radius:10px; padding:16px 14px 14px; position:relative; margin-top:10px;
+  }
+  .net > .lbl{
+    position:absolute; top:-11px; left:14px; background:var(--net);
+    padding:0 8px; font-size:12.5px; font-weight:600; color:var(--net-line);
+  }
+
+  .row{display:flex;gap:14px;flex-wrap:wrap}
+  .box{
+    background:var(--box); border:1.5px solid var(--box-line);
+    border-radius:9px; padding:11px 13px; flex:1 1 200px; min-width:200px;
+  }
+  .box h3{margin:0 0 6px;font-size:14px}
+  .box p{margin:0;font-size:12.5px;color:var(--muted)}
+  code{
+    background:var(--code); border:1px solid var(--line); border-radius:4px;
+    padding:1px 5px; font-size:12.5px;
+    font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  .badge{
+    display:inline-block;font-size:11px;padding:1px 7px;border-radius:20px;
+    border:1px solid var(--accent); color:var(--accent); background:var(--accent-soft);
+    margin-left:6px; vertical-align:1px;
+  }
+  .badge.w{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
+
+  .flow{margin:16px 0 6px;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:var(--box)}
+  .flow div{font-size:13px;margin:5px 0}
+  .flow .k{color:var(--accent);font-weight:600}
+
+  .outside{
+    margin-top:16px;border:1.5px solid var(--box-line);border-radius:9px;
+    background:var(--box);padding:12px 14px;font-size:13px;
+  }
+  h2{font-size:16px;margin:30px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--code);font-weight:600}
+  .ok{color:var(--accent);font-weight:600}
+  .no{color:var(--warn);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>D34 · AgentForge 容器拓扑</h1>
+  <p class="sub">一张图说清「<code>docker compose up -d</code> 之后到底起了什么、谁跟谁能通、端口怎么走」。</p>
+
+  <div class="host">
+    <span class="lbl">你的 Mac（宿主机 host）</span>
+
+    <div class="box" style="flex:0 0 auto">
+      <h3>浏览器</h3>
+      <p>访问 <code>http://localhost:8080</code>（前端）<br>
+         和 <code>http://localhost:18000/docs</code>（接口文档）</p>
+    </div>
+
+    <div class="engine">
+      <span class="lbl">Docker 引擎</span>
+
+      <div class="net">
+        <span class="lbl">compose 建的局域网 · <code>agentforge-lite_default</code></span>
+
+        <div class="row">
+          <div class="box">
+            <h3>web<span class="badge">nginx</span></h3>
+            <p>容器内监听 <code>:80</code><br>
+               里面只有静态文件（<code>dist/</code>）<br>
+               <span class="note">没有 Node —— 构建完就扔了</span></p>
+          </div>
+          <div class="box">
+            <h3>api<span class="badge">uvicorn</span></h3>
+            <p>容器内监听 <code>:8000</code><br>
+               跑 FastAPI 应用<br>
+               已装 pytest，能在容器里跑测试</p>
+          </div>
+          <div class="box">
+            <h3>db<span class="badge">pgvector</span></h3>
+            <p>容器内监听 <code>:5432</code><br>
+               PostgreSQL + 向量扩展<br>
+               <span class="note">★ 复用 D1 起的老容器，本次未重建</span></p>
+          </div>
+          <div class="box">
+            <h3>redis<span class="badge">redis:7</span></h3>
+            <p>容器内监听 <code>:6379</code><br>
+               对话热窗口（滑窗 + TTL）<br>
+               <span class="note">★ 同样复用，未重建</span></p>
+          </div>
+        </div>
+
+        <div class="flow">
+          <div><span class="k">web → api</span>　<code>location /api/ { proxy_pass http://api:8000; }</code>
+            　—— <code>api</code> 在这里是<span class="k">机器名</span>，<code>/api</code> 是<span class="k">路径</span>。<b>同一行里两个角色。</b></div>
+          <div><span class="k">api → db</span>　<code>POSTGRES_HOST=db</code>　—— 连的是<b>服务名</b>，不是 <code>localhost</code></div>
+          <div><span class="k">api → redis</span>　<code>REDIS_HOST=redis</code>　—— 同理</div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:16px">
+        <div class="box">
+          <h3>端口映射<span class="badge w">宿主 : 容器</span></h3>
+          <p><code>8080:80</code>（web）· <code>18000:8000</code>（api）<br>
+             <code>5432:5432</code>（db）· <code>6379:6379</code>（redis）</p>
+        </div>
+        <div class="box">
+          <h3>目录挂载</h3>
+          <p><code>./models → /app/models</code>（1.1 GB 本地模型）<br>
+             <span class="note">不挂的话容器内要重新下载 —— 国内直连 HF 不通</span></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="outside">
+      <b>局域网之外</b>：<code>api</code> 容器里 <b>没有 Node</b>，所以容器内<span class="no">起不了 Harness</span>（<code>MCP_HARNESS_ENABLED=false</code>）。
+      Harness 是<b>云上的外部 SaaS</b>，只在宿主机上用 <code>make warmup</code> 预热、只在宿主机上跑 <code>@pytest.mark.external</code> 的用例。
+    </div>
+  </div>
+
+  <h2>三条最容易搞错的规则</h2>
+  <table>
+    <tr><th>规则</th><th>为什么</th></tr>
+    <tr>
+      <td><b>一个服务 = 一个容器 = 一台迷你电脑</b></td>
+      <td>4 个服务 = 4 台独立机器（各自文件系统、依赖、端口），把它们连起来的是一张<b>公共的</b>局域网。</td>
+    </tr>
+    <tr>
+      <td><b>容器里的 <code>localhost</code> 指它自己</b></td>
+      <td>所以 <code>api</code> 容器里写 <code>localhost:5432</code> 一定连不上 —— 那是 <code>api</code> 自己的 5432，门后没人。报错形态是 <code>Connection refused</code>（找到地址但没人应），不是 <code>timeout</code>。</td>
+    </tr>
+    <tr>
+      <td><b>要连谁，就写它在 compose 里的服务名</b></td>
+      <td>compose 把服务名注册成局域网里的域名。连数据库写 <code>db</code>，连缓存写 <code>redis</code>。<br>
+          <span class="note">注意：<code>api</code> 本身也是个服务名 —— 所以写 <code>api</code> 指的是「api 那台机器」，而它上面没有数据库。</span></td>
+    </tr>
+  </table>
+
+  <h2>验收实测（2026-10-08）</h2>
+  <table>
+    <tr><th>项</th><th>命令 / 结果</th></tr>
+    <tr><td>一键起</td><td><code>docker compose up -d</code> → <span class="ok">db / redis / api / web 四服务全 (healthy)</span>；db·redis 显示 <code>Up 4 days</code>（<b>未被重建</b>）</td></tr>
+    <tr><td>反代链路</td><td><code>curl localhost:8080/api/health</code> → <code>{"status":"ok","deps":{"api":"ok","redis":"ok"}}</code></td></tr>
+    <tr><td>测试过</td><td>宿主机 <code>uv run pytest</code> → <span class="ok">152 passed, 3 skipped</span>；<b>容器内同样 152 passed</b></td></tr>
+  </table>
+
+</div>
+</body>
+</html>
