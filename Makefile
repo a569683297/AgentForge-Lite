@@ -18,7 +18,7 @@ LOG_DIR := logs
 # 全量回归的脚本清单（不含 harness 依赖项 —— 那两个要 `--with-harness`，别混进日常回归）
 VERIFY_SCRIPTS := d21_delete_scope d21_eval d22 d23_metrics d24_report d26 d27 d28
 
-.PHONY: help up down restart logs ps warmup warmup-dry test verify web-dev web-build
+.PHONY: help up down restart logs ps warmup warmup-dry seed seed-clean test verify web-dev web-build
 
 help:
 	@echo "AgentForge 常用命令"
@@ -33,6 +33,8 @@ help:
 	@echo "  演示前"
 	@echo "    make warmup      ★ 预热 MCP（演示前必跑；日志落 $(LOG_DIR)/）"
 	@echo "    make warmup-dry  只查缓存与配置，不起进程（秒级）"
+	@echo "    make seed        ★ 播种示例文档（PRD §17.2 三份；已就绪则跳过）"
+	@echo "    make seed-clean  删除这三份示例文档（演示后让库回到纯语料）"
 	@echo ""
 	@echo "  测试"
 	@echo "    make test        跑 pytest（tests/）"
@@ -68,6 +70,15 @@ warmup:
 
 warmup-dry:
 	$(UV) run python -m scripts.warmup_mcp --dry-run
+
+# ------------------------------------------------------------------ 示例数据
+# PRD §8.3 的 scripts/seed_demo_data.py 落地：把 §17.2 的三份示例文档灌进知识库。
+# 演示第 2 段（知识库）靠它；幂等（同名 ready 自动跳过），可反复跑。
+seed:
+	$(UV) run python -m scripts.seed_demo_data
+
+seed-clean:
+	$(UV) run python -m scripts.seed_demo_data --clean
 
 # ------------------------------------------------------------------ 测试
 test:

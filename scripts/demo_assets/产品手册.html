@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AgentForge-Lite 产品手册</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* ★ 字体必须用 Arial Unicode MS —— 见 scripts/demo_assets/README.md 的「字体陷阱」一节。
+     用 PingFang SC / Songti SC 等 macOS 中文字体时，Chrome 生成的 PDF 会把若干净字
+     映射到 Kangxi 部首区（如「手」→ U+2F3F），肉眼无差别但关键词检索会静默匹配失败。 */
+  body {
+    font-family: "Arial Unicode MS", sans-serif;
+    font-size: 10.5pt; line-height: 1.65; color: #1a1a1a; margin: 0;
+  }
+  h1 { font-size: 19pt; margin: 0 0 2px 0; letter-spacing: .5px; }
+  .sub { color: #555; font-size: 9.5pt; margin-bottom: 14px; }
+  h2 {
+    font-size: 12.5pt; margin: 16px 0 6px 0; padding: 4px 0 4px 9px;
+    border-left: 4px solid #2b6cb0; background: #eef4fb; color: #1a365d;
+  }
+  h3 { font-size: 11pt; margin: 11px 0 4px 0; color: #2b4a6f; }
+  p { margin: 5px 0; }
+  ul, ol { margin: 5px 0 5px 20px; padding: 0; }
+  li { margin: 2px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 7px 0; font-size: 9.5pt; }
+  th, td { border: 1px solid #c3cfdd; padding: 4px 7px; text-align: left; vertical-align: top; }
+  th { background: #e8eff8; font-weight: 600; }
+  code { font-family: "SF Mono", Menlo, "Arial Unicode MS", monospace; font-size: 9pt; background: #f2f4f7; padding: 1px 4px; border-radius: 3px; }
+  .meta { border: 1px solid #c3cfdd; border-left: 4px solid #2b6cb0; background: #fafcff; padding: 8px 11px; font-size: 9.5pt; margin: 10px 0; }
+  .meta div { margin: 1px 0; }
+  .note { color: #6b4b00; background: #fff8e6; border-left: 3px solid #d69e2e; padding: 6px 10px; margin: 8px 0; font-size: 9.5pt; }
+  .pb { page-break-before: always; }
+  footer { margin-top: 16px; border-top: 1px solid #c3cfdd; padding-top: 6px; color: #777; font-size: 8.5pt; }
+</style>
+</head>
+<body>
+
+<h1>AgentForge-Lite 产品手册</h1>
+<div class="sub">企业级 Agent 运行时平台 · 技术规格说明书</div>
+
+<div class="meta">
+  <div><strong>产品名称：</strong>AgentForge-Lite</div>
+  <div><strong>适用版本：</strong>v4.1</div>
+  <div><strong>文档编号：</strong>XH-PM-2026-0417</div>
+  <div><strong>发布日期：</strong>2026-10-01　　<strong>密级：</strong>内部公开</div>
+  <div><strong>维护部门：</strong>平台研发部</div>
+</div>
+
+<h2>1. 产品概述</h2>
+
+<p>AgentForge-Lite 是一套<strong>面向企业内网部署的 Agent 运行时平台</strong>，把「文档知识库 — 检索增强问答 — 工具调用型 Agent — 效果评测」四条链路收进同一个可自托管进程。</p>
+
+<p>它解决的问题是：企业内部往往已经有大量制度、手册、FAQ 文档，但员工检索靠关键词翻页、问答靠人工转述。本产品将这批文档统一入库、切分、向量化，使员工可以用自然语言提问并获得<strong>带出处引用</strong>的回答；回答无法覆盖的问题，可由 Agent 调用外部系统工具继续求解。</p>
+
+<h3>1.1 核心能力</h3>
+<ul>
+  <li><strong>文档知识库</strong>：支持 PDF / DOCX / Markdown / TXT 四种格式入库，自动解析、切分与向量化。</li>
+  <li><strong>混合检索问答</strong>：向量检索与关键词检索双路并行，融合后可选重排，回答附带原文引用与页码定位。</li>
+  <li><strong>工具调用 Agent</strong>：基于状态图的推理—行动循环，可装载本地工具与外部 MCP 协议工具。</li>
+  <li><strong>会话与记忆</strong>：多会话管理，长对话自动摘要压缩，避免上下文溢出。</li>
+  <li><strong>评测与可观测</strong>：内置评测集与自动评分，全链路埋点可回流至链路追踪平台。</li>
+</ul>
+
+<h3>1.2 部署形态</h3>
+<p>产品以 Docker Compose 形式交付，一条命令拉起 <strong>数据库 / 缓存 / 应用服务 / 前端站点</strong> 四个容器，无需外部托管依赖即可离线运行；大模型与嵌入模型均可指向本地推理服务。</p>
+
+<h2>2. 运行环境要求</h2>
+
+<table>
+  <tr><th style="width:30%">项目</th><th>最低要求</th><th>推荐配置</th></tr>
+  <tr><td>操作系统</td><td>Linux x86_64 / macOS (Apple Silicon)</td><td>Linux x86_64</td></tr>
+  <tr><td>容器运行时</td><td>Docker Engine 24.0 + Compose v2</td><td>Docker Engine 27.0</td></tr>
+  <tr><td>内存</td><td>4 GB</td><td>8 GB 及以上</td></tr>
+  <tr><td>磁盘</td><td>5 GB（含模型与镜像）</td><td>20 GB</td></tr>
+  <tr><td>数据库</td><td>PostgreSQL 16（需向量扩展 pgvector）</td><td>同左</td></tr>
+  <tr><td>缓存</td><td>Redis 7</td><td>同左</td></tr>
+</table>
+
+<div class="note">
+<strong>首次启动说明：</strong>本地嵌入模型与重排模型合计约 <strong>1.1 GB</strong>，不计入镜像体积，以挂载方式提供。
+首次运行需下载词嵌入模型（约 23 MB，视模型而定）；若启用外部工具网关，还需预拉取其命令行包。
+<strong>建议在正式演示或使用前先执行一次预热脚本</strong>，否则首次提问会因现场下载而明显卡顿。
+</div>
+
+<h2 class="pb">3. 文档与知识库规格</h2>
+
+<h3>3.1 支持的文件格式</h3>
+<table>
+  <tr><th style="width:22%">扩展名</th><th style="width:20%">类型</th><th>解析行为</th></tr>
+  <tr><td><code>.pdf</code></td><td>PDF 文档</td><td>按页解析，每页保留页码引用；扫描件（无文本层）无法提取会明确报错</td></tr>
+  <tr><td><code>.docx</code></td><td>Word 文档</td><td>按段落解析，页码引用为空</td></tr>
+  <tr><td><code>.md</code></td><td>Markdown</td><td>整篇作为一段解析，页码引用为空</td></tr>
+  <tr><td><code>.txt</code></td><td>纯文本</td><td>整篇作为一段解析，页码引用为空</td></tr>
+</table>
+
+<p><strong>单文件大小上限为 20 MB。</strong>超出上限或格式不在白名单内的文件，在<strong>请求阶段即被拒绝</strong>，不会产生无效记录。</p>
+
+<h3>3.2 切分规格</h3>
+<ul>
+  <li><strong>切片长度：300 字符</strong>（每片的目标字符数）</li>
+  <li><strong>相邻重叠：50 字符</strong>（防止把一句话从中间切断）</li>
+  <li>切片步长 = 切片长度 − 重叠 = <strong>250 字符</strong></li>
+</ul>
+
+<h3>3.3 入库流程</h3>
+<p>上传接口返回 <code>202 Accepted</code>（已受理）而非 200，随后在后台完成解析、切分与向量化。文档状态依次为 <code>processing</code> → <code>ready</code>（成功）或 <code>failed</code>（解析失败，如损坏的 PDF）。调用方可轮询文档列表接口跟踪状态。</p>
+
+<h2>4. 检索与问答规格</h2>
+
+<h3>4.1 两路召回</h3>
+<table>
+  <tr><th style="width:26%">检索路径</th><th>原理</th><th style="width:24%">适用场景</th></tr>
+  <tr><td>向量检索</td><td>查询与切片分别编码为向量，按余弦相似度排序（pgvector）</td><td>语义相近、用词不同</td></tr>
+  <tr><td>关键词检索</td><td>基于 PostgreSQL 全文索引（tsvector + GIN）打分</td><td>专有名词、编号、缩写</td></tr>
+</table>
+
+<h3>4.2 融合与重排</h3>
+<ul>
+  <li><strong>融合方式：RRF（倒数排名融合）</strong>，融合常数 <code>k = 60</code>，两路各取前 20 条候选。</li>
+  <li><strong>重排（可选）</strong>：使用交叉编码器模型对候选逐一打分后重新排序，精度更高但耗时更长。</li>
+  <li><strong>返回条数</strong>：默认 <strong>top_k = 5</strong>。</li>
+</ul>
+
+<h3>4.3 三种检索模式</h3>
+<table>
+  <tr><th style="width:26%">模式</th><th>链路</th></tr>
+  <tr><td><code>pure_vector</code></td><td>仅向量检索</td></tr>
+  <tr><td><code>hybrid</code></td><td>向量 + 关键词，RRF 融合</td></tr>
+  <tr><td><code>hybrid_rerank</code>（默认）</td><td>向量 + 关键词 → RRF 融合 → 交叉编码器重排</td></tr>
+</table>
+
+<h3>4.4 模型规格</h3>
+<table>
+  <tr><th style="width:30%">用途</th><th>模型</th><th style="width:22%">规格</th></tr>
+  <tr><td>词嵌入（向量化）</td><td>BAAI/bge-small-zh-v1.5</td><td>中文，<strong>512 维</strong>，本地 ONNX 推理</td></tr>
+  <tr><td>重排</td><td>BAAI/bge-reranker-base</td><td>交叉编码器，本地 ONNX 推理，超时 3 秒</td></tr>
+  <tr><td>对话生成</td><td>可配置（云端 API 或本地服务）</td><td>与嵌入模型<strong>解耦配置</strong></td></tr>
+</table>
+
+<div class="note">
+<strong>注意：</strong>向量维度与嵌入模型<strong>强绑定</strong>。更换嵌入模型时必须重建全部索引，否则相似度计算将失去意义。
+</div>
+
+<h2 class="pb">5. Agent 与工具规格</h2>
+
+<h3>5.1 推理—行动循环</h3>
+<p>Agent 基于状态图编排，单轮问答的循环为：<strong>生成回答 → 若需要外部信息则发起工具调用 → 执行工具 → 带着结果再次生成</strong>。循环设有最大轮次上限，超限后返回当前可得的最佳回答，不会无限重试。</p>
+
+<h3>5.2 工具来源</h3>
+<table>
+  <tr><th style="width:26%">来源</th><th>说明</th></tr>
+  <tr><td>内置工具</td><td>随产品发布，如时间查询、知识库检索</td></tr>
+  <tr><td>外部 MCP 工具</td><td>经协议客户端动态挂载，工具名带来源前缀以区分同名冲突</td></tr>
+</table>
+
+<h3>5.3 降级策略</h3>
+<p>外部工具服务<strong>不可达时不会阻断主流程</strong>：连接失败的来源整体下线，Agent 自动降级为纯知识库问答。可通过工具列表接口确认当前已装载的工具及其来源。</p>
+
+<h2>6. 接口规格</h2>
+<table>
+  <tr><th style="width:34%">接口</th><th style="width:12%">方法</th><th>用途</th></tr>
+  <tr><td><code>/api/health</code></td><td>GET</td><td>健康检查</td></tr>
+  <tr><td><code>/api/chat</code></td><td>POST</td><td>与 Agent 对话</td></tr>
+  <tr><td><code>/api/documents</code></td><td>POST / GET</td><td>上传文档 / 文档列表</td></tr>
+  <tr><td><code>/api/documents/{id}/preview</code></td><td>GET</td><td>文档详情与切片预览</td></tr>
+  <tr><td><code>/api/documents/{id}</code></td><td>DELETE</td><td>删除文档（级联删除切片）</td></tr>
+  <tr><td><code>/api/sessions</code></td><td>GET</td><td>会话列表与消息明细</td></tr>
+  <tr><td><code>/api/eval/cases</code> · <code>/api/eval/runs</code></td><td>GET</td><td>评测集与评测运行结果</td></tr>
+  <tr><td><code>/api/tools</code></td><td>GET</td><td>当前已装载工具清单</td></tr>
+</table>
+
+<p>所有接口统一挂在 <code>/api</code> 前缀下。生产部署时由前置 Web 服务同源转发，前端站点与接口服务无需跨域配置。</p>
+
+<h2>7. 版本历史</h2>
+<table>
+  <tr><th style="width:16%">版本</th><th style="width:20%">日期</th><th>主要变更</th></tr>
+  <tr><td>v4.1</td><td>2026-10-01</td><td>容器化交付；评测与可观测链路完善；工具来源隔离</td></tr>
+  <tr><td>v4.0</td><td>2026-09-20</td><td>引入重排与评测体系；会话记忆升级为摘要压缩</td></tr>
+  <tr><td>v3.0</td><td>2026-09-10</td><td>混合检索上线（向量 + 关键词 + RRF）</td></tr>
+  <tr><td>v1.0</td><td>2026-08-28</td><td>首个可用版本：文档入库 + 向量检索 + 问答</td></tr>
+</table>
+
+<footer>
+AgentForge-Lite 产品手册　·　文档编号 XH-PM-2026-0417　·　内部公开　·　第 1 版
+</footer>
+
+</body>
+</html>
