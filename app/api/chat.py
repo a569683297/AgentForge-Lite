@@ -14,7 +14,14 @@ JSON 把「Agent 服务层 → HTTP 出口」这段接通——好处是能用 c
 
 端点约定：
     请求  {"message": "问题", "session_id": "可选（标准 UUID / 32 位无横杠均接受）"}
-    响应  {"session_id": "...", "answer": "...", "sources": [...], "invalid_citations": [...]}
+    响应  {"session_id": "...", "answer": "...", "sources": [...], "invalid_citations": [...],
+           "tool_calls": ["本轮实际调用的工具名", ...]}
+
+D36 修复：这一层此前**漏传 `tool_calls`**（`ChatResult` 有、`ChatResponse` 有、
+`default_factory=list` 一兜 → 响应里恒为 `[]`，**不报错、不崩溃**）。
+后果：前端实时对话的「工具卡片」永远不显示（刷新后从 PG 重读才出现）、
+演示脚本读不到任何工具调用。**教训**：给返回模型加字段时，这一层必须同步传，
+否则默认值会把它悄悄吃掉（铁律 10「改了返回类型要改所有调用点」）。
 
 D14 变化：session_id 在进程内是 uuid.UUID 对象（请求侧由 pydantic 校验并转换），
 只在响应边界转成字符串。会话的持久化（落库）由服务层负责，这一层仍然不碰数据库。
@@ -70,4 +77,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         answer=result.answer,
         sources=result.sources,
         invalid_citations=result.invalid_citations,
+        # ⚠ 这一行不能省：ChatResult.tool_calls 有默认值 []，漏传不会报错，
+        #    只会让前端「工具卡片」静默拿不到数据（D36 踩过）。
+        #    回归守卫：tests/integration/test_api_endpoints.py::
+        #    test_chat_forwards_every_chatresult_field_to_http（哨兵值法）。
+        tool_calls=result.tool_calls,
     )

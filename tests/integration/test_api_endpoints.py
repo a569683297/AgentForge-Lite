@@ -135,3 +135,69 @@ async def test_unknown_route_is_404(api_client):
     """未知路径要干净地 404（被全局异常处理器兜成 500 就说明路由层有问题）。"""
     resp = await api_client.get("/api/这个路径不存在")
     assert resp.status_code == 404
+
+
+# ============================================================
+# 对话接口（D11；D36 新增防回归）
+# ============================================================
+
+
+async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypatch):
+    """
+    ★ 防回归（D36）：`/api/chat` 必须把 `ChatResult` 的**每个字段**原样搬进响应。
+
+    D36 踩过的坑：路由构造 `ChatResponse(...)` 时**漏传 `tool_calls`**。该字段有
+    `default_factory=list`，漏传**不报错、不崩溃** —— 响应里 `tool_calls` 恒为 `[]`，
+    前端「工具卡片」永远不显示（刷新后从 PG 重读才出现，伪装成前端 bug）。
+    这类"给模型加字段、忘了同步搬"是**静默**的，只能靠跨层比对抓。
+
+    ⚠ 为什么不能只断言"响应键集合 == 模型字段集合"：
+      pydantic / FastAPI 序列化**会带上默认值** —— 漏传的字段在 JSON 里照样出现
+      （只是值退回了默认）。所以键集合比对对这个 bug **恒真**，抓不到。
+    正确做法：把 `run_agent` 换成返回**每个字段都带哨兵值**的桩，
+    再断言哨兵能原样读回 —— 漏传哪个字段，哪个就退回默认值 → 这边红。
+    """
+    from app.api import chat as chat_module
+    from app.schemas.chat import ChatResponse, ChatResult, SourceItem
+
+    fake = ChatResult(
+        answer="哨兵回答",
+        sources=[
+            SourceItem(
+                index=7,
+                source="SENTINEL_DOC",
+                content="哨兵片段",
+                similarity=0.4242,
+                page_ref="p.42",
+            )
+        ],
+        invalid_citations=[13],
+        tool_calls=["SENTINEL_TOOL"],
+    )
+
+    async def _fake_run_agent(session_id, message):  # 签名对齐路由里的调用
+        return fake
+
+    monkeypatch.setattr(chat_module, "run_agent", _fake_run_agent)
+
+    resp = await api_client.post("/api/chat", json={"message": "任意一句话"})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # 逐字段原样读回：漏传哪个，哪个就退回默认值 —— 下行就是 D36 的真 bug 所在
+    assert body["answer"] == "哨兵回答"
+    assert body["invalid_citations"] == [13]
+    assert body["tool_calls"] == ["SENTINEL_TOOL"]
+    assert [s["source"] for s in body["sources"]] == ["SENTINEL_DOC"]
+    assert body["sources"][0]["page_ref"] == "p.42"
+
+    # 轻量一致性：不出现模型里没有的键、也不缺键。
+    # （对"默认值兜底"型 bug 恒真，真正的守卫是上面的哨兵断言。）
+    assert set(body) == set(ChatResponse.model_fields)
+
+    # ★ 元断言：桩必须覆盖 ChatResult 的**全部**字段。
+    # 将来给 ChatResult 加字段时这条会红，逼你回来补哨兵 —— 不让新字段裸奔。
+    covered = {"answer", "sources", "invalid_citations", "tool_calls"}
+    assert covered == set(ChatResult.model_fields), (
+        "ChatResult 字段变了：请在桩里为新字段补哨兵值，并加一条能原样读回的断言"
+    )

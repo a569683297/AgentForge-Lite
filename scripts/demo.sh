@@ -205,11 +205,28 @@ else
   api_post /api/chat '{"message":"我最近哪些流水线失败了，为什么？"}' > "$TMP"
   python3 - "$TMP" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"        ❌ 响应无法解析：{e}"); raise SystemExit(1)
 print("        【答】" + d.get("answer", "")[:400].replace("\n", "\n              "))
-print(f"        【本轮调用的工具】{d.get('tool_calls') or '（无）'}")
+tc = d.get("tool_calls") or []
+print(f"        【本轮调用的工具】{tc or '（无）'}")
+# ★ D36 判据修复：用**分层退出码**取代原先只看 HAS_HARNESS 的假绿。
+#   原先无论 tool_calls 是否为空都打 ✅ —— 于是在「/api/chat 漏传 tool_calls」
+#   这个真 bug 下也照样绿（本段是 S10 演示证据，假绿 = 证据失效）。
+if any(str(t).startswith("harness") for t in tc):
+    raise SystemExit(0)   # 强证据：外部工具确被调用
+if tc:
+    raise SystemExit(2)   # 弱证据：调了工具，但都不是外部工具
+raise SystemExit(3)       # 无证据：一个工具都没调
 PY
-  ok "外部工具段可演示"
+  rc=$?
+  case "$rc" in
+    0) ok "外部工具确已调用（S10 强证据：tool_calls 含 harness_*）" ;;
+    2) warn "本轮只调用了本地工具、未触达外部 harness —— 证据不足；调整问法或重试" ;;
+    *) fail "响应里没有任何工具调用：或模型本轮未触发工具（重试），或 /api/chat 又漏传字段（回归）—— 请对照 Langfuse 或 messages 表核实" ;;
+  esac
 fi
 pause_if_needed
 
@@ -222,13 +239,18 @@ pause_if_needed
 
 # ═══════════════════════════════════════════════════════════════════════════
 seg 6 "评测 · 消融与对比报告" "1min"
-ops "打开 docs/eval-report-2026-09-30.md（或前端「评测看板」页）"
+ops "打开 docs/eval-report-2026-10-10.md（或前端「评测看板」页）"
 expect "展示三配置（纯向量 / 混合 / 混合+重排）的准确率对比与失败案例"
-if [ -f docs/eval-report-2026-09-30.md ]; then
-  actual "报告在仓：docs/eval-report-2026-09-30.md（$(wc -l < docs/eval-report-2026-09-30.md | tr -d ' ') 行）"
+# D36 起有两份报告，口径不同（gr=3 正式消融 vs gr=1 诊断轮）—— 优先演关系最新的那份。
+REPORT=""
+for cand in docs/eval-report-2026-10-10.md docs/eval-report-2026-09-30.md; do
+  [ -f "$cand" ] && REPORT="$cand" && break
+done
+if [ -n "$REPORT" ]; then
+  actual "报告在仓：${REPORT}（$(wc -l < "$REPORT" | tr -d ' ') 行）"
   ok "评测段可演（用已生成报告，避免现场等待）"
 else
-  fail "评测报告缺失"
+  fail "评测报告缺失（docs/eval-report-*.md 都没有）"
 fi
 warn "对照报告（与外部平台的同题对照）尚未产出 → 这一段只演本项目的消融对比"
 pause_if_needed
