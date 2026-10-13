@@ -14,11 +14,12 @@ import {
 } from '@ant-design/icons';
 import { Button, Layout, Select, Tooltip } from 'antd';
 import { useMemo, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { HealthResponse, SessionItem } from '../types/api';
 import { formatDateTime } from '../lib/format';
+import { PAGE_PATHS, type PageKey } from '../lib/routes';
 import { useTheme } from '../theme/ThemeProvider';
 import { StatusDot } from './StatusDot';
-import type { PageKey } from '../App';
 import styles from '../styles/shell.module.css';
 
 const { Sider, Header, Content } = Layout;
@@ -35,15 +36,15 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
 
 const titles = Object.fromEntries(navItems.map((item) => [item.key, item.label])) as Record<PageKey, string>;
 
-export function AppShell({ page, onPageChange, children, sessions, health, onSessionSelect, selectedSessionId }: {
+export function AppShell({ page, children, sessions, health, onSessionSelect, selectedSessionId }: {
   page: PageKey;
-  onPageChange: (page: PageKey) => void;
   children: ReactNode;
   sessions: SessionItem[];
   health: HealthResponse | null;
   onSessionSelect: (id: string) => void;
   selectedSessionId?: string;
 }) {
+  const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const { mode, toggle } = useTheme();
   const status = health?.status === 'ok' ? { tone: 'success' as const, label: 'API 正常' } : health?.status === 'degraded' ? { tone: 'warning' as const, label: '依赖异常' } : { tone: 'danger' as const, label: '连接失败' };
@@ -59,8 +60,10 @@ export function AppShell({ page, onPageChange, children, sessions, health, onSes
         </div>
         {!collapsed ? <div className={styles.navLabel}>工作台</div> : null}
         <nav className={styles.mainNav}>
+          {/* 翻页 = 换 URL（navigate）—— 高亮仍由 page prop 决定，但那个 prop 在 App 里
+              也是从 URL 反推的，所以「地址栏 → 高亮」是一条单向链，不存在两份状态 */}
           {navItems.map((item) => (
-            <button className={`${styles.navItem} ${page === item.key ? styles.navActive : ''}`} onClick={() => onPageChange(item.key)} key={item.key} title={collapsed ? item.label : undefined}>
+            <button className={`${styles.navItem} ${page === item.key ? styles.navActive : ''}`} onClick={() => navigate(PAGE_PATHS[item.key])} key={item.key} title={collapsed ? item.label : undefined}>
               {item.icon}<span>{collapsed ? null : item.label}</span>
             </button>
           ))}

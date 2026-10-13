@@ -1,4 +1,4 @@
-import { EyeOutlined, PlayCircleOutlined } from '@ant-design/icons';
+import { EyeOutlined, InfoCircleOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { Button, Card, Modal, Select, Table, Tooltip } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
@@ -12,6 +12,79 @@ import type { EvalCaseResultDetailOut, EvalCaseResultOut, EvalRunDetailOut, Eval
 import styles from '../styles/dataPages.module.css';
 
 const configLabel: Record<string, string> = { pure_vector: 'pure_vector', hybrid: 'hybrid', hybrid_rerank: 'hybrid_rerank' };
+
+interface InfoTip { title: string; steps: string[]; note: string }
+
+// 三种检索配置的完整链路（与 app/services/retrieval_service.py 的 retrieve() 一一对应）。
+// 挂在运行卡片的 info 图标上：悬浮即解释"这一轮用的检索方案具体怎么跑"。
+const retrievalFlows: Record<string, InfoTip> = {
+  pure_vector: {
+    title: 'pure_vector · 纯向量单路',
+    steps: [
+      '问题经嵌入模型转成向量',
+      'pgvector 按余弦距离排序「已就绪」文档的切片',
+      '取语义最近的 5 条返回',
+    ],
+    note: '无融合、无重排；最快，但对精确字面（型号、数字）不敏感。',
+  },
+  hybrid: {
+    title: 'hybrid · 向量 + BM25 融合',
+    steps: [
+      '两路并发召回：向量 20 条 + BM25（关键词）20 条',
+      'RRF 融合：丢掉分数，只按两路名次合并成一张榜单',
+      '取融合后前 5 条返回',
+    ],
+    note: '无重排：融合名次即最终名次。',
+  },
+  hybrid_rerank: {
+    title: 'hybrid_rerank · 融合 + 重排',
+    steps: [
+      '两路并发召回各 20 条 → RRF 融合保留 20 条候选',
+      '重排器逐条精读「问题 + 片段」配对打分',
+      '按重排分取前 5 条返回',
+    ],
+    note: '最慢：重排是大头（20 条候选约 750ms，D18 实测）。',
+  },
+};
+
+// 两枚指纹的说明（挂在卡片底部各指纹值后的 info 图标上）——「封条」是项目里一贯的比喻。
+const fingerprintTips: Record<'dataset' | 'corpus', InfoTip> = {
+  dataset: {
+    title: '题集指纹 · 考卷的「封条」',
+    steps: [
+      '把全部评测题（题面 / 参考答案 / 依据 / 类别等字段）算成 sha256 哈希，取前 8 位显示',
+      '任一字段被改动（哪怕只删一道题）→ 指纹立刻变化',
+      '作用：证明各配置用的是同一份题——指纹相同，分数才可横向比较',
+    ],
+    note: '出报告前三配置指纹必须逐字一致，不一致会被直接拒绝；依据文档列表做过排序归一（A+B 与 B+A 视为同一份）。',
+  },
+  corpus: {
+    title: '语料指纹 · 教材的「封条」',
+    steps: [
+      '把知识库全部切片的内容算成 sha256 哈希，取前 8 位显示',
+      '正文改动、或改了切片参数重建语料 → 指纹变化；仅重建换 UUID → 不变',
+      '作用：证明各配置用的是同一份语料——分数差异才能归因到检索配置',
+    ],
+    note: '按全库计算：跑回归留下的残留切片也会让指纹变化，防止三个配置在不同状态的库上比较。',
+  },
+};
+
+function InfoTipContent({ tip }: { tip: InfoTip }) {
+  return (
+    <div className={styles.flowTip}>
+      <div className={styles.flowTipTitle}>{tip.title}</div>
+      <div className={styles.flowTipSteps}>
+        {tip.steps.map((step, index) => (
+          <div className={styles.flowTipStep} key={step}>
+            <span className={styles.flowTipIndex}>{index + 1}</span>
+            <span>{step}</span>
+          </div>
+        ))}
+      </div>
+      <div className={styles.flowTipNote}>{tip.note}</div>
+    </div>
+  );
+}
 
 export function EvalPage() {
   const [runs, setRuns] = useState<EvalRunOut[]>([]);
@@ -61,7 +134,9 @@ export function EvalPage() {
     <div>
       <PageHeader title="评测看板" description="比较检索配置，定位回答质量与失败模式。" badge={detail ? undefined : '等待数据'} action={<Tooltip title="评测暂由命令行触发：uv run python -m scripts.eval_run"><span><Button disabled icon={<PlayCircleOutlined />}>运行新评测</Button></span></Tooltip>} />
       {loading ? <TableSkeleton rows={5} columns={4} /> : error && !runs.length ? <ErrorState message={error} action="重新加载" onAction={() => window.location.reload()} /> : !runs.length ? <EmptyState message="还没有评测记录。评测暂由命令行触发。" /> : <>
-        <div className={styles.runGrid}>{runs.slice(0, 3).map((run) => <button className={`${styles.runCard} ${run.id === selectedRunId ? styles.runCardSelected : ''}`} key={run.id} onClick={() => setSelectedRunId(run.id)}><div className={styles.runCardTop}><span className="af-mono">{configLabel[run.config_name] ?? run.config_name}</span><strong className="af-num">{formatPercent(run.accuracy)}</strong></div><div className={styles.runCardMeta}>{formatDateTime(run.created_at)} · {run.judge_model ?? '未记录 judge'}</div><div className={styles.fingerprints}><span className="af-mono">题集 {run.dataset_fingerprint?.slice(0, 8) ?? '—'}…</span><span className="af-mono">语料 {run.corpus_fingerprint?.slice(0, 8) ?? '—'}…</span></div></button>)}</div>
+        <div className={styles.runGrid}>{runs.slice(0, 3).map((run) => {
+          const flow = retrievalFlows[run.config_name];
+          return <button className={`${styles.runCard} ${run.id === selectedRunId ? styles.runCardSelected : ''}`} key={run.id} onClick={() => setSelectedRunId(run.id)}><div className={styles.runCardTop}><span className={`af-mono ${styles.runCardName}`}>{configLabel[run.config_name] ?? run.config_name}{flow ? <Tooltip title={<InfoTipContent tip={flow} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip> : null}</span><strong className="af-num">{formatPercent(run.accuracy)}</strong></div><div className={styles.runCardMeta}>{formatDateTime(run.created_at)} · {run.judge_model ?? '未记录 judge'}</div><div className={styles.fingerprints}><span className={`af-mono ${styles.fingerprintItem}`}>题集 {run.dataset_fingerprint?.slice(0, 8) ?? '—'}…<Tooltip title={<InfoTipContent tip={fingerprintTips.dataset} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip></span><span className={`af-mono ${styles.fingerprintItem}`}>语料 {run.corpus_fingerprint?.slice(0, 8) ?? '—'}…<Tooltip title={<InfoTipContent tip={fingerprintTips.corpus} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip></span></div></button>;})}</div>
         <div className={styles.metricGrid}>
           <MetricCard label="准确率" value={formatPercent(detail?.accuracy)} note="按题计算，每题多次生成先取多数结论" />
           <MetricCard label="正确性均分" value={formatScore(detail?.score_correctness)} note={`按行计算，分母是 ${detail?.scored_rows ?? '—'} 行`} />

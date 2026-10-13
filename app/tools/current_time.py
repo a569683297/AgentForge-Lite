@@ -8,9 +8,13 @@ D8 起改为"注册制"：工具用 @register 自己声明，不再需要修改 
 - D8：只要这个文件加装饰器，注册表自动收录（引擎零改动）
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app.tools.registry import register
+
+# 中国标准时间（UTC+8）。中国无夏令时，固定 +8 偏移即可，且不依赖镜像内的 tzdata。
+# 注意：不能用 datetime.now()（取进程本地时间，Docker 容器默认是 UTC，会差 8 小时）。
+CN_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
 @register(
@@ -23,5 +27,5 @@ from app.tools.registry import register
     },
 )
 def current_time() -> str:
-    """返回当前本地时间（字符串）。"""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """返回当前北京时间（字符串），显式标注 UTC+8，避免 LLM 误读。"""
+    return datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S") + " (UTC+8)"

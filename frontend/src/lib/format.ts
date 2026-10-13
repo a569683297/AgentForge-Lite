@@ -83,11 +83,15 @@ export function pairToolMessages(messages: MessageItem[]): PairedToolCall[] {
 export function formatDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
+  // new Date() 会把带 Z 的 UTC 串自动转成浏览器本地时区，所以这里输出的一定是北京时间（用户环境）。
   return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
   }).format(date);
 }
 

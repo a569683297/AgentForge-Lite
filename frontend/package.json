@@ -16,16 +16,17 @@
     "axios": "^1.12.2",
     "echarts": "^6.0.0",
     "echarts-for-react": "^3.0.5",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.18.4",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.8.0",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
-    "@testing-library/jest-dom": "^6.8.0",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.2",
     "vite": "^7.1.7",

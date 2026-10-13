@@ -1,6 +1,7 @@
 import { PaperClipOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons';
 import { Button, Input, Space } from 'antd';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { sendMessage } from '../api/chat';
 import { getSessionMessages } from '../api/sessions';
 import { getTools } from '../api/tools';
@@ -21,8 +22,12 @@ function fromHistory(history: MessageItem[]): ChatMessageView[] {
   }));
 }
 
-export function ChatPage({ sessionId, onNewSession, onSessionChange, onOpenKnowledge }: { sessionId?: string; onNewSession: () => void; onSessionChange: (id: string) => void; onOpenKnowledge: () => void }) {
-  const [currentSessionId, setCurrentSessionId] = useState(sessionId);
+export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void }) {
+  // 会话 id 直接从 URL 读（/chat/:sessionId）；/chat（新会话）时是 undefined。
+  // 不再用 useState 镜像它 —— URL 是唯一真源：
+  // 刷新 /chat/xxx 时 useParams 拿到的还是同一个 xxx，历史会话自然恢复。
+  const { sessionId } = useParams<{ sessionId: string }>();
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<ChatMessageView[]>([]);
   const [sources, setSources] = useState<SourceItem[]>([]);
   const [invalidCitations, setInvalidCitations] = useState<number[]>([]);
@@ -34,7 +39,6 @@ export function ChatPage({ sessionId, onNewSession, onSessionChange, onOpenKnowl
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setCurrentSessionId(sessionId);
     if (!sessionId) {
       setMessages([]);
       setSources([]);
@@ -64,9 +68,16 @@ export function ChatPage({ sessionId, onNewSession, onSessionChange, onOpenKnowl
     setMessages((current) => [...current, { id: `user-${Date.now()}`, role: 'user', content: message, createdAt: new Date().toISOString() }]);
     setLoading(true);
     try {
-      const response = await sendMessage(message, currentSessionId);
-      setCurrentSessionId(response.session_id);
-      onSessionChange(response.session_id);
+      const response = await sendMessage(message, sessionId);
+      // 首条消息会产生新会话 id：把地址栏从 /chat 换成 /chat/:id。
+      // 用 replace 而不是 push —— 新会话的 /chat 只是"发送前"的临时态，
+      // 不该留在浏览器历史里（否则用户按后退会回到空会话，看着像卡住）。
+      // 判断 id 变化才跳：多轮对话时 URL 没变，避免无意义的 history 写入。
+      if (response.session_id !== sessionId) {
+        navigate(`/chat/${response.session_id}`, { replace: true });
+      }
+      // 侧栏「最近会话」需要包含这条新会话（列表数据在 App 手里）
+      onSessionsRefresh();
       setSources(response.sources);
       setInvalidCitations(response.invalid_citations);
       setMessages((current) => [...current, {
@@ -92,19 +103,20 @@ export function ChatPage({ sessionId, onNewSession, onSessionChange, onOpenKnowl
   }
 
   function resetConversation() {
-    setCurrentSessionId(undefined);
+    // 回 /chat = 「新会话」的地址（push —— 可以用后退回到刚才那个会话）。
+    // 已在 /chat 时无需跳转。状态清空照旧（effect 会在 sessionId 变化时再兜一次底）。
+    if (sessionId) navigate('/chat');
     setMessages([]);
     setSources([]);
     setInvalidCitations([]);
     setError(null);
-    onNewSession();
   }
 
   return (
     <>
       <div className={styles.chatPage}>
         <div className={styles.chatToolbar}>
-          <div className={styles.chatToolbarTitle}><strong>{currentSessionId ? '当前会话' : '新会话'}</strong><span className="af-mono af-muted">{currentSessionId ? currentSessionId.slice(0, 12) : '未创建'}</span></div>
+          <div className={styles.chatToolbarTitle}><strong>{sessionId ? '当前会话' : '新会话'}</strong><span className="af-mono af-muted">{sessionId ? sessionId.slice(0, 12) : '未创建'}</span></div>
           <Space size={8}><Button size="small" icon={<PlusOutlined />} onClick={resetConversation}>新建会话</Button><Button size="small">导出</Button></Space>
         </div>
         <div className={styles.messageList} ref={listRef}>
@@ -118,7 +130,7 @@ export function ChatPage({ sessionId, onNewSession, onSessionChange, onOpenKnowl
           <div className={styles.composerBottom}><span className={styles.composerContext}>上下文：知识库 · 当前会话</span><Button type="primary" icon={<SendOutlined />} onClick={() => void submit()} loading={loading}>发送</Button></div>
         </div>
       </div>
-      <CitationDrawer source={selectedSource} onClose={() => setSelectedSource(null)} onOpenKnowledge={() => { setSelectedSource(null); onOpenKnowledge(); }} />
+      <CitationDrawer source={selectedSource} onClose={() => setSelectedSource(null)} onOpenKnowledge={() => { setSelectedSource(null); navigate('/knowledge'); }} />
     </>
   );
 }

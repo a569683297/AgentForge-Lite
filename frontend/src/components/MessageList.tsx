@@ -1,7 +1,7 @@
 import { Alert } from 'antd';
 import type { ReactNode } from 'react';
 import type { SourceItem } from '../types/api';
-import { extractCitationParts } from '../lib/format';
+import { extractCitationParts, formatDateTime } from '../lib/format';
 import { ToolCallCard } from './ToolCallCard';
 import styles from '../styles/chat.module.css';
 import type { PairedToolCall } from '../lib/format';
@@ -41,7 +41,7 @@ export function MessageList({ messages, sources, invalidCitations, loading, onCi
           <div className={styles.messageLabel}>{message.role === 'user' ? '你' : 'Agent'}{message.role === 'assistant' ? <span className="af-mono af-muted">runtime</span> : null}</div>
           {message.tools?.map((tool, index) => <ToolCallCard key={`${message.id}-tool-${index}`} tool={tool} source={message.toolSources?.[tool.name]} />)}
           {message.content ? <div className={styles.messageBody}>{message.role === 'assistant' ? renderAnswer(message.content, sources, invalidCitations, onCitation) : message.content}</div> : null}
-          {message.createdAt ? <div className={styles.messageMeta}>{message.createdAt}</div> : null}
+          {message.createdAt ? <div className={styles.messageMeta}>{formatDateTime(message.createdAt)}</div> : null}
         </article>
       ))}
       {loading ? <div className={styles.thinking}><Alert type="info" showIcon message="Agent 正在处理请求…" /></div> : null}

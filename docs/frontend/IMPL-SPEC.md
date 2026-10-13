@@ -167,8 +167,12 @@ frontend/
 > **注解 · ECharts**：百度开源的图表库（柱状图 / 折线图）。PRD F9.7 / F11.6 指定用它，**不要换成别的图表库**。
 > ⚠ 它**不认 AntD 的 token**——浅色/深色两套色值必须显式传进图表配置，切换主题时要重建实例（详见 §5.8）。
 
-> **路由库**：v0 稿用的是 `useState` 切页（无路由）。**M6 阶段沿用这个做法即可**（7 个页面用状态切换，不引 react-router）。
-> 理由：这是内部工具，不需要分享 URL；引路由库会增加一层与 AntD `Layout` 的集成成本。若你判断需要真路由，请**先说明理由**再改。
+> **路由库**：**2026-10-12 已引入 `react-router-dom`（v7）**，替换原 v0 稿的 `useState` 切页。
+> 理由（原文档要求"先说明理由再改"，此即理由）：需求是「刷新页面停留当前页 + 可恢复当前会话」——
+> 而"当前在哪一页/哪个会话"这个事实此前从未写进 URL，刷新即丢；把它搬进 URL 正是路由库的本职。
+> 落地：`src/lib/routes.ts`（page↔URL 映射，唯一真源）、`main.tsx` 包 `BrowserRouter`、
+> `App.tsx` 铺 `<Routes>`、`AppShell` 用 `navigate` 翻页、`ChatPage` 用 `useParams` 取会话。
+> 附带收益：前进/后退、链接可分享、未来可做按页 code splitting。nginx 的 SPA 兜底（try_files）早在配好。
 
 ### 2.2 目录结构（**按此创建**）
 
@@ -2117,7 +2121,7 @@ export const MOCK_METRICS = [ /* { metric, dimension, points: [{ date, value }] 
 | 模型切换 | 后端由 `.env` 决定，非运行时可选 | ⏳ 未排期 |
 | 用户系统 | 项目无用户体系，`.user-row` 无意义 | ⏳ 未排期 |
 | AntD `cssVar` 变量命名 | 未实跑验证，属推测 | ⏳ 待实跑 |
-| 路由 | M6 用 `useState` 切页；是否需要真路由待定 | ⏳ 待定 |
+| 路由 | ~~M6 用 `useState` 切页；是否需要真路由待定~~ → **已落地**：react-router v7，7 页 URL 化 + `/chat/:sessionId`，双端（5173/8080）验收通过（2026-10-12） | ✅ 已完成 |
 
 ---
 

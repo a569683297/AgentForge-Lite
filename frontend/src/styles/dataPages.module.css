@@ -18,7 +18,18 @@
 .runCardTop { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 12px; }
 .runCardTop strong { font-size: 20px; font-weight: 500; }
 .runCardMeta, .fingerprints { padding: 0 12px 10px; color: var(--af-text-tertiary); font-size: 10px; }
-.fingerprints { display: flex; gap: 12px; }
+.fingerprints { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fingerprintItem { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.fingerprintItem .runCardInfo { font-size: 11px; }
+.runCardName { display: inline-flex; align-items: center; gap: 6px; }
+.runCardInfo { display: inline-flex; color: var(--af-text-tertiary); font-size: 12px; cursor: help; }
+.runCardInfo:hover { color: var(--af-accent); }
+.flowTip { max-width: 300px; white-space: normal; line-height: 1.7; }
+.flowTipTitle { margin-bottom: 6px; font-weight: 500; }
+.flowTipSteps { display: grid; gap: 4px; }
+.flowTipStep { display: grid; grid-template-columns: 16px 1fr; gap: 6px; }
+.flowTipIndex { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-top: 3px; border: 1px solid currentColor; border-radius: 50%; font-size: 9px; opacity: .7; }
+.flowTipNote { margin-top: 7px; font-size: 11px; opacity: .7; }
 .metricGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
 .splitGrid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 16px; margin-bottom: 16px; }
 .panel { overflow: hidden; border: 1px solid var(--af-border-default); border-radius: 6px; background: var(--af-surface); }
