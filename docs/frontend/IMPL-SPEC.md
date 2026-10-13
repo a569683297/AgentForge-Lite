@@ -1225,7 +1225,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
 | # | 缺什么 | 处理方式 |
 |---|---|---|
-| **G1** | **后端目前是非流式**（`/api/chat` 返回完整 JSON，**没有 SSE 端点**）<br>（**SSE** = Server-Sent Events，服务器**单向持续推流**的技术，前端用它做"打字机"逐字显示） | 见下方 §5.2.1 |
+| **G1** | ~~后端目前是非流式（`/api/chat` 返回完整 JSON，没有 SSE 端点）~~<br>→ **已解决（2026-10-13，M6 优化②）**：后端新增 `POST /api/chat/stream`（真 SSE 流式端点）；原 `/api/chat` 保留不动，流式/非流式两条链路完全独立<br>（**SSE** = Server-Sent Events，服务器**单向持续推流**的技术，前端用它做"打字机"逐字显示） | 见下方 §5.2.1（**已实现，含落地记录**） |
 | **G2** | **消息尾部的"耗时 · token · 成本"没有数据源**。`/api/chat` 的响应里**没有**这三个字段 | **先留空 / 不渲染这一段**，或用 mock 并标注。**不要去"算"一个假的**。这些数据在后端 Langfuse 里（D28 建的通道），但**目前没有 REST 接口暴露** |
 | **G3** | **工具卡片没有"耗时"**。`/api/chat` 只给工具名 | 隐藏耗时那一格。**入参与返回摘要**可以从 messages 接口补（见下） |
 
@@ -1251,34 +1251,33 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
 ⚠ **注意**：这是一次**额外请求**（消息接口是按会话全量拉），不要在每条消息渲染时都调。建议**进入会话时拉一次**，然后在内存里把 tool 调用配对。
 
-#### 5.2.1 SSE 流式（**G1 的处理方案**）
+#### 5.2.1 SSE 流式（**G1 —— 已落地**）
 
 > **注解 · SSE（Server-Sent Events）**：服务器**单向、持续**往浏览器推数据的技术。前端拿它做"打字机"效果——不用等整段回答生成完，而是逐字显示。
 
-**现状**：后端的代码注释里写得很清楚——
+**状态：✅ 已落地（2026-10-13，M6 优化②）。** 本节从"处理方案"改写为**落地记录**——原稿给的是"方案 A：一次渲染 + 思考中"过渡态，后来后端直接上了真流式，过渡态作废。
 
-> 「PRD 规划的是 SSE 流式（逐字返回）… 项目现在还没有前端，先用非流式 JSON 把「Agent 服务层 → HTTP 出口」这段接通…
-> 将来上流式时，前端本来就要把 fetch 改写成 EventSource，所以现在用 JSON 不构成额外的技术债。」
+**① 后端**：新增 `POST /api/chat/stream`（`app/api/chat.py`），响应 `text/event-stream`。事件协议六个：
 
-**所以：M6 期间后端不会有 SSE。** 你有两个选择：
-
-| 方案 | 做法 | 评价 |
+| 事件 | 时机 | 载荷与前端处理 |
 |---|---|---|
-| **A（推荐）** | **界面按 v0 稿做好**（`.chat-status` 有状态区、消息有 meta 行），发送时调 `/api/chat`，**期间显示"思考中"骨架**，返回后**一次性渲染**整段回答 | 不引入假动画，诚实反映"这是非流式" |
-| **B** | 前端**模拟**逐字输出（把完整 answer 切帧渲染） | ⚠ 会让人以为后端在流式。**如果做，必须在界面上标注"模拟流式"** |
+| `meta` | 流开始第一帧 | `session_id`；前端**不消费**（理由见 ③） |
+| `token` | 模型每产出一段文字 | `text`；追加到生长中的气泡 |
+| `reset` | 模型先说了一段话、随后改去调工具 | 无载荷；**撤回**已显示的预告文字（模型常先说 "I'll search…"，实测触发过） |
+| `tool` | 每次工具开始/结束执行 | `name` / `phase`（`start`\|`end`）/ `ok`（仅 end 携带，与 span ERROR 同一判定源） |
+| `done` | 完成且结果已落库 | `session_id` / `answer` / `sources` / `invalid_citations` / `tool_calls`（与非流式响应对齐） |
+| `error` | 链路异常 | `message`；HTTP 200 在开流时已先行，错误只能走帧 |
 
-**无论选哪个，请把 `src/api/chat.ts` 写成"将来换成 SSE 时改动最小"的形状**：
+**② 前端**：`src/api/chat.ts` 的 `sendMessageStream(message, sessionId, onEvent)`。
 
-```ts
-// 现在：一次性返回
-export async function sendMessage(message: string, sessionId?: string) {
-  const { data } = await client.post<ChatResponse>('/chat', { message, session_id: sessionId });
-  return data;
-}
+⚠ **为什么不用 `EventSource`**：`EventSource` 是浏览器内置的 SSE 客户端，但它**只能发 GET**、**带不了请求体**——而对话接口必须 POST 一个 JSON 体。原稿"将来把 fetch 改写成 EventSource"是**误判**，已更正。
+实际做法：`fetch` POST + `response.body.getReader()` 流式读取 + **手写帧解析**。解析器 `src/lib/sse.ts` 的 `drainSseFrames()` 按 `\n\n` 切帧并**携带残段状态**（网络分块与帧边界不对齐，一帧可能被切在两个块之间），配 7 个单测。
 
-// 将来后端上 SSE 时，只需要在这里加一个 sendMessageStream()，
-// 因为界面消费的是"最终的消息对象"，不是"HTTP 响应的形状"
-```
+**③ 两个易踩的时序**（实测踩过多轮）：
+- `meta` 帧**不消费**：等 `done` 再 `navigate` 到 `/chat/:id`。若提前跳转，会触发历史加载、把生长中的气泡冲掉。
+- `done` 在**数据库写回之后**才发出：done 后立刻刷新，看到的就是完整落库版本。
+
+**④ nginx**（8080 容器部署必需）：`location /api/` 内已加 `proxy_buffering off; proxy_read_timeout 300s;`——**不关缓冲，nginx 会把 SSE 攒成一坨再吐**，流式效果全失。此项只能在 8080 上验证：2026-10-13 双端验收均通过（5173/8080 各 9/9 PASS，8080 端正文 23 次增量到达即关缓冲生效的直接证据）。
 
 #### 交互清单
 
@@ -1980,7 +1979,7 @@ export interface ToolsResponse {
 
 | 页面 | 缺口 | 处理 |
 |---|---|---|
-| 对话台 | **无 SSE**（非流式） | §5.2.1 方案 A：一次渲染 + "思考中"态 |
+| 对话台 | ~~**无 SSE**（非流式）~~ → **已落地**：`POST /api/chat/stream` 真 SSE 流式 | ✅ 已实现，见 §5.2.1 |
 | 对话台 | 消息 meta（耗时/ token / 成本）**无源** | 不渲染或留空 |
 | 对话台 | 工具卡片的**耗时**无源 | 隐藏该格；入参/返回可走 messages 接口补 |
 | 外壳 | **模型切换**无源 | 只读展示或去掉 |
@@ -2114,7 +2113,7 @@ export const MOCK_METRICS = [ /* { metric, dimension, points: [{ date, value }] 
 
 | 项 | 说明 | 状态 |
 |---|---|---|
-| SSE 流式 | 后端尚未实现；本文给的方案 A（一次渲染 + 思考中）是过渡态 | ⏳ 待后端 |
+| SSE 流式 | ~~后端尚未实现；本文给的方案 A（一次渲染 + 思考中）是过渡态~~ → **已落地**：后端 `POST /api/chat/stream`（meta/token/reset/tool/done/error 六事件）+ 前端 `fetch` 手写帧解析（EventSource 只能 GET，不可用）+ nginx `proxy_buffering off`；双端（5173/8080）验收通过（2026-10-13） | ✅ 已完成 |
 | Trace 页数据源 | Langfuse 有数据但无 REST 出口 | ⏳ 未排期 |
 | 检索检查器的结构化数据 | 后端只返回一段字符串 | ⏳ 未排期 |
 | `/api/metrics` | 语义层，D35 才做 | ⏳ 待 D35 |

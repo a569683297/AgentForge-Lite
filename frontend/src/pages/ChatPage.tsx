@@ -1,8 +1,8 @@
 import { PaperClipOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons';
 import { Button, Input, Space } from 'antd';
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { sendMessage } from '../api/chat';
+import { sendMessageStream } from '../api/chat';
 import { getSessionMessages } from '../api/sessions';
 import { getTools } from '../api/tools';
 import { pairToolMessages, type PairedToolCall } from '../lib/format';
@@ -12,14 +12,35 @@ import { ErrorState } from '../components/EmptyState';
 import { MessageList, type ChatMessageView } from '../components/MessageList';
 import styles from '../styles/chat.module.css';
 
+/**
+ * 把 PG 全量消息映射成气泡列表。
+ *
+ * ⚠ 配对纪律（修过的 bug，2026-10-13 实测暴露）：
+ *   一条 assistant 消息**只配它自己那一段工具消息**（紧跟其后的连续 tool 消息）。
+ *   原实现把 `history.slice(index + 1)` 整段丢给 `pairToolMessages`，而该函数会遍历
+ *   数组里**所有**带 tool_calls 的 assistant —— 后续轮次的工具被重复配对到前面的消息上：
+ *   8 次真实调用（4 轮 × 2 并行）刷新后渲染成 30 张卡片。多轮下钻的会话必现。
+ */
 function fromHistory(history: MessageItem[]): ChatMessageView[] {
-  return history.filter((message) => message.role !== 'tool').map((message, index) => ({
-    id: `${message.created_at}-${index}`,
-    role: message.role === 'user' ? 'user' : 'assistant',
-    content: message.content,
-    createdAt: message.created_at,
-    tools: message.role === 'assistant' && message.tool_calls ? pairToolMessages([message, ...history.slice(index + 1)]) : undefined,
-  }));
+  return history
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => message.role !== 'tool')
+    .map(({ message, index }): ChatMessageView => ({
+      id: `${message.created_at}-${index}`,
+      role: message.role === 'user' ? 'user' : 'assistant',
+      content: message.content,
+      createdAt: message.created_at,
+      tools: message.role === 'assistant' && message.tool_calls ? pairToolMessages([message, ...consecutiveToolMessages(history, index)]) : undefined,
+    }));
+}
+
+/** 取紧跟在 index 之后的一段**连续** tool 消息（一条 assistant 的本轮返回值都在这一段里） */
+function consecutiveToolMessages(history: MessageItem[], index: number): MessageItem[] {
+  const run: MessageItem[] = [];
+  for (let i = index + 1; i < history.length && history[i].role === 'tool'; i += 1) {
+    run.push(history[i]);
+  }
+  return run;
 }
 
 export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void }) {
@@ -56,42 +77,103 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, loading]);
 
-  // POST /api/chat 只回工具名（tool_calls: string[]），不返回入参与结果 → 一律落 null，
-  // 由 ToolCallCard 显式渲染「接口未返回」；这里**不编造**入参对象与结果文案。
-  const toolCallFactory = useMemo(() => (names: string[]): PairedToolCall[] => names.map((name) => ({ name, arguments: null, result: null, failed: false })), []);
+  // 首个 token / 工具事件到达后，气泡自身就是"正在工作"的反馈 —— 收起通用加载提示，
+  // 避免同一件事两个提示（发送按钮的 spinner 保留：它同时兼任"阻止重复发送"）。
+  const streamHasOutput = messages.some(
+    (item) => item.streaming && (item.content.length > 0 || (item.tools?.length ?? 0) > 0),
+  );
 
   async function submit() {
     const message = input.trim();
     if (!message || loading) return;
     setError(null);
     setInput('');
-    setMessages((current) => [...current, { id: `user-${Date.now()}`, role: 'user', content: message, createdAt: new Date().toISOString() }]);
+
+    // 一条"占位气泡"随流生长：token 到了就往它身上追加 ——
+    // 流式体验的核心：不再等整轮结束才出现一条完整回答
+    const assistantId = `assistant-${Date.now()}`;
+    setMessages((current) => [
+      ...current,
+      { id: `user-${Date.now()}`, role: 'user', content: message, createdAt: new Date().toISOString() },
+      { id: assistantId, role: 'assistant', content: '', createdAt: new Date().toISOString(), streaming: true, toolSources },
+    ]);
     setLoading(true);
+
+    // 流式累加态（闭包变量）：onEvent 是**同步**回调，token/reset/tool 按到达顺序生效。
+    // 不放 state 的原因：真正的展示状态在 messages 里（每次打补丁），
+    // 这两个变量只是"当前进度"的累加器，没必要触发额外渲染。
+    let answer = '';
+    let tools: PairedToolCall[] = [];
+    const patchAssistant = (patch: Partial<ChatMessageView>) => {
+      setMessages((current) => current.map((item) => (item.id === assistantId ? { ...item, ...patch } : item)));
+    };
+
+    // 「收到 done 或 error」才算正常收尾；两个都没有 = 连接异常中断（如进程被杀）
+    let settled = false;
+
     try {
-      const response = await sendMessage(message, sessionId);
-      // 首条消息会产生新会话 id：把地址栏从 /chat 换成 /chat/:id。
-      // 用 replace 而不是 push —— 新会话的 /chat 只是"发送前"的临时态，
-      // 不该留在浏览器历史里（否则用户按后退会回到空会话，看着像卡住）。
-      // 判断 id 变化才跳：多轮对话时 URL 没变，避免无意义的 history 写入。
-      if (response.session_id !== sessionId) {
-        navigate(`/chat/${response.session_id}`, { replace: true });
+      await sendMessageStream(message, sessionId, (event) => {
+        switch (event.type) {
+          case 'token':
+            answer += event.text;
+            patchAssistant({ content: answer });
+            break;
+          case 'reset':
+            // 模型中途说了话又改去调工具 —— 那段文本不属于最终回答，清掉
+            // （后端只在"确实有中间文本被发出"时才发这一帧；见 llm_gateway 的 reset 说明）
+            answer = '';
+            patchAssistant({ content: '' });
+            break;
+          case 'tool': {
+            if (event.phase === 'start') {
+              tools = [...tools, { name: event.name, arguments: null, result: null, failed: false, running: true }];
+            } else {
+              // 配对该工具**最早的**运行中实例：同名工具可以在一轮里被调用多次，
+              // 后端 start/end 是成对有序发出的，这里按序配对即可
+              const index = tools.findIndex((tool) => tool.name === event.name && tool.running);
+              if (index >= 0) {
+                tools = tools.map((tool, i) => (i === index ? { ...tool, running: false, failed: event.ok === false } : tool));
+              }
+            }
+            patchAssistant({ tools });
+            break;
+          }
+          case 'done':
+            settled = true;
+            setSources(event.sources);
+            setInvalidCitations(event.invalid_citations);
+            // 以 done.answer 收口对齐：正常情况与累加值相同；reset 边界 / 丢帧时，
+            // 这一步保证"屏幕上的最终文本 == 落库文本"
+            patchAssistant({ content: event.answer });
+            // 首条消息会产生新会话 id：把地址栏从 /chat 换成 /chat/:id。
+            // **刻意等 done 才跳**（不在 meta 帧就跳）：navigate 会触发路由参数变化 →
+            // 历史加载 effect 触发 setMessages(history) —— 流式期间跳会把正在生长的
+            // 气泡冲掉；done 之后跳，PG 里已有本轮完整记录，重读出来就是对的。
+            // 判断 id 变化才跳：多轮对话时 URL 没变，避免无意义的历史写入。
+            if (event.session_id !== sessionId) {
+              navigate(`/chat/${event.session_id}`, { replace: true });
+            }
+            // 侧栏「最近会话」需要包含这条新会话（列表数据在 App 手里）
+            onSessionsRefresh();
+            break;
+          case 'error':
+            settled = true;
+            setError(event.message);
+            break;
+          case 'meta':
+            // 暂不消费：会话 id 以 done 为准（理由见上面 navigate 的注释）
+            break;
+        }
+      });
+      if (!settled) {
+        setError('流式连接意外中断 —— 本轮回答可能不完整');
       }
-      // 侧栏「最近会话」需要包含这条新会话（列表数据在 App 手里）
-      onSessionsRefresh();
-      setSources(response.sources);
-      setInvalidCitations(response.invalid_citations);
-      setMessages((current) => [...current, {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        content: response.answer,
-        createdAt: new Date().toISOString(),
-        tools: toolCallFactory(response.tool_calls),
-        toolSources,
-      }]);
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : '对话请求失败，请检查 API 服务');
     } finally {
       setLoading(false);
+      // 无论正常结束还是异常结束，都摘掉流式标记：气泡切回引用感知渲染、残留态归零
+      patchAssistant({ streaming: false });
     }
   }
 
@@ -120,7 +202,7 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
           <Space size={8}><Button size="small" icon={<PlusOutlined />} onClick={resetConversation}>新建会话</Button><Button size="small">导出</Button></Space>
         </div>
         <div className={styles.messageList} ref={listRef}>
-          <MessageList messages={messages} sources={sources} invalidCitations={invalidCitations} loading={loading} onCitation={setSelectedSource} />
+          <MessageList messages={messages} sources={sources} invalidCitations={invalidCitations} loading={loading && !streamHasOutput} onCitation={setSelectedSource} toolSources={toolSources} />
           {error ? <ErrorState message={error} action="重试" onAction={() => setError(null)} /> : null}
           {!messages.length && !loading && !error ? <div className={styles.chatEmpty}>输入一个问题，观察 Agent 的检索和工具调用过程。</div> : null}
         </div>

@@ -25,16 +25,18 @@ assistant 消息带 tool_calls → tool 消息带 tool_call_id 关联返回
 Edge=固定路由 / 条件边=动态路由
 """
 
+import contextvars
 import json
 import uuid
-from typing import Literal, NotRequired, TypedDict
+from typing import AsyncIterator, Literal, NotRequired, TypedDict
 
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from app.core.citation import check_citations, get_sources, reset_sources
 from app.core.logging import logger
 from app.schemas.chat import ChatResult, SourceItem
-from app.services.llm_gateway import chat_with_tools
+from app.services.llm_gateway import chat_with_tools, chat_with_tools_stream
 
 # D28：观测层唯一出口（span 命名规范、根 span、trace 级属性都从这里取）
 from app.services.observability import SPAN_ROOT, span, tool_span_name, trace_attrs
@@ -48,6 +50,22 @@ from app.tools.registry import get_tool_source
 # ⚠ 修复前这里只在注释里写着"=10"，代码里从未真正传给 LangGraph —— 实际生效的是库默认值 25，
 #   注释与行为不符。现在显式声明，不让它跟着库默认值漂。
 RECURSION_LIMIT = 12
+
+
+# ---- 流式开关（M6 优化②）----
+# "当前这次跑图，要不要把过程实时推给下游"—— plan / execute 节点据此决定：
+# 走流式通道 + 发事件（True），还是维持改造前的原路径（False）。
+#
+# 为什么用 ContextVar（"随执行上下文自动传递的变量"）而不是给节点传参：
+#   ① 节点签名是 LangGraph 的契约（state → state），加参数要改一层传递链；
+#   ② ContextVar 的语义恰好就是"这次请求的上下文"—— 在 astream 之前 set、
+#      finally reset；节点协程由 asyncio 复制上下文时自动继承。
+#      （实测三种场景：ainvoke 里读 False / astream 里读 True / reset 后回 False）
+# ⚠ 它只影响"发不发事件、走不走流式通道"，**不改变图的结构与状态** ——
+#   同一份 state 走两条路径，产物字段逐字段一致（这是"流式不影响业务"的机制保证）。
+_STREAMING: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "agent_streaming", default=False
+)
 
 
 # ---- State：所有节点共享的状态（类比 pinia store）----
@@ -116,18 +134,52 @@ async def plan_node(state: AgentState) -> AgentState:
         if any(m.get("role") == "tool" for m in messages)
         else "agent-plan"
     )
-    result = await chat_with_tools(
+    prompt_messages = (
         [{"role": "system", "content": build_system_prompt(state.get("summary"))}]
-        + messages,
-        get_tools_schema(),   # ← 从注册表取（D8：不再内联）
-        trace_name=trace_name,
+        + messages
     )
+    if _STREAMING.get():
+        # 流式分支：走流式通道，边收边把 content 增量推给下游（SSE 出口）。
+        # writer 是 LangGraph 的 custom 流出口：非流式运行时它是空操作（实测），
+        # 所以这里的调用本身不会给非流式路径带来任何行为变化。
+        writer = get_stream_writer()
+        result = await chat_with_tools_stream(
+            prompt_messages,
+            get_tools_schema(),   # ← 从注册表取（D8：不再内联）
+            trace_name=trace_name,
+            on_content=lambda text: writer({"type": "token", "text": text}),
+        )
+        assistant_msg = result["message"]
+        # 中间轮的"预告文本"（如"我来查一下"）已经漏给了前端 —— 这一轮最终走向
+        # 工具调用，那段文本不属于最终回答，补一帧 reset 让前端清掉：
+        # 保证"屏幕上的文字"最终 == done 里的 answer，而不是半截预告 + 正式回答拼接。
+        # （实测 DeepSeek 调工具时 content 恒为空、这帧不会触发；属防御性封边。）
+        if assistant_msg.get("tool_calls") and assistant_msg.get("content"):
+            writer({"type": "reset"})
+    else:
+        # ↓ 非流式分支：与改造前**逐字一致** —— run_agent / 评测 / 回归零影响
+        result = await chat_with_tools(
+            prompt_messages,
+            get_tools_schema(),   # ← 从注册表取（D8：不再内联）
+            trace_name=trace_name,
+        )
+        assistant_msg = result["message"]
     # LLM 返回的完整 assistant 消息（可能含 tool_calls 数组；也可能就是最终回答）
-    assistant_msg = result["message"]
     return {"messages": messages + [assistant_msg]}
 
 
 # ---- 节点 2：execute（执行工具）+ observe（结果写回）----
+def _is_tool_failure(output: str) -> bool:
+    """
+    工具输出是否算"失败"——span 的 ERROR 判定与流式 end 事件的 `ok` 用**同一判定**。
+
+    表达式与改造前 span 里的那行**逐字一致**（不加不减）：
+    两条出口若各写一份，改一处忘一处就会出现"卡片显示成功、trace 标红"（或反过来）
+    —— 同一个事实两个真相。抽出来是为了保证它们将来也不会分叉。
+    """
+    return "执行失败" in output or "未知工具" in output
+
+
 async def execute_node(state: AgentState) -> AgentState:
     """执行 assistant 消息里声明的 tool_calls，结果以 tool 消息写回。
 
@@ -137,6 +189,9 @@ async def execute_node(state: AgentState) -> AgentState:
     messages = state["messages"]
     last = messages[-1]  # plan 追加的 assistant 消息（含 tool_calls）
     tool_calls = last.get("tool_calls") or []
+
+    # 流式：本节点负责"工具开始/结束"两个事件（前端据此把卡片从「运行中」推进到结果态）
+    writer = get_stream_writer() if _STREAMING.get() else None
 
     tool_messages = []
     for tc in tool_calls:
@@ -152,6 +207,11 @@ async def execute_node(state: AgentState) -> AgentState:
         # （PRD F8.4 要的是"这一次是外部 server 的调用，不是自研工具"）。
         source = get_tool_source(fn_name)
         mcp_server_name = source if source != "local" else None
+
+        # 流式：执行**开始前**推 start —— 前端即时显示「正在调用 xxx」，
+        # 这正是"Agent 过程可见"的落点（工具可能要跑 1~3 秒，这才是用户真正在等的时间）
+        if writer:
+            writer({"type": "tool", "name": fn_name, "phase": "start"})
 
         with span(
             tool_span_name(fn_name),
@@ -182,8 +242,12 @@ async def execute_node(state: AgentState) -> AgentState:
             tool_span.update(
                 input=args,
                 output=out,
-                level="ERROR" if ("执行失败" in out or "未知工具" in out) else "DEFAULT",
+                level="ERROR" if _is_tool_failure(out) else "DEFAULT",
             )
+
+        # 流式：执行完推 end（ok 与上面 span 的判定同一启发式 —— 见 _is_tool_failure）
+        if writer:
+            writer({"type": "tool", "name": fn_name, "phase": "end", "ok": not _is_tool_failure(out)})
 
         # tool 消息必须带 tool_call_id 关联（否则 400）
         tool_messages.append(
@@ -414,3 +478,154 @@ async def run_agent(
         invalid_citations=invalid,
         tool_calls=tool_names,
     )
+
+
+# ============================================================
+# 流式入口（M6 优化②）：run_agent 的逐段镜像
+# ============================================================
+async def run_agent_stream(
+    session_id: uuid.UUID,
+    user_input: str,
+    *,
+    persist: bool = True,
+) -> AsyncIterator[dict]:
+    """
+    流式版 run_agent：产出**结构化事件流**（服务层只产事件，SSE 编码是接口层的事）。
+
+    事件协议（前后端对齐的唯一出处；接口层 app/api/chat.py 只做"事件 → SSE 帧"的编码）：
+        {"type": "token", "text": "..."}      答案增量（逐段，可能一帧多段）
+        {"type": "reset"}                     清掉当前气泡里的中间文本
+                                              （模型中途说了话又改去调工具时的处置）
+        {"type": "tool", "name": ..., "phase": "start"}
+        {"type": "tool", "name": ..., "phase": "end", "ok": true|false}
+        {"type": "done", "session_id", "answer", "sources",
+                        "invalid_citations", "tool_calls"}
+                                              —— 字段与 ChatResponse 对齐
+
+    与 run_agent 的关系（M6 优化② 的核心约束）：
+        - 读历史、组装 state、跑图、取结果、引用校验、三层写回 —— **同一套逻辑的逐段镜像**
+          （本函数 ⓪~⑨ 与 run_agent ⓪~⑨ 一一对应，连注释编号都对齐）；
+        - 唯一机制差异：图用 `astream` 跑（能收到节点发的事件），最终状态从
+          "ainvoke 的返回值"改为"收集末个 values 快照"；
+        - **原 run_agent 一行未改**：评测、回归脚本、`POST /api/chat` 走的还是它。
+          ⚠ 代价：两处逻辑需同步维护 —— 改 run_agent 的任一编号步骤时，回来对照这里。
+
+    done 为什么在写回**之后**才发：前端收到 done 即会跳 URL / 刷新侧栏，此后任何
+    刷新、重读都必须能看到本轮的完整落库版本；若先发 done 再写回，两者之间会存在
+    一个"屏幕上有答案、历史里读不到"的窗口。
+    """
+    from app.services.memory_service import append_turn, get_window, maybe_summarize
+    from app.services.session_service import append_messages, get_summary
+
+    # ⓪ 引用收集器重绑（同 run_agent：ContextVar 复制的是绑定不是对象，必须每请求重绑）
+    reset_sources()
+
+    # ① 读历史（Redis 优先，未命中/不可用走 PG 兜底）
+    history = await get_window(session_id)
+
+    # ①.5 读长期摘要（首次对话时 sessions 行还没建 → None，system 里不拼这一段）
+    summary = await get_summary(session_id)
+
+    # ② 组装状态（与 run_agent 相同：历史 + 本轮提问；摘要单独走 state.summary）
+    state: AgentState = {
+        "messages": history + [{"role": "user", "content": user_input}],
+        "step_count": 0,
+        "summary": summary,
+    }
+
+    stream_token = _STREAMING.set(True)
+    try:
+        # ③~⑥.5 与 run_agent 同一段：用户等待的全部，包进一条 trace（写回不在此范围内）
+        with trace_attrs(session_id=session_id, trace_name=SPAN_ROOT):
+            with span(
+                SPAN_ROOT,
+                as_type="agent",
+                input={"user_input": user_input},
+                metadata={"persist": persist, "stream": True},
+            ) as root_span:
+                # ③ 流式跑图：custom 事件逐条产出；values 快照保留最后一个（= 最终状态）
+                #    （双模式实测形状：`(mode, chunk)` 元组；values 覆盖全图每个超步）
+                final_state: AgentState | None = None
+                async for mode, chunk in get_agent().astream(
+                    state,
+                    config={"recursion_limit": RECURSION_LIMIT},
+                    stream_mode=["custom", "values"],
+                ):
+                    if mode == "custom":
+                        yield chunk
+                    else:
+                        final_state = chunk
+
+                assert final_state is not None, "astream 未产出任何 values 快照，图运行异常"
+
+                # ④~⑥.5 从最终状态取结果（逐段对应 run_agent 的 ④⑤⑥⑥.5）
+                result_messages = final_state["messages"]
+                final_answer = ""
+                for msg in reversed(result_messages):
+                    if msg["role"] == "assistant" and msg.get("content"):
+                        final_answer = msg["content"]
+                        break
+
+                raw_sources = get_sources()
+                sources = [SourceItem(**item) for item in raw_sources]
+
+                invalid = check_citations(final_answer, len(sources))
+                if invalid:
+                    logger.warning(
+                        "回答引用了不存在的来源编号 session=%s 越界编号=%s 实际来源数=%d",
+                        session_id,
+                        invalid,
+                        len(sources),
+                    )
+
+                new_messages = result_messages[len(history):]
+                tool_names = [
+                    (call.get("function") or {}).get("name", "")
+                    for message in new_messages
+                    if message.get("role") == "assistant"
+                    for call in (message.get("tool_calls") or [])
+                ]
+                tool_names = [name for name in tool_names if name]
+
+                root_span.update(
+                    output={"answer": final_answer, "tool_calls": tool_names}
+                )
+    finally:
+        # 无论正常结束 / 异常 / 客户端断开，开关都要复位 ——
+        # 泄漏成 True 会让"下一次非流式跑图"误走流式通道（回归脚本就在同进程里跑）
+        _STREAMING.reset(stream_token)
+
+    # ---- ⑦⑧⑧.5 写回会话记忆（镜像 run_agent；persist=False 整体跳过）----
+    #      刻意放在 span 之外：写回是副作用，不占"用户等待"的延迟（与 run_agent 同一约定）
+    if persist:
+        await append_turn(session_id, user_input, final_answer)
+
+        try:
+            await append_messages(session_id, new_messages, title_hint=user_input)
+        except Exception:
+            logger.exception("PG 落库失败（流式结果仍已返回）session=%s", session_id)
+
+        try:
+            await maybe_summarize(session_id)
+        except Exception:
+            logger.exception("摘要压缩检查失败（对话不受影响）session=%s", session_id)
+
+    # ⑨ done 事件（字段与 ChatResponse 对齐；sources 先 model_dump 成可 JSON 的 dict ——
+    #    接口层只做 SSE 编帧，不做数据转换）
+    logger.info(
+        "Agent 流式完成 session=%s 回答长度=%d 来源数=%d 工具调用=%s 越界引用=%s persist=%s",
+        session_id,
+        len(final_answer),
+        len(sources),
+        tool_names or "无",
+        invalid or "无",
+        persist,
+    )
+    yield {
+        "type": "done",
+        "session_id": str(session_id),
+        "answer": final_answer,
+        "sources": [s.model_dump() for s in sources],
+        "invalid_citations": invalid,
+        "tool_calls": tool_names,
+    }

@@ -8,6 +8,8 @@
 代价是这些用例必须**只读**：不建、不改、不删任何数据。
 """
 
+import json
+
 import pytest
 
 pytestmark = pytest.mark.db
@@ -201,3 +203,83 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
     assert covered == set(ChatResult.model_fields), (
         "ChatResult 字段变了：请在桩里为新字段补哨兵值，并加一条能原样读回的断言"
     )
+
+
+# ============================================================
+# 流式对话接口（M6 优化②）
+# ============================================================
+
+
+async def test_chat_stream_forwards_service_events_as_sse_frames(api_client, monkeypatch):
+    """
+    ★ 流式出口的结构守卫：`run_agent_stream` 产出的每个事件，必须**原样**变成一条 SSE 帧。
+
+    D36 的教训在流式出口同样成立：done 帧里 `tool_calls` / `invalid_citations`
+    这类"有默认值、漏传不报错"的字段，用哨兵值钉死 —— 漏传哪个，哪个退回默认值 → 这边红
+    （与 test_chat_forwards_every_chatresult_field_to_http 对称，一条守非流式、一条守流式）。
+
+    顺带钉住帧协议三个硬约束（前端解析器就按它实现）：
+      ① 第一帧必须是 meta 且带 session_id（前端靠它确认"流已建立"）；
+      ② 帧分隔符 `\\n\\n`、每帧一个 `data: ` 行、JSON 可解析；
+      ③ done 是终帧。
+    """
+    from app.api import chat as chat_module
+    from app.schemas.chat import SourceItem
+
+    async def _fake_stream(session_id, message):  # 签名对齐路由里的调用
+        yield {"type": "token", "text": "哨兵"}
+        yield {"type": "reset"}
+        yield {"type": "tool", "name": "SENTINEL_TOOL", "phase": "start"}
+        yield {"type": "tool", "name": "SENTINEL_TOOL", "phase": "end", "ok": True}
+        yield {
+            "type": "done",
+            "session_id": str(session_id),
+            "answer": "哨兵回答",
+            "sources": [
+                SourceItem(
+                    index=7,
+                    source="SENTINEL_DOC",
+                    content="哨兵片段",
+                    similarity=0.4242,
+                    page_ref="p.42",
+                ).model_dump()
+            ],
+            "invalid_citations": [13],
+            "tool_calls": ["SENTINEL_TOOL"],
+        }
+
+    monkeypatch.setattr(chat_module, "run_agent_stream", _fake_stream)
+
+    resp = await api_client.post("/api/chat/stream", json={"message": "任意一句话"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    # SSE 三件套里的两件：不缓存 + 告诉 nginx "这条响应不要缓冲"
+    # （漏了后者，8080 上的症状是"后端在逐字发、界面一次性蹦出"）
+    assert resp.headers["cache-control"] == "no-cache"
+    assert resp.headers["x-accel-buffering"] == "no"
+
+    frames = [frame for frame in resp.text.split("\n\n") if frame]
+    assert frames, "响应体里没有任何 SSE 帧"
+    events = []
+    for frame in frames:
+        assert frame.startswith("data: "), f"帧不是 data: 行开头：{frame!r}"
+        events.append(json.loads(frame[len("data: "):]))
+
+    assert events[0]["type"] == "meta"
+    assert events[0]["session_id"]  # 服务端补全的会话 id
+    assert [e["type"] for e in events[1:]] == ["token", "reset", "tool", "tool", "done"]
+    assert events[1]["text"] == "哨兵"
+
+    done = events[-1]
+    # 哨兵逐字段读回 —— 漏传 / 被默认值吞掉，这里就红
+    assert done["answer"] == "哨兵回答"
+    assert done["tool_calls"] == ["SENTINEL_TOOL"]
+    assert done["invalid_citations"] == [13]
+    assert [s["source"] for s in done["sources"]] == ["SENTINEL_DOC"]
+    assert done["sources"][0]["page_ref"] == "p.42"
+
+
+async def test_chat_stream_rejects_empty_message_with_422(api_client):
+    """参数校验与 /api/chat 同一收口（pydantic min_length=1）—— "流式"不是绕过校验的理由。"""
+    resp = await api_client.post("/api/chat/stream", json={"message": ""})
+    assert resp.status_code == 422

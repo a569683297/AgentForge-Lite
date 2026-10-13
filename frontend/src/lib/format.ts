@@ -44,6 +44,16 @@ export interface PairedToolCall {
   result: string | null;
   /** 只在 `result` 存在时可判定；`result` 为 `null` 时恒为 `false`（**未知 ≠ 成功**）。 */
   failed: boolean;
+  /**
+   * 流式过程中「工具正在执行」的瞬时标记（M6 优化②）。
+   * 只在流式气泡存活期间为 `true`（收到 tool start 后、tool end 前）；
+   * 流结束、或从 PG 重读历史后不再有它（`undefined`）。
+   *
+   * 与 `failed` 的关系：`running` 期间 `failed` 恒为 `false` —— 结果还没回来，
+   * "失败"根本判不了。这正是「未知 ≠ 成功」在时间维度上的又一面：
+   * 卡片必须把"正在跑"与"跑完了但没拿到结果"渲染成两种状态。
+   */
+  running?: boolean;
 }
 
 /** 解析 `tool_calls[].function.arguments`（一个 JSON 字符串）。解析不出来返回 `null`（= 未知），不返回 `{}`。 */

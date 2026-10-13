@@ -20,6 +20,28 @@ export interface ChatResponse {
   tool_calls: string[];
 }
 
+/**
+ * `POST /api/chat/stream` 的 SSE 事件（帧协议的唯一前端出处）。
+ *
+ * 与后端对齐位置：`app/services/agent_service.py::run_agent_stream` 的 docstring
+ * （服务层定义事件形状）+ `app/api/chat.py::chat_stream` 的 docstring（接口层定义编帧）。
+ * 改协议时三处一起改。
+ */
+export type ChatStreamEvent =
+  | { type: 'meta'; session_id: string }
+  | { type: 'token'; text: string }
+  | { type: 'reset' }
+  | { type: 'tool'; name: string; phase: 'start' | 'end'; ok?: boolean }
+  | {
+      type: 'done';
+      session_id: string;
+      answer: string;
+      sources: SourceItem[];
+      invalid_citations: number[];
+      tool_calls: string[];
+    }
+  | { type: 'error'; message: string };
+
 export interface DocumentOut {
   id: string;
   filename: string;

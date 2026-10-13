@@ -5,6 +5,8 @@ LLM Gateway（D7 版本：双通道降级 + Langfuse 追踪）
 
 D5：单通道 + Langfuse 追踪
 D7：双通道降级（主通道失败 → 自动切备用通道）
+M6 优化②：新增流式通道（chat_with_tools_stream）—— 对话台 SSE 的底层出口。
+    与非流式**并存**：非流式仍是评测 judge / 回归脚本的通道，两边独立演进。
 
 降级流程：
 chat() → 尝试主通道 → 成功返回
@@ -31,8 +33,9 @@ D22 改为**给 Gateway 加锁定通道的能力**，而不是让调用方自己
 这是"降级是有代价的"这条认识的具体落地：**降级让"用了哪个通道"这件事从数据里消失**。
 """
 
+import json
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from langfuse import Langfuse
@@ -125,6 +128,143 @@ async def _call_once(
         time.perf_counter() - start,
     )
     return {"data": data, "usage": usage}
+
+
+# ============================================================
+# 内部：单通道**流式**调用（M6 优化②；与 _call_once 同构）
+# ============================================================
+async def _call_once_stream(
+    provider: dict,
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    trace_name: str,
+    gen: Any,
+    temperature: float = DEFAULT_TEMPERATURE,
+    on_content: Callable[[str], None] | None = None,
+) -> dict:
+    """
+    用指定 provider **流式**调用一次 LLM，逐帧拼接出与非流式一致的结果。
+
+    与非流式的三点结构差异（每一点都对着真实帧格式，2026-10-13 实测 DeepSeek 官方）：
+      ① 请求体加 `stream: true` + `stream_options.include_usage: true` ——
+         不加后者，末帧**不会带 usage**，Langfuse 的 token 统计会全部归零
+         （OpenAI 协议的扩展参数，DeepSeek 官方已实测支持）。
+      ② 响应是 SSE 帧（`data: {...}` 行、`data: [DONE]` 收尾），不是一整只 JSON ——
+         用 httpx 流式接口逐行读，边读边回调。
+      ③ `tool_calls[].function.arguments` 是**逐字符分片**到达的
+         （实测原样：`{`、`"`、`city`、`": "`、`"北京"`、`"}`…），
+         必须按 `index` 聚合并拼接；`id` / `name` 只在首片出现。
+
+    返回值刻意与非流式**同构**（`{"data": ..., "usage": ...}`，message 字段一一对应）——
+    这样"流式 vs 非流式"对上层只差"token 何时被看到"，落库/引用校验/工具判定零改动。
+
+    Args:
+        on_content: 每收到一段 content 增量就同步回调一次（**只对非空增量调用**）。
+                    传 None 时等价于"只拼接、不回调"（可当非流式用）。
+    """
+    payload: dict[str, Any] = {
+        "model": provider["model"],
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+        # 让末帧带上 usage（否则 Langfuse 看不到 token）。
+        # ⚠ 这是 OpenAI 协议的扩展参数：DeepSeek 官方支持；若某中转通道拒绝它，
+        #   会在**连接期**（还没出字时）失败 → 走降级逻辑换通道，不会污染已出的内容。
+        "stream_options": {"include_usage": True},
+    }
+    if tools:
+        payload["tools"] = tools
+
+    start = time.perf_counter()
+    content_parts: list[str] = []
+    tool_slots: dict[int, dict] = {}   # index → {id, type, function:{name,arguments}}（分片聚合）
+    usage: dict = {}
+    finish_reason: str | None = None
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        async with client.stream(
+            "POST",
+            f"{provider['base_url']}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {provider['api_key']}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        ) as resp:
+            resp.raise_for_status()   # 非 2xx 抛异常（触发降级，见 _call_with_failover_stream）
+            async for line in resp.aiter_lines():
+                # 只要 `data:` 行；空行、": keep-alive" 注释行一律跳过
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                if data_str == "[DONE]":
+                    break
+                chunk = json.loads(data_str)
+
+                # usage 可能出现在任意帧：实测 DeepSeek 附在 finish 帧上；
+                # OpenAI 系可能再加一帧"choices 为空、只有 usage"。—— 先于 choices 判断处理
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+
+                delta = choice.get("delta") or {}
+                text = delta.get("content")
+                if text:
+                    content_parts.append(text)
+                    if on_content is not None:
+                        on_content(text)
+
+                for tc in delta.get("tool_calls") or []:
+                    slot = tool_slots.setdefault(
+                        tc.get("index", 0),
+                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                    )
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    # name / arguments 都按"分片拼接"处理：
+                    # 实测正常情况下 name 只在首片完整出现（拼接与覆盖等价）；
+                    # 但协议允许它被切片到达，拼接才是对所有通道都正确的写法。
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+
+    # 拼回与非流式同形的 assistant 消息
+    message: dict = {"role": "assistant", "content": "".join(content_parts)}
+    if tool_slots:
+        message["tool_calls"] = [tool_slots[i] for i in sorted(tool_slots)]
+
+    output: dict = {}
+    if tools:
+        output = {"message": message}
+    else:
+        output = {"reply": message["content"]}
+    gen.update(
+        output=output,
+        usage_details={
+            "input": usage.get("prompt_tokens", 0),
+            "output": usage.get("completion_tokens", 0),
+            "total": usage.get("total_tokens", 0),
+        },
+    )
+    logger.info(
+        "LLM 流式调用成功 model=%s tokens=%s 耗时=%.2fs",
+        provider["model"],
+        usage.get("total_tokens", 0),
+        time.perf_counter() - start,
+    )
+    return {
+        "data": {"choices": [{"message": message, "finish_reason": finish_reason}]},
+        "usage": usage,
+    }
 
 
 # ============================================================
@@ -237,6 +377,86 @@ async def _call_with_failover(
 
 
 # ============================================================
+# 降级循环（流式版）：与 _call_with_failover 只差一条"出字即锁"
+# ============================================================
+async def _call_with_failover_stream(
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    trace_name: str,
+    temperature: float = DEFAULT_TEMPERATURE,
+    on_content: Callable[[str], None] | None = None,
+) -> dict:
+    """
+    带降级的**流式**调用：主通道 → 失败 → 备用通道 → 失败 → 抛错。
+
+    与非流式降级唯一的语义差异 —— **"已出字"就不再换通道**：
+
+        非流式：失败 = 什么都没发生 → 换备用通道重来，用户全程无感。
+        流式：  失败可能发生在**已经吐出一截答案之后**。此时换通道重来，
+                用户屏幕上会变成"半截话 + 另一个模型从头再讲一遍" ——
+                两段文字拼在一起，看起来像模型胡言乱语，比直接报错更糟。
+                正确规则：**一个字都没出的失败才允许降级；出字之后再失败，直接抛**。
+
+    这条差异只在流式里存在 —— 因为流式把"过程"发给了用户，而发出去的东西收不回来。
+    （流式对话不需要 D22 的"锁定通道"能力：那是给 judge 的，judge 不走这条路。）
+    """
+    channels = _resolve_channels(None, True)
+
+    last_error: Exception | None = None
+
+    for idx, (channel, provider_label) in enumerate(channels):
+        if not channel.get("api_key"):
+            continue  # 该通道无 key，跳过（与 _call_with_failover 同）
+
+        # "这条通道有没有已经吐过字" —— 决定失败后能否安全降级
+        emitted = False
+
+        def _emit(text: str) -> None:
+            nonlocal emitted
+            emitted = True
+            if on_content is not None:
+                on_content(text)
+
+        with langfuse.start_as_current_observation(
+            name=trace_name,
+            as_type="generation",
+            model=channel["model"],
+            model_parameters={"temperature": temperature, **({"tools": tools} if tools else {})},
+            input={"messages": messages},
+            metadata={"provider": provider_label, "stream": True},
+        ) as gen:
+            try:
+                result = await _call_once_stream(
+                    channel,
+                    messages,
+                    tools=tools,
+                    trace_name=trace_name,
+                    gen=gen,
+                    temperature=temperature,
+                    on_content=_emit,
+                )
+                result["provider"] = provider_label
+                return result
+            except Exception as e:
+                last_error = e
+                gen.update(level="ERROR", status_message=f"{provider_label} 失败: {e}")
+                if emitted:
+                    # 已经吐过字 —— 不能换通道（理由见 docstring），原样抛出。
+                    # 不包装：让调用方看到真实异常（与 D22 锁定模式不包装同一条理由）。
+                    logger.warning("%s 流式调用中途失败（已输出内容，不再降级）", provider_label)
+                    raise
+                logger.warning(
+                    "%s 流式调用失败（尚未输出内容），%s",
+                    provider_label,
+                    "切换备用通道" if idx < len(channels) - 1 else "无可用通道",
+                )
+
+    assert last_error is not None, "通道列表非空却没有任何异常，说明 _resolve_channels 返回了空列表"
+    raise RuntimeError(f"所有 LLM 通道均失败: {last_error}") from last_error
+
+
+# ============================================================
 # 对外 API
 # ============================================================
 # 签名新增的两个参数都有默认值 → 已有调用方零改动（原行为完全不变）。
@@ -286,5 +506,33 @@ async def chat_with_tools(
         temperature=temperature,
         provider=provider,
         allow_failover=allow_failover,
+    )
+    return {"message": result["data"]["choices"][0]["message"], "usage": result["usage"]}
+
+
+async def chat_with_tools_stream(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    trace_name: str = "llm-tools",
+    temperature: float = DEFAULT_TEMPERATURE,
+    on_content: Callable[[str], None] | None = None,
+) -> dict:
+    """发送对话到 LLM（**流式**，默认自动降级），边收边通过 `on_content` 回调吐字。
+
+    与非流式 `chat_with_tools` 的关系：
+      - 入参、返回值**同构**（`{"message": ..., "usage": ...}`）；
+      - 唯一新增参数 `on_content`：每收到一段 content 增量就同步回调一次；
+      - 失败降级只在"一个字都没吐"时生效（见 `_call_with_failover_stream`）。
+
+    调用方（plan_node）负责把 `on_content` 接到下游出口（LangGraph 的 stream writer）——
+    Gateway 不知道 SSE / 事件协议的存在，这一层只负责"把流转出来"。
+    """
+    result = await _call_with_failover_stream(
+        messages,
+        tools=tools,
+        trace_name=trace_name,
+        temperature=temperature,
+        on_content=on_content,
     )
     return {"message": result["data"]["choices"][0]["message"], "usage": result["usage"]}
