@@ -16,10 +16,17 @@ EventSource 只能发 GET、带不了请求体，而对话是 POST + {message, s
 后来实际用的是 fetch + ReadableStream 手写帧解析（协议层仍是标准 SSE）。
 
 端点约定：
-    POST /api/chat           请求 {"message": "...", "session_id": "可选"}
-                             响应 {"session_id", "answer", "sources", "invalid_citations", "tool_calls"}
+    POST /api/chat           请求 {"message": "...", "session_id": "可选", "model_id": "可选"}
+                             响应 {"session_id", "answer", "sources",
+                                   "invalid_citations", "tool_calls", "model_used"}
     POST /api/chat/stream    请求体同上；
                              响应 text/event-stream，帧协议见 chat_stream 的 docstring
+
+S2（模型切换）在接口层新增的两件事：
+    ① `model_id` 原样透传给服务层（不传 = 既有行为逐字不变）；
+    ② "模型解析失败"到 HTTP 语义的翻译在这一层完成 —— 非流式 → 422
+       （用户输入问题，不背 500 的锅）；流式 → error 帧（见 chat_stream）。
+       服务层只管抛 `ModelResolutionError`，不 import FastAPI 的任何东西。
 
 D36 修复：非流式这一层此前**漏传 `tool_calls`**（`ChatResult` 有、`ChatResponse` 有、
 `default_factory=list` 一兜 → 响应里恒为 `[]`，**不报错、不崩溃**）。
@@ -42,12 +49,13 @@ D14 变化：session_id 在进程内是 uuid.UUID 对象（请求侧由 pydantic
 import json
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.core.logging import logger
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.agent_service import run_agent, run_agent_stream
+from app.services.llm_gateway import ModelResolutionError
 
 router = APIRouter(tags=["chat"])
 
@@ -59,6 +67,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     响应里的 sources 是「编号 → 原文」的映射表，与 answer 里的 [n] 一一对应；
     invalid_citations 列出回答里引用了但来源表中不存在的编号（前端可据此降级显示）。
+
+    S2：`model_id` 指向不存在 / 被禁用的模型时返回 422（detail 为可读原因）。
     """
     # 不传 session_id → 服务端新建。这样 curl 裸测一个请求也能跑通；
     # 前端要延续上下文时，把响应里的 session_id 存下来、下一轮回传即可。
@@ -66,9 +76,19 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # 只在响应边界转成字符串，保证「一个会话 = 一个 Redis key = 一行 sessions 记录」。
     session_id = req.session_id or uuid.uuid4()
 
-    logger.info("对话请求 session=%s 输入长度=%d", session_id, len(req.message))
+    logger.info(
+        "对话请求 session=%s 输入长度=%d 模型=%s",
+        session_id,
+        len(req.message),
+        req.model_id or "默认",
+    )
 
-    result = await run_agent(session_id, req.message)
+    try:
+        result = await run_agent(session_id, req.message, model_id=req.model_id)
+    except ModelResolutionError as e:
+        # 模型解析失败 = 用户输入问题（选了不存在 / 被禁用的模型）→ 422（需求 §5 约定），
+        # 让前端能像处理"message 为空"一样统一处理；服务端不背 500 的锅。
+        raise HTTPException(status_code=422, detail=str(e)) from None
 
     logger.info(
         "对话响应 session=%s 回答长度=%d 来源=%d 越界引用=%s",
@@ -88,6 +108,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
         #    回归守卫：tests/integration/test_api_endpoints.py::
         #    test_chat_forwards_every_chatresult_field_to_http（哨兵值法）。
         tool_calls=result.tool_calls,
+        # S2 新增字段，同一个坑（漏传 → 静默退回 None）—— 已并入上面那条哨兵守卫
+        model_used=result.model_used,
     )
 
 
@@ -120,8 +142,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         data: {"type": "tool",  "name": ..., "phase": "start"}
         data: {"type": "tool",  "name": ..., "phase": "end", "ok": true|false}
         data: {"type": "done",  "session_id": ..., "answer": ..., "sources": ...,
-                                "invalid_citations": ..., "tool_calls": ...}
-        data: {"type": "error", "message": "..."}         链路异常
+                                "invalid_citations": ..., "tool_calls": ...,
+                                "model_used": {...}}       S2 归因（"本轮由谁回答"）
+        data: {"type": "error", "message": "..."}         链路异常 / 模型解析失败
 
     ⚠ 两个必须知情的事实：
       ① **HTTP 状态码在开流时就已经是 200** —— 之后无论发生什么（LLM 挂掉、
@@ -132,14 +155,30 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
          fetch + ReadableStream 手写帧解析——协议层仍是标准 SSE。
     """
     session_id = req.session_id or uuid.uuid4()
-    logger.info("流式对话请求 session=%s 输入长度=%d", session_id, len(req.message))
+    logger.info(
+        "流式对话请求 session=%s 输入长度=%d 模型=%s",
+        session_id,
+        len(req.message),
+        req.model_id or "默认",
+    )
 
     async def event_stream():
         # meta 必须最先发：前端据此确认"流已建立"；日志/测试也靠它立刻关联会话
         yield _sse_frame({"type": "meta", "session_id": str(session_id)})
         try:
-            async for event in run_agent_stream(session_id, req.message):
+            async for event in run_agent_stream(
+                session_id, req.message, model_id=req.model_id
+            ):
                 yield _sse_frame(event)
+        except ModelResolutionError as e:
+            # 模型解析失败 = 用户输入问题（选了不存在 / 被禁用的模型）。
+            # 流式只能在**帧里**表达（HTTP 200 已先行，见 docstring 的 ⚠①）——
+            # 与非流式的 422 是"同一个错误在两个出口的不同翻译"（S2 §5 约定）。
+            # 刻意不记 exception：这不是系统故障，warning 足够；
+            # 记成 exception 会在日志里制造"服务在报错"的假象，把用户选错模型
+            # 混进需要服务端排查的信号里。
+            logger.warning("流式对话模型解析失败 session=%s：%s", session_id, e)
+            yield _sse_frame({"type": "error", "message": str(e)})
         except Exception as e:
             # 图跑挂 / 写回失败都在这里兜住：**不能**让它表现为"连接无声断掉"
             # （前端只看到流结束、不知道原因）—— 显式发一帧 error，前端有据可依。

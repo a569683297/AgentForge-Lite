@@ -129,6 +129,9 @@ async def test_stream_direct_answer_matches_non_streaming(mock_stream_llm, llm_c
     assert done["answer"] == baseline.answer, "流式与非流式的 answer 必须逐字一致"
     assert done["tool_calls"] == baseline.tool_calls == []
     assert done["sources"] == [] and done["invalid_citations"] == []
+    # S2：归因字段两端一致（done 帧是 dict，非流式是 ModelUsed 对象 —— 用 model_dump 对齐口径）
+    assert done["model_used"] == baseline.model_used.model_dump()
+    assert done["model_used"]["id"] == "deepseek"
 
 
 async def test_stream_tool_path_emits_start_end_around_execution(mock_stream_llm, llm_channels_ready):

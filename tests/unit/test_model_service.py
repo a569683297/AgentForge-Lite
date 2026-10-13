@@ -107,26 +107,35 @@ def test_404_points_to_v1_prefix():
 
 def test_5xx_is_endpoint_or_relay_not_user_config():
     """5xx 要明说"不是你的配置错"、并把"代理/网关拦截"这种中间层可能列进来
-    —— 本机冒烟实测：不绕过代理时，"端口没开"会被代理翻译成 502（见 _build_probe_client）。"""
+    —— 本机冒烟实测：不绕过代理时，"端口没开"会被代理翻译成 502（见 build_outbound_client）。"""
     msg = model_service._explain_probe_error(_status_error(503))
     assert "端点或网络中继错误" in msg
     assert "代理" in msg
 
 
 # ============================================================
-# 三点五、_build_probe_client：本机地址绕代理、外网跟随环境
+# 三点五、build_outbound_client：本机地址绕代理、外网跟随环境
+# （S2：从探测专用升级为**两条路径共用**的策略函数 —— 探测 + 对话网关）
 # ============================================================
 
 
-def test_probe_client_bypasses_proxy_for_local_addresses():
+def test_outbound_client_bypasses_proxy_for_local_addresses():
     """本机地址必须 trust_env=False（否则"端口没开"会被代理翻译成 502 —— 真实踩坑）。"""
-    assert model_service._build_probe_client("http://127.0.0.1:9/v1").trust_env is False
-    assert model_service._build_probe_client("http://host.docker.internal:11434/v1").trust_env is False
+    assert model_service.build_outbound_client("http://127.0.0.1:9/v1", timeout=5).trust_env is False
+    assert (
+        model_service.build_outbound_client(
+            "http://host.docker.internal:11434/v1", timeout=5
+        ).trust_env
+        is False
+    )
 
 
-def test_probe_client_keeps_env_proxy_for_remote_addresses():
+def test_outbound_client_keeps_env_proxy_for_remote_addresses():
     """外网端点跟随环境代理（那是用户层面的网络策略，如科学上网/中转）。"""
-    assert model_service._build_probe_client("https://api.example.com/v1").trust_env is True
+    assert (
+        model_service.build_outbound_client("https://api.example.com/v1", timeout=5).trust_env
+        is True
+    )
 
 
 # ============================================================

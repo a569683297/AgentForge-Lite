@@ -31,17 +31,31 @@ D22 改为**给 Gateway 加锁定通道的能力**，而不是让调用方自己
     chat(..., allow_failover=False)  → 不指定通道时，只用主通道
 
 这是"降级是有代价的"这条认识的具体落地：**降级让"用了哪个通道"这件事从数据里消失**。
+
+S2（模型切换）：`model_id` 锁定 + `model_used` 归因
+------------------------------------------------------------------
+对话台右上角选择模型后，对话请求携带 `model_id`（内置通道名 / 自定义模型 UUID）。
+`_resolve_channels` 新增 model_id 分支：解析为**单个**通道（锁定语义与 D22 一致 ——
+失败就抛、不切备用）；解析失败（不存在 / 被禁用 / 内置未配 key）抛
+`ModelResolutionError`，由路由层翻译成 422（非流式）或 error 帧（流式）。
+
+网关返回值新增 `model_used`（**实际执行**的通道身份）：归因"本轮由谁回答"。
+"用户选了什么"（意图）与"实际用了什么"（事实）都必须是数据 ——
+§4.3 的"锁定不降级"保证两者在正常路径一致、在失败路径不撒谎。
 """
 
 import json
 import time
+import uuid
 from typing import Any, Callable
 
-import httpx
 from langfuse import Langfuse
 
-from app.config import settings
+from app.config import LLM_CHANNELS, settings
 from app.core.logging import logger
+# S2：按 UUID 查自定义模型（llm_models 表）复用 model_service，不重复写 SQL。
+# 无循环依赖：model_service 刻意不 import 本模块（连通性探测不走网关，见其 docstring）。
+from app.services import model_service
 
 
 # ---- Langfuse 客户端（单例，懒连接）----
@@ -57,6 +71,19 @@ langfuse = Langfuse(
 # D14 把 temperature 从硬编码改成可传参数 —— 不改的话摘要会被迫用 0.4 这个
 # "创作档"去压缩历史，容易加戏、改事实；摘要本身要的是"忠实压缩"，所以要用 0.1。
 DEFAULT_TEMPERATURE = 0.4
+
+
+class ModelResolutionError(Exception):
+    """
+    `model_id` 解析失败：不存在 / 已被禁用 / 内置通道未配 key（S2）。
+
+    为什么单独一个异常类型（而不是 RuntimeError / ValueError 一把抓）：
+    调用方要按类型分叉处置 ——
+      · 路由层：非流式 → 422（**用户输入问题**，不是服务端故障）；
+                流式 → error 帧（HTTP 200 已先行，只能用帧传达）；
+      · 其余异常（网络 / 图崩溃）继续走既有的 500 / 通用 error 帧。
+    靠异常类型分叉，比在路由里对错误信息做字符串匹配可靠得多。
+    """
 
 
 # ============================================================
@@ -91,13 +118,19 @@ async def _call_once(
     if tools:
         payload["tools"] = tools
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    headers = {"Content-Type": "application/json"}
+    if provider.get("api_key"):
+        # 自定义本地端点（如 Ollama）允许不带 key —— 与其带一个假的
+        # "Bearer None"，不如不带（同 model_service._probe_chat_endpoint 的取舍）
+        headers["Authorization"] = f"Bearer {provider['api_key']}"
+
+    # S2：本机/内网端点（自定义模型如 Ollama）绕过环境代理，外网跟随 ——
+    # 策略唯一出处 model_service.build_outbound_client（S1 只修了探测路径，
+    # S2 把对话路径补齐：否则 host.docker.internal 这类域名会被代理短路成假错误）
+    async with model_service.build_outbound_client(provider["base_url"], timeout=60) as client:
         resp = await client.post(
             f"{provider['base_url']}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {provider['api_key']}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json=payload,
         )
         resp.raise_for_status()  # 非 2xx 抛异常（触发降级）
@@ -182,14 +215,17 @@ async def _call_once_stream(
     usage: dict = {}
     finish_reason: str | None = None
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    headers = {"Content-Type": "application/json"}
+    if provider.get("api_key"):
+        # 同 _call_once：自定义本地端点（Ollama）允许不带 Authorization
+        headers["Authorization"] = f"Bearer {provider['api_key']}"
+
+    # 同 _call_once：本机/内网端点绕过环境代理（策略唯一出处 build_outbound_client）
+    async with model_service.build_outbound_client(provider["base_url"], timeout=60) as client:
         async with client.stream(
             "POST",
             f"{provider['base_url']}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {provider['api_key']}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json=payload,
         ) as resp:
             resp.raise_for_status()   # 非 2xx 抛异常（触发降级，见 _call_with_failover_stream）
@@ -268,16 +304,104 @@ async def _call_once_stream(
 
 
 # ============================================================
-# 通道选择（D22）
+# 通道选择（D22 锁定通道；S2 扩展 model_id）
 # ============================================================
-def _resolve_channels(
+def _annotate(
+    channel: dict, model_id: str, name: str, *, allow_empty_key: bool = False
+) -> dict:
+    """
+    给通道附上内部标记（下划线开头 = 仅供本模块内部消费，不构成请求体）：
+
+      `_model_id` / `_model_name`：S2 归因用 —— 最终成为响应里的 `model_used`；
+      `_allow_empty_key`：自定义本地端点（如 Ollama）不需要认证 ——
+        降级循环据此放行"没有 api_key"的通道（否则会被原规则静默跳过）。
+
+    刻意返回**副本**而不是原地改：虽然 settings 的那些属性每次都返回新 dict，
+    但"依赖对方每次给新对象"是隐式契约，不值得赌。
+    """
+    annotated = dict(channel)
+    annotated["_model_id"] = model_id
+    annotated["_model_name"] = name
+    if allow_empty_key:
+        annotated["_allow_empty_key"] = True
+    return annotated
+
+
+def _model_used_of(channel: dict) -> dict:
+    """通道 → 响应的 `model_used`（归因三件套：id / 显示名 / 真实模型标识）。"""
+    return {
+        "id": channel.get("_model_id") or "",
+        "name": channel.get("_model_name") or channel["model"],
+        "model": channel["model"],
+    }
+
+
+def _builtin_label(name: str) -> str:
+    """内置通道的显示名（与 /api/models 列表同一份映射，唯一出处见 model_service）。"""
+    return model_service.BUILTIN_LABELS.get(name, name)
+
+
+async def _resolve_locked_model(model_id: str) -> tuple[dict, str]:
+    """
+    `model_id` → 单个**锁定**通道（S2）。取值两种：
+
+        · 内置通道名（"deepseek" / "openai"）→ 走 .env 配置，未配 key 直接报错；
+        · 自定义模型 UUID → 查 llm_models 表（必须 enabled）。
+
+    失败一律抛 `ModelResolutionError`（**绝不静默回退主通道**）：
+    回退会让"我选的是 A"悄悄变成"实际用了 B"。而响应里的 `model_used`
+    是要给用户看的归因 —— 归因不能是谎话，所以解析失败必须显式失败。
+
+    自定义通道**允许没有 api_key**（Ollama 这类本地端点不需要认证），
+    标记 `_allow_empty_key` 放行降级循环的原"无 key 即跳过"规则。
+    """
+    if model_id in LLM_CHANNELS:
+        channel = settings.llm_channel(model_id)
+        if not channel.get("api_key"):
+            raise ModelResolutionError(
+                f"内置模型 {model_id!r} 未配置 api_key，无法使用（检查 .env）"
+            )
+        label = _builtin_label(model_id)
+        return _annotate(channel, model_id, label), f"选定模型({label})"
+
+    try:
+        custom_uuid = uuid.UUID(model_id)
+    except ValueError:
+        raise ModelResolutionError(
+            f"未知的模型 id：{model_id!r}（既不是内置通道名，也不是自定义模型 UUID）"
+        ) from None
+
+    row = await model_service.get_model(custom_uuid)
+    if row is None:
+        raise ModelResolutionError(f"所选模型不存在（可能已被删除）：{model_id}")
+    if not row.enabled:
+        raise ModelResolutionError(f"所选模型已被禁用：{row.name}")
+
+    channel = {
+        "api_key": row.api_key,      # 允许为 None（本地端点不需要）
+        "base_url": row.base_url,
+        "model": row.model,
+    }
+    return (
+        _annotate(channel, str(row.id), row.name, allow_empty_key=True),
+        f"选定模型({row.name})",
+    )
+
+
+async def _resolve_channels(
     provider: str | None,
     allow_failover: bool,
+    *,
+    model_id: str | None = None,
 ) -> list[tuple[dict, str]]:
     """
     决定这次调用可以用哪些通道，返回 [(通道配置, 可读标签)]。
 
-    三种组合，语义各不相同：
+    四种组合，语义各不相同：
+
+        model_id 指定（S2：用户在对话台选中的模型）
+            → **锁定**：只返回该模型对应的一个通道，失败就抛错、绝不切备用。
+              解析细节见 `_resolve_locked_model`。
 
         provider 指定（如 "deepseek"）
             → **锁定**：只返回这一个通道，`allow_failover` 被忽略。
@@ -294,7 +418,15 @@ def _resolve_channels(
     标签在这里统一生成（而不是让 `_call_with_failover` 按下标猜）：
     锁定模式下"第 0 个"不是主通道，按下标命名会写出
     "主通道(模型X)" 这种与事实不符的日志，而日志正是排查降级问题的唯一线索。
+
+    S2：返回的通道上都附有 `_model_id` / `_model_name`（见 `_annotate`）——
+    降级循环把**实际成功的那一个**带进返回值，成为 `model_used`。
+    这样"默认链路撞上降级（主→备）"时，归因记录的也是真实执行者，
+    而不是"配置上本该用的那个"。
     """
+    if model_id is not None:
+        return [await _resolve_locked_model(model_id)]
+
     if provider is not None:
         channel = settings.llm_channel(provider)      # 非法名字在这里抛错
         if not channel.get("api_key"):
@@ -305,13 +437,26 @@ def _resolve_channels(
                 f"指定的 LLM 通道 {provider!r} 没有配置 api_key"
                 f"（model={channel.get('model')!r}）"
             )
-        return [(channel, f"锁定通道({channel['model']})")]
+        annotated = _annotate(channel, provider, _builtin_label(provider))
+        return [(annotated, f"锁定通道({channel['model']})")]
 
-    channels: list[tuple[dict, str]] = [(settings.primary_llm, "主通道")]
+    primary = settings.primary_llm
+    channels: list[tuple[dict, str]] = [
+        (
+            _annotate(primary, settings.llm_provider, _builtin_label(settings.llm_provider)),
+            "主通道",
+        )
+    ]
     if allow_failover:
         backup = settings.backup_llm
         if backup:
-            channels.append((backup, f"备用通道({backup['model']})"))
+            # backup_llm 只可能在 llm_provider=deepseek 时存在（见 config 属性）→ 它就是 openai
+            channels.append(
+                (
+                    _annotate(backup, "openai", _builtin_label("openai")),
+                    f"备用通道({backup['model']})",
+                )
+            )
     return channels
 
 
@@ -326,15 +471,18 @@ async def _call_with_failover(
     temperature: float = DEFAULT_TEMPERATURE,
     provider: str | None = None,
     allow_failover: bool = True,
+    model_id: str | None = None,
 ) -> dict:
-    """带降级的调用。返回 {"data": ..., "usage": ..., "provider": 实际使用的通道}。"""
-    channels = _resolve_channels(provider, allow_failover)
+    """带降级的调用。返回 {"data": ..., "usage": ..., "provider": 通道标签, "model_used": 实际通道身份}。"""
+    channels = await _resolve_channels(provider, allow_failover, model_id=model_id)
 
     last_error: Exception | None = None
 
     for idx, (channel, provider_label) in enumerate(channels):
-        if not channel.get("api_key"):
-            continue  # 该通道无 key，跳过（锁定模式的缺 key 已在 _resolve_channels 拦掉）
+        # 无 key 的通道默认跳过；但自定义本地端点（Ollama）经 _resolve_channels
+        # 带上 `_allow_empty_key` 标记 —— 它们本来就不需要认证，必须放行。
+        if not channel.get("api_key") and not channel.get("_allow_empty_key"):
+            continue
 
         # 每个通道独立创建 observation（Langfuse 能看到哪个通道被调用）
         with langfuse.start_as_current_observation(
@@ -355,6 +503,9 @@ async def _call_with_failover(
                     temperature=temperature,
                 )
                 result["provider"] = provider_label
+                # S2：把**实际成功**的通道身份带出去（默认链路降级到备用时，
+                # 记录的也是真实执行者 —— 归因不能是"配置上本应是谁"）
+                result["model_used"] = _model_used_of(channel)
                 return result
             except Exception as e:
                 last_error = e
@@ -367,11 +518,12 @@ async def _call_with_failover(
 
     # 所有通道都失败（锁定模式下就是"该通道失败"，措辞要能区分这两种情形）
     assert last_error is not None, "通道列表非空却没有任何异常，说明 _resolve_channels 返回了空列表"
-    if provider is not None:
-        # 锁定模式**不包装异常**：包装会把 httpx.HTTPStatusError 变成 RuntimeError，
-        # 调用方（judge 的重试逻辑）就没法判断"这个错重试有没有意义" ——
-        # 429 该重试、401 不该，而两者包成 RuntimeError 后长得一模一样。
-        # 信息在包装时被丢掉了，这比不包装更糟。
+    if provider is not None or model_id is not None:
+        # 锁定模式（provider=judge / model_id=用户选定）**不包装异常**：
+        # 包装会把 httpx.HTTPStatusError 变成 RuntimeError，
+        # 调用方（judge 的重试逻辑、路由层的错误翻译）就没法判断
+        # "这个错重试有没有意义" —— 429 该重试、401 不该，
+        # 而两者包成 RuntimeError 后长得一模一样。信息在包装时被丢掉了，这比不包装更糟。
         raise last_error
     raise RuntimeError(f"所有 LLM 通道均失败: {last_error}") from last_error
 
@@ -386,6 +538,7 @@ async def _call_with_failover_stream(
     trace_name: str,
     temperature: float = DEFAULT_TEMPERATURE,
     on_content: Callable[[str], None] | None = None,
+    model_id: str | None = None,
 ) -> dict:
     """
     带降级的**流式**调用：主通道 → 失败 → 备用通道 → 失败 → 抛错。
@@ -399,15 +552,19 @@ async def _call_with_failover_stream(
                 正确规则：**一个字都没出的失败才允许降级；出字之后再失败，直接抛**。
 
     这条差异只在流式里存在 —— 因为流式把"过程"发给了用户，而发出去的东西收不回来。
-    （流式对话不需要 D22 的"锁定通道"能力：那是给 judge 的，judge 不走这条路。）
+
+    S2：新增 `model_id` —— 用户在对话台选了模型时同样走锁定
+    （用户明确选定的模型失败后绝不允许静默换通道：响应里的归因必须是真的）。
+    与 D22 的 provider 锁定共用 `_resolve_channels` 的锁定分支。
     """
-    channels = _resolve_channels(None, True)
+    channels = await _resolve_channels(None, True, model_id=model_id)
 
     last_error: Exception | None = None
 
     for idx, (channel, provider_label) in enumerate(channels):
-        if not channel.get("api_key"):
-            continue  # 该通道无 key，跳过（与 _call_with_failover 同）
+        # 同 _call_with_failover：自定义本地端点带 `_allow_empty_key`，不参与跳过
+        if not channel.get("api_key") and not channel.get("_allow_empty_key"):
+            continue
 
         # "这条通道有没有已经吐过字" —— 决定失败后能否安全降级
         emitted = False
@@ -437,6 +594,7 @@ async def _call_with_failover_stream(
                     on_content=_emit,
                 )
                 result["provider"] = provider_label
+                result["model_used"] = _model_used_of(channel)   # S2 归因（同非流式）
                 return result
             except Exception as e:
                 last_error = e
@@ -453,6 +611,9 @@ async def _call_with_failover_stream(
                 )
 
     assert last_error is not None, "通道列表非空却没有任何异常，说明 _resolve_channels 返回了空列表"
+    if model_id is not None:
+        # 选定模型失败：与"已出字"分支同一取舍 —— 不包装，让调用方看到真实异常
+        raise last_error
     raise RuntimeError(f"所有 LLM 通道均失败: {last_error}") from last_error
 
 
@@ -493,11 +654,16 @@ async def chat_with_tools(
     temperature: float = DEFAULT_TEMPERATURE,
     provider: str | None = None,
     allow_failover: bool = True,
+    model_id: str | None = None,
 ) -> dict:
     """发送对话到 LLM，支持 function calling（默认自动降级）。
 
+    S2：新增 `model_id`（内置通道名 / 自定义 UUID）→ 锁定所选模型、失败不降级；
+        解析失败抛 `ModelResolutionError`。不传 = 原有行为逐字不变（评测零影响）。
+
     Returns:
-        {"message": {role, content, tool_calls?}, "usage": {...}}
+        {"message": {role, content, tool_calls?}, "usage": {...},
+         "model_used": 实际执行通道身份（S2 归因用）}
     """
     result = await _call_with_failover(
         messages,
@@ -506,8 +672,13 @@ async def chat_with_tools(
         temperature=temperature,
         provider=provider,
         allow_failover=allow_failover,
+        model_id=model_id,
     )
-    return {"message": result["data"]["choices"][0]["message"], "usage": result["usage"]}
+    return {
+        "message": result["data"]["choices"][0]["message"],
+        "usage": result["usage"],
+        "model_used": result.get("model_used"),
+    }
 
 
 async def chat_with_tools_stream(
@@ -517,13 +688,15 @@ async def chat_with_tools_stream(
     trace_name: str = "llm-tools",
     temperature: float = DEFAULT_TEMPERATURE,
     on_content: Callable[[str], None] | None = None,
+    model_id: str | None = None,
 ) -> dict:
     """发送对话到 LLM（**流式**，默认自动降级），边收边通过 `on_content` 回调吐字。
 
     与非流式 `chat_with_tools` 的关系：
-      - 入参、返回值**同构**（`{"message": ..., "usage": ...}`）；
+      - 入参、返回值**同构**（`{"message": ..., "usage": ..., "model_used": ...}`）；
       - 唯一新增参数 `on_content`：每收到一段 content 增量就同步回调一次；
-      - 失败降级只在"一个字都没吐"时生效（见 `_call_with_failover_stream`）。
+      - 失败降级只在"一个字都没吐"时生效（见 `_call_with_failover_stream`）；
+      - S2：`model_id` 与 `chat_with_tools` 同义（锁定所选模型，失败不降级）。
 
     调用方（plan_node）负责把 `on_content` 接到下游出口（LangGraph 的 stream writer）——
     Gateway 不知道 SSE / 事件协议的存在，这一层只负责"把流转出来"。
@@ -534,5 +707,10 @@ async def chat_with_tools_stream(
         trace_name=trace_name,
         temperature=temperature,
         on_content=on_content,
+        model_id=model_id,
     )
-    return {"message": result["data"]["choices"][0]["message"], "usage": result["usage"]}
+    return {
+        "message": result["data"]["choices"][0]["message"],
+        "usage": result["usage"],
+        "model_used": result.get("model_used"),
+    }

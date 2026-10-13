@@ -100,6 +100,44 @@ async def test_rag_path_calls_retrieval_tool(mock_llm, llm_channels_ready):
     assert "未知工具" not in tool_messages[0]["content"]
 
 
+async def test_run_agent_reports_model_used(mock_llm, llm_channels_ready):
+    """
+    S2 归因全链（非流式出口）：`ChatResult.model_used` 指向**实际执行**的通道。
+
+    走完整条链路：路由传 model_id → state → plan_node → 网关注解 → 回流到 ChatResult。
+    这里不传 model_id（默认链路），验证"不选也有归因"。
+    """
+    from app.services.agent_service import run_agent
+
+    result = await run_agent(uuid.uuid4(), "你好", persist=False)
+
+    assert result.model_used is not None, "归因字段缺失（漏传 / 被默认值吞掉）"
+    assert result.model_used.id == "deepseek"
+    assert result.model_used.model == "fake-main-model"
+
+
+async def test_locked_model_failure_does_not_silently_failover(mock_llm, llm_channels_ready):
+    """
+    ★ S2 锁定语义全链：选定 deepseek（= 主通道）→ 它失败 → **报错，不切备用**。
+
+    与单元层 test_model_id_lock_failure_does_not_fall_back 同一断言手法，
+    但走的是整条链路（run_agent → 图 → plan_node → 网关），
+    验证"model_id 从入参到锁定判定"没有任何一环把参数吃掉 ——
+    若中途丢了 model_id，网关会退回默认降级链，models_called 里就会出现备用通道 → 这里红。
+    """
+    import httpx
+
+    from app.services.agent_service import run_agent
+
+    mock_llm.error_type = httpx.ConnectError
+    mock_llm.fail_models = {"fake-main-model"}
+
+    with pytest.raises(httpx.ConnectError):
+        await run_agent(uuid.uuid4(), "你好", persist=False, model_id="deepseek")
+
+    assert mock_llm.models_called == ["fake-main-model"], "锁定模型的失败不得静默降级"
+
+
 async def test_hallucinated_citation_is_reported_not_silently_kept(mock_llm, llm_channels_ready):
     """
     引用校验（D11）：回答里出现来源表里不存在的编号要**被记下来**。

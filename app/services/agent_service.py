@@ -76,6 +76,12 @@ class AgentState(TypedDict):
     # NotRequired：其它调用方（历史验证脚本）构造 state 时不传它也不会报错 ——
     # plan_node 用 state.get("summary") 取值，缺了就是"没有更早的记忆"。
     summary: NotRequired[str | None]
+    # S2（模型切换）：本轮选中的模型 id（内置通道名 / 自定义 UUID），由 run_agent 注入。
+    # NotRequired：评测/验证脚本构造 state 时不传 → 缺省 = 现有默认链路（零影响）。
+    model_id: NotRequired[str | None]
+    # S2：本轮**实际执行**的模型身份（网关在每次调用成功后回填，plan_node 转存）。
+    # 出口是 ChatResult.model_used / done 帧的 model_used（消息归因"本轮由 XX 回答"）。
+    model_used: NotRequired[dict | None]
 
 
 # ---- 节点 1：plan（LLM 决策 + 最终回答）----
@@ -138,6 +144,9 @@ async def plan_node(state: AgentState) -> AgentState:
         [{"role": "system", "content": build_system_prompt(state.get("summary"))}]
         + messages
     )
+    # S2：本轮选中的模型（None = 默认链路）。锁定/解析逻辑都在网关 ——
+    # 节点层只负责透传，不在这里做任何判断（否则"选了什么"会有第二个真相）。
+    model_id = state.get("model_id")
     if _STREAMING.get():
         # 流式分支：走流式通道，边收边把 content 增量推给下游（SSE 出口）。
         # writer 是 LangGraph 的 custom 流出口：非流式运行时它是空操作（实测），
@@ -148,6 +157,7 @@ async def plan_node(state: AgentState) -> AgentState:
             get_tools_schema(),   # ← 从注册表取（D8：不再内联）
             trace_name=trace_name,
             on_content=lambda text: writer({"type": "token", "text": text}),
+            model_id=model_id,
         )
         assistant_msg = result["message"]
         # 中间轮的"预告文本"（如"我来查一下"）已经漏给了前端 —— 这一轮最终走向
@@ -162,10 +172,14 @@ async def plan_node(state: AgentState) -> AgentState:
             prompt_messages,
             get_tools_schema(),   # ← 从注册表取（D8：不再内联）
             trace_name=trace_name,
+            model_id=model_id,
         )
         assistant_msg = result["message"]
     # LLM 返回的完整 assistant 消息（可能含 tool_calls 数组；也可能就是最终回答）
-    return {"messages": messages + [assistant_msg]}
+    # S2：把**实际执行**的模型身份转存进 state（出口在 run_agent / done 帧）。
+    # 每次都覆盖：同一轮内各次调用通常同通道；若中途换过（将来），
+    # 记录的是最后一次的实际执行者 —— 归因要的是"最终是谁答的"。
+    return {"messages": messages + [assistant_msg], "model_used": result.get("model_used")}
 
 
 # ---- 节点 2：execute（执行工具）+ observe（结果写回）----
@@ -309,6 +323,7 @@ async def run_agent(
     user_input: str,
     *,
     persist: bool = True,
+    model_id: str | None = None,
 ) -> ChatResult:
     """
     带记忆对话的完整入口：读历史 → 跑 Agent → 双层写回 → 返回回答 + 来源。
@@ -317,6 +332,10 @@ async def run_agent(
     D14 变化：① session_id 从 str 改为 uuid.UUID；② 新增 PG 全量落库（第 ⑧ 步）。
     D22 变化：① 新增 persist 开关（评测模式不写会话数据）；
               ② 返回值新增 tool_calls（本轮工具调用序列）。
+    S2 变化：① 新增 model_id（用户选中的模型：内置通道名或自定义 UUID）。
+                不传 = 现有默认链路逐字不变；传了 = 锁定该模型、失败报错不静默换 ——
+                解析失败抛 ModelResolutionError，接口层翻成 422；
+              ② 返回值新增 model_used（**实际执行**的模型，见 schemas.ModelUsed）。
 
     ------------------------------------------------------------------
     persist=False 的语义与边界（评测专用）
@@ -362,6 +381,7 @@ async def run_agent(
         "messages": history + [{"role": "user", "content": user_input}],
         "step_count": 0,
         "summary": summary,
+        "model_id": model_id,   # S2：None = 默认链路
     }
 
     # ③ 跑图 + ④~⑥.5 取结果（D28：这一段就是「用户等待的全部」，包进**一条 trace**）
@@ -426,6 +446,10 @@ async def run_agent(
             ]
             tool_names = [name for name in tool_names if name]
 
+            # S2：本轮实际执行的模型（plan_node 转存；归因用）。
+            # 从图状态取而不是某个局部变量 —— 它跨节点而活（plan/execute 都经历过）。
+            model_used = result.get("model_used")
+
             # 根 span 的 output = 这一轮的最终产物。
             # 记 answer 之外**也记 tool_calls**：一次调用里"答了什么"和
             # "查了哪些库"是两件事，前者可能对而后者完全没查（D22 的 tool_miss 正是这个）。
@@ -464,19 +488,23 @@ async def run_agent(
 
     # ⑨ 返回结构化结果
     logger.info(
-        "Agent 完成 session=%s 回答长度=%d 来源数=%d 工具调用=%s 越界引用=%s persist=%s",
+        "Agent 完成 session=%s 回答长度=%d 来源数=%d 工具调用=%s 越界引用=%s persist=%s 模型=%s",
         session_id,
         len(final_answer),
         len(sources),
         tool_names or "无",
         invalid or "无",
         persist,
+        (model_used or {}).get("id") or "默认",
     )
     return ChatResult(
         answer=final_answer,
         sources=sources,
         invalid_citations=invalid,
         tool_calls=tool_names,
+        # S2：实际执行模型（归因）。这里**必须显式传**——有默认值 None，
+        # 漏传不报错、只是归因静默丢失（D36 的教训同源：默认值会吞掉漏传的字段）
+        model_used=model_used,
     )
 
 
@@ -488,6 +516,7 @@ async def run_agent_stream(
     user_input: str,
     *,
     persist: bool = True,
+    model_id: str | None = None,
 ) -> AsyncIterator[dict]:
     """
     流式版 run_agent：产出**结构化事件流**（服务层只产事件，SSE 编码是接口层的事）。
@@ -499,7 +528,7 @@ async def run_agent_stream(
         {"type": "tool", "name": ..., "phase": "start"}
         {"type": "tool", "name": ..., "phase": "end", "ok": true|false}
         {"type": "done", "session_id", "answer", "sources",
-                        "invalid_citations", "tool_calls"}
+                        "invalid_citations", "tool_calls", "model_used"}
                                               —— 字段与 ChatResponse 对齐
 
     与 run_agent 的关系（M6 优化② 的核心约束）：
@@ -507,8 +536,9 @@ async def run_agent_stream(
           （本函数 ⓪~⑨ 与 run_agent ⓪~⑨ 一一对应，连注释编号都对齐）；
         - 唯一机制差异：图用 `astream` 跑（能收到节点发的事件），最终状态从
           "ainvoke 的返回值"改为"收集末个 values 快照"；
-        - **原 run_agent 一行未改**：评测、回归脚本、`POST /api/chat` 走的还是它。
-          ⚠ 代价：两处逻辑需同步维护 —— 改 run_agent 的任一编号步骤时，回来对照这里。
+        - **两条出口各自独立可测**：`POST /api/chat` 走 run_agent、`/api/chat/stream` 走本函数；
+          ⚠ 代价：两处逻辑需同步维护 —— 改 run_agent 的任一编号步骤时，回来对照这里
+          （S2 的 model_id 透传 / model_used 出参就是两边同步改的实例）。
 
     done 为什么在写回**之后**才发：前端收到 done 即会跳 URL / 刷新侧栏，此后任何
     刷新、重读都必须能看到本轮的完整落库版本；若先发 done 再写回，两者之间会存在
@@ -531,6 +561,7 @@ async def run_agent_stream(
         "messages": history + [{"role": "user", "content": user_input}],
         "step_count": 0,
         "summary": summary,
+        "model_id": model_id,   # S2：None = 默认链路
     }
 
     stream_token = _STREAMING.set(True)
@@ -587,6 +618,9 @@ async def run_agent_stream(
                 ]
                 tool_names = [name for name in tool_names if name]
 
+                # S2：本轮实际执行的模型（plan_node 转存；done 帧归因用）
+                model_used = final_state.get("model_used")
+
                 root_span.update(
                     output={"answer": final_answer, "tool_calls": tool_names}
                 )
@@ -613,13 +647,14 @@ async def run_agent_stream(
     # ⑨ done 事件（字段与 ChatResponse 对齐；sources 先 model_dump 成可 JSON 的 dict ——
     #    接口层只做 SSE 编帧，不做数据转换）
     logger.info(
-        "Agent 流式完成 session=%s 回答长度=%d 来源数=%d 工具调用=%s 越界引用=%s persist=%s",
+        "Agent 流式完成 session=%s 回答长度=%d 来源数=%d 工具调用=%s 越界引用=%s persist=%s 模型=%s",
         session_id,
         len(final_answer),
         len(sources),
         tool_names or "无",
         invalid or "无",
         persist,
+        (model_used or {}).get("id") or "默认",
     )
     yield {
         "type": "done",
@@ -628,4 +663,6 @@ async def run_agent_stream(
         "sources": [s.model_dump() for s in sources],
         "invalid_citations": invalid,
         "tool_calls": tool_names,
+        # S2：实际执行模型（归因"本轮由谁回答"；前端据此在消息上显示）
+        "model_used": model_used,
     }

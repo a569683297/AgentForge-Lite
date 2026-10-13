@@ -21,6 +21,10 @@ D14 变化：session_id 的类型从 str（正则宽松匹配）收口为 uuid.U
 再回来对话，热窗口会读不到（静默退化成走兜底）。
 把类型交给 uuid.UUID 还有个附带好处：非法值在 pydantic 层直接 422，
 不用自己写正则（旧正则 ^[A-Za-z0-9_-]{1,64}$ 会放行 "abc" 这种非 uuid 值）。
+
+S2（模型切换）：ChatRequest 新增 model_id（不传 = 旧行为；传了 = 锁定所选模型）；
+ChatResult 新增 model_used（本轮**实际执行**的模型，"实际"二字是刻意的 ——
+默认链路降级到备用后，归因必须报备用而不是"配置上本应是谁"）。
 """
 
 import uuid
@@ -39,6 +43,23 @@ class SourceItem(BaseModel):
         default=None,
         description="页码引用（如 p.3）；仅 PDF 类文档有，其他格式为 null（D12 新增）",
     )
+
+
+class ModelUsed(BaseModel):
+    """
+    本轮回答的**实际执行模型**（S2 模型切换；消息归因"本轮由 XX 回答"的数据源）。
+
+    三个字段各回答一个问题：
+      · id    —— 它是我配置里的哪一个（内置通道名如 "deepseek"，或自定义模型 UUID；
+                与请求里的 model_id 同口径，前端拿它对齐选中态）
+      · name  —— 界面怎么称呼它（"DeepSeek" / 用户给自定义模型起的名字）
+      · model —— 发给端点的真实模型标识（如 "deepseek-chat"）——
+                显示名可以起得随意，但这个一定是机器事实
+    """
+
+    id: str = Field(description="模型 id：内置通道名或自定义模型 UUID")
+    name: str = Field(description="显示名（用于界面归因文案）")
+    model: str = Field(description="真实模型标识（请求体里 model 字段的值）")
 
 
 class ChatResult(BaseModel):
@@ -67,6 +88,15 @@ class ChatResult(BaseModel):
             "这些信息本来就在图内部的 messages 里，只是原先没有出口。"
         ),
     )
+    model_used: ModelUsed | None = Field(
+        default=None,
+        description=(
+            "本轮回答的**实际执行模型**（S2，供归因）。"
+            "归因的是'实际用了什么'而不是'用户选了什么'——"
+            "默认链路中主通道失败降级到备用时，这里记录的是备用（真实执行者）。"
+            "流式出口放在 done 帧的同名字段里。"
+        ),
+    )
 
 
 class ChatRequest(BaseModel):
@@ -83,6 +113,16 @@ class ChatRequest(BaseModel):
             "会话 ID（标准 UUID；也接受无横杠的 32 位写法，pydantic 会归一化）。"
             "同一会话的多轮对话必须传同一个值；"
             "不传则由服务端新建并在响应里返回，后续轮次带上即可延续上下文。"
+        ),
+    )
+    model_id: str | None = Field(
+        default=None,
+        description=(
+            "用户选中的模型 id（S2 模型切换）：内置通道名（如 deepseek）"
+            "或自定义模型 UUID。"
+            "不传 = 现有默认行为（主通道 + 失败降级，逐字节不变）；"
+            "传了 = **锁定**该模型：失败报错、不静默切别的；"
+            "解析失败（不存在 / 被禁用）由接口层翻译成 422（流式走 error 帧）。"
         ),
     )
 

@@ -160,7 +160,7 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
     再断言哨兵能原样读回 —— 漏传哪个字段，哪个就退回默认值 → 这边红。
     """
     from app.api import chat as chat_module
-    from app.schemas.chat import ChatResponse, ChatResult, SourceItem
+    from app.schemas.chat import ChatResponse, ChatResult, ModelUsed, SourceItem
 
     fake = ChatResult(
         answer="哨兵回答",
@@ -175,9 +175,12 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
         ],
         invalid_citations=[13],
         tool_calls=["SENTINEL_TOOL"],
+        # S2：元断言逼出来的新哨兵（就是下面那条 assert 设计的用途）
+        model_used=ModelUsed(id="sentinel-id", name="哨兵模型", model="sentinel-model-v9"),
     )
 
-    async def _fake_run_agent(session_id, message):  # 签名对齐路由里的调用
+    # 签名对齐路由里的调用（S2 新增关键字参数 model_id）
+    async def _fake_run_agent(session_id, message, *, model_id=None):
         return fake
 
     monkeypatch.setattr(chat_module, "run_agent", _fake_run_agent)
@@ -192,6 +195,12 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
     assert body["tool_calls"] == ["SENTINEL_TOOL"]
     assert [s["source"] for s in body["sources"]] == ["SENTINEL_DOC"]
     assert body["sources"][0]["page_ref"] == "p.42"
+    # S2：model_used 漏传的话这里会退回 None —— 归因静默丢失（与 D36 同类的坑）
+    assert body["model_used"] == {
+        "id": "sentinel-id",
+        "name": "哨兵模型",
+        "model": "sentinel-model-v9",
+    }
 
     # 轻量一致性：不出现模型里没有的键、也不缺键。
     # （对"默认值兜底"型 bug 恒真，真正的守卫是上面的哨兵断言。）
@@ -199,7 +208,8 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
 
     # ★ 元断言：桩必须覆盖 ChatResult 的**全部**字段。
     # 将来给 ChatResult 加字段时这条会红，逼你回来补哨兵 —— 不让新字段裸奔。
-    covered = {"answer", "sources", "invalid_citations", "tool_calls"}
+    # （S2 加 model_used 时它确实红了，哨兵就是按它要求补的。）
+    covered = {"answer", "sources", "invalid_citations", "tool_calls", "model_used"}
     assert covered == set(ChatResult.model_fields), (
         "ChatResult 字段变了：请在桩里为新字段补哨兵值，并加一条能原样读回的断言"
     )
@@ -226,7 +236,8 @@ async def test_chat_stream_forwards_service_events_as_sse_frames(api_client, mon
     from app.api import chat as chat_module
     from app.schemas.chat import SourceItem
 
-    async def _fake_stream(session_id, message):  # 签名对齐路由里的调用
+    # 签名对齐路由里的调用（S2 新增关键字参数 model_id）
+    async def _fake_stream(session_id, message, *, model_id=None):
         yield {"type": "token", "text": "哨兵"}
         yield {"type": "reset"}
         yield {"type": "tool", "name": "SENTINEL_TOOL", "phase": "start"}
@@ -246,6 +257,8 @@ async def test_chat_stream_forwards_service_events_as_sse_frames(api_client, mon
             ],
             "invalid_citations": [13],
             "tool_calls": ["SENTINEL_TOOL"],
+            # S2：done 帧的归因哨兵
+            "model_used": {"id": "sentinel-id", "name": "哨兵模型", "model": "sentinel-model-v9"},
         }
 
     monkeypatch.setattr(chat_module, "run_agent_stream", _fake_stream)
@@ -277,9 +290,95 @@ async def test_chat_stream_forwards_service_events_as_sse_frames(api_client, mon
     assert done["invalid_citations"] == [13]
     assert [s["source"] for s in done["sources"]] == ["SENTINEL_DOC"]
     assert done["sources"][0]["page_ref"] == "p.42"
+    # S2：归因字段也不能漏（漏了 → 帧里没有 / 为 null → 前端归因静默消失）
+    assert done["model_used"] == {
+        "id": "sentinel-id",
+        "name": "哨兵模型",
+        "model": "sentinel-model-v9",
+    }
 
 
 async def test_chat_stream_rejects_empty_message_with_422(api_client):
     """参数校验与 /api/chat 同一收口（pydantic min_length=1）—— "流式"不是绕过校验的理由。"""
     resp = await api_client.post("/api/chat/stream", json={"message": ""})
     assert resp.status_code == 422
+
+
+# ============================================================
+# S2 模型切换：接口层的两条翻译 + 透传守卫
+# ============================================================
+
+
+async def test_chat_maps_model_resolution_error_to_422(api_client, monkeypatch):
+    """
+    S2：用户选了个不存在 / 被禁用的模型 → **422**（不是 500）。
+
+    异常类型 → HTTP 语义的翻译是接口层的职责（服务层只抛 `ModelResolutionError`、
+    不 import FastAPI）；422 = "你的输入有问题"，前端能像处理 message 为空
+    （同样是 422 + detail）一样统一处理。
+    """
+    from app.api import chat as chat_module
+    from app.services.llm_gateway import ModelResolutionError
+
+    async def _fake_run_agent(session_id, message, *, model_id=None):
+        raise ModelResolutionError("所选模型不存在（可能已被删除）：deadbeef")
+
+    monkeypatch.setattr(chat_module, "run_agent", _fake_run_agent)
+
+    resp = await api_client.post(
+        "/api/chat", json={"message": "你好", "model_id": "deadbeef"}
+    )
+    assert resp.status_code == 422
+    assert "不存在" in resp.json()["detail"]
+
+
+async def test_chat_stream_maps_model_resolution_error_to_error_frame(api_client, monkeypatch):
+    """
+    S2：同一个错误的流式翻译 → **error 帧**（HTTP 200 在开流时已先行，状态码改不了）。
+
+    断言帧序列 = [meta, error]（meta 是接口层先发的，异常发生在服务层事件流开始后），
+    且 message 是原始可读原因 —— 前端拿到能直接展示，不需要自己猜。
+    """
+    from app.api import chat as chat_module
+    from app.services.llm_gateway import ModelResolutionError
+
+    async def _fake_stream(session_id, message, *, model_id=None):
+        raise ModelResolutionError("所选模型已被禁用：测试模型")
+        yield  # pragma: no cover —— 语法上保住生成器身份；此行永不可达
+
+    monkeypatch.setattr(chat_module, "run_agent_stream", _fake_stream)
+
+    resp = await api_client.post(
+        "/api/chat/stream", json={"message": "你好", "model_id": "deadbeef"}
+    )
+    # 关键：HTTP 层是 200（头先于内容发出），错误只能靠帧传递
+    assert resp.status_code == 200
+    frames = [frame for frame in resp.text.split("\n\n") if frame]
+    events = [json.loads(frame[len("data: "):]) for frame in frames]
+    assert [e["type"] for e in events] == ["meta", "error"]
+    assert "禁用" in events[-1]["message"]
+
+
+async def test_chat_passes_model_id_through_to_service(api_client, monkeypatch):
+    """
+    传输层守卫：请求体里的 `model_id` 原样到服务层；
+    **不传时是 None**（= 现有默认链路，评测 / 旧脚本零影响的数据证据）。
+    """
+    from app.api import chat as chat_module
+    from app.schemas.chat import ChatResult
+
+    seen: dict = {}
+
+    async def _fake_run_agent(session_id, message, *, model_id=None):
+        seen["model_id"] = model_id
+        return ChatResult(answer="ok")
+
+    monkeypatch.setattr(chat_module, "run_agent", _fake_run_agent)
+
+    resp = await api_client.post("/api/chat", json={"message": "你好", "model_id": "deepseek"})
+    assert resp.status_code == 200
+    assert seen["model_id"] == "deepseek"
+
+    resp = await api_client.post("/api/chat", json={"message": "你好"})
+    assert resp.status_code == 200
+    assert seen["model_id"] is None

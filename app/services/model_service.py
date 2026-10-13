@@ -238,9 +238,17 @@ async def delete_model(model_id: uuid.UUID) -> bool:
 _PROBE_TIMEOUT_S = 15.0
 
 
-def _build_probe_client(base_url: str) -> httpx.AsyncClient:
+def build_outbound_client(base_url: str, *, timeout: float) -> httpx.AsyncClient:
     """
-    构造探测用 client：**本机/内网地址绕过系统代理**，其余跟随环境。
+    给某个 LLM 端点构造 httpx client：**本机/内网地址绕过系统代理**，其余跟随环境。
+
+    ★ 策略的唯一出处，两个使用方共用（S2 归一）：
+      · 连通性探测（本模块 `_probe_chat_endpoint`）；
+      · 对话网关（llm_gateway 的 `_call_once` / `_call_once_stream`）——
+        S1 只修了探测路径，S2 发现对话路径会踩**同一个坑**：
+        用户把 Ollama（host.docker.internal:11434）录入为自定义模型后，
+        网关若仍 trust_env=True，代理**不认识这个域名** → 必然怪异失败。
+    踩坑就地修一次、两条路径同时生效，不留半修状态。
 
     为什么必须分叉（真实踩坑，2026-10-13 冒烟暴露）：
     本机 env 配了 HTTP_PROXY/HTTPS_PROXY（127.0.0.1:56908）。httpx 默认
@@ -250,12 +258,12 @@ def _build_probe_client(base_url: str) -> httpx.AsyncClient:
     本机/内网地址（localhost / 127.0.0.1 / host.docker.internal / *.local）
     经公共代理转发毫无意义 —— 显式直连（trust_env=False）。
     （同一个坑的另一面：识别特征是"多个不同端口返回同一个错误码"= 中间层应答，
-    见 D25 复盘；这里是它在**服务端代码内**的形态。）
+    见 D25 复盘；`scripts/dify_bridge.py` 里也有同款 trust_env=False 的先例。）
     """
     if classify_kind(base_url) == "local":
-        return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S, trust_env=False)
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
     # 外网端点仍跟随环境代理：那是用户层面的网络策略（如科学上网/中转），必须尊重
-    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S)
+    return httpx.AsyncClient(timeout=timeout)
 
 
 async def _probe_chat_endpoint(base_url: str, api_key: str | None, model: str) -> dict:
@@ -284,7 +292,7 @@ async def _probe_chat_endpoint(base_url: str, api_key: str | None, model: str) -
     }
 
     start = time.perf_counter()
-    async with _build_probe_client(base_url) as client:
+    async with build_outbound_client(base_url, timeout=_PROBE_TIMEOUT_S) as client:
         resp = await client.post(
             f"{base_url}/chat/completions", headers=headers, json=payload
         )
