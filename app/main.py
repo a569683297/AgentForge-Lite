@@ -18,6 +18,7 @@ FastAPI 应用入口
    - GET    http://localhost:8000/api/eval/cases/{case_key}         （单条详情，D21）
    - GET    http://localhost:8000/api/eval/dataset                  （评测集指纹，D21）
    - GET    http://localhost:8000/api/tools                         （工具清单+来源，D27）
+   - GET/POST/PATCH/DELETE http://localhost:8000/api/models         （模型注册表，模型切换 S1）
    - 交互式文档 http://localhost:8000/docs
 """
 
@@ -30,6 +31,7 @@ from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.eval import router as eval_router
 from app.api.health import router as health_router
+from app.api.models import router as models_router
 from app.api.sessions import router as sessions_router
 from app.api.tools import router as tools_router
 from app.config import settings
@@ -126,6 +128,7 @@ app.include_router(documents_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")   # D14 新增
 app.include_router(eval_router, prefix="/api")       # D21 新增
 app.include_router(tools_router, prefix="/api")      # D27 新增（含动态发现的 MCP 工具）
+app.include_router(models_router, prefix="/api")     # 模型切换 S1 新增（模型注册表）
 
 
 if __name__ == "__main__":
