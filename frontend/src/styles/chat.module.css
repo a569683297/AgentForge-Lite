@@ -8,7 +8,8 @@
 .agentMessage { border-top: 1px solid var(--af-border-subtle); border-bottom: 1px solid var(--af-border-subtle); }
 .messageLabel { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; color: var(--af-text-secondary); font-size: 11px; }
 .messageBody { line-height: 21px; white-space: pre-wrap; }
-.messageMeta { margin-top: 5px; color: var(--af-text-tertiary); font-size: 11px; }
+.messageMeta { display: flex; align-items: center; gap: 10px; margin-top: 5px; color: var(--af-text-tertiary); font-size: 11px; }
+.attribution { color: var(--af-text-tertiary); }
 .citationLink { padding: 0; border: 0; border-bottom: 1px dotted var(--af-accent); background: transparent; color: var(--af-accent); cursor: pointer; }
 .invalidCitation { color: var(--af-text-disabled); }
 .composer { padding: 10px 12px; border-top: 1px solid var(--af-border-subtle); }

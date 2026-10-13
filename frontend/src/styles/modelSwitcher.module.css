@@ -1,0 +1,284 @@
+/* 右上角模型切换器（S3）：触发器 + 弹出面板 + 配置弹窗的列表行 */
+
+/* ---------- 触发器（顶栏里的那个按钮） ---------- */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--af-border-default);
+  border-radius: var(--af-radius-control);
+  background: var(--af-surface);
+  color: var(--af-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.trigger:hover {
+  border-color: var(--af-accent);
+}
+
+.triggerName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triggerCaret {
+  flex: none;
+  font-size: 10px;
+  color: var(--af-text-tertiary);
+}
+
+/* ---------- 弹出面板 ---------- */
+.panel {
+  width: 300px;
+  max-height: 420px;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.groupLabel {
+  padding: 7px 8px 3px;
+  color: var(--af-text-tertiary);
+  font-size: 11px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--af-radius-control);
+  background: transparent;
+  color: var(--af-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--af-sunken);
+}
+
+.itemDisabled,
+.itemDisabled:hover {
+  background: transparent;
+  color: var(--af-text-disabled);
+  cursor: not-allowed;
+}
+
+.itemMain {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.itemName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.itemModel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--af-text-tertiary);
+  font-family: var(--af-font-mono);
+  font-size: 11px;
+}
+
+/* 类型标签（内置 / 本地 / 自定义）——替代参考截图里的"限时免费/倍率"位：
+   那些是计费营销概念，我们没有数据源；这里是可机器判定的事实 */
+.tag {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.tagBuiltin {
+  color: var(--af-accent);
+  border-color: var(--af-accent);
+}
+
+.tagLocal {
+  color: var(--af-success);
+  border-color: var(--af-success);
+}
+
+.tagCustom {
+  color: var(--af-info);
+  border-color: var(--af-info);
+}
+
+.disabledHint {
+  flex: none;
+  color: var(--af-text-disabled);
+  font-size: 10px;
+}
+
+.check {
+  flex: none;
+  font-size: 12px;
+  color: var(--af-accent);
+}
+
+.empty {
+  padding: 5px 8px 9px;
+  color: var(--af-text-tertiary);
+  font-size: 12px;
+}
+
+/* ---------- 面板底部：配置入口（固定一行） ---------- */
+.footer {
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px solid var(--af-border-subtle);
+}
+
+.configEntry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--af-radius-control);
+  background: transparent;
+  color: var(--af-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.configEntry:hover {
+  background: var(--af-sunken);
+  color: var(--af-text-primary);
+}
+
+/* ---------- 配置弹窗 ---------- */
+.listIntro {
+  margin: 0 0 12px;
+  color: var(--af-text-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.modalList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.addButton {
+  margin-top: 12px;
+}
+
+/* ---------- 配置弹窗：表单视图 ---------- */
+.configForm {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.backLink {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--af-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.backLink:hover {
+  color: var(--af-accent);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.fieldLabel {
+  color: var(--af-text-secondary);
+  font-size: 12px;
+}
+
+.fieldHint {
+  color: var(--af-text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.formFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 3px;
+}
+
+.configRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-radius-container);
+  background: var(--af-surface);
+}
+
+.configRowMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.configRowName {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.configRowMeta {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--af-text-tertiary);
+  font-family: var(--af-font-mono);
+  font-size: 11px;
+}
+
+.configRowOff {
+  opacity: 0.55;
+}
+
+.formHint {
+  color: var(--af-text-tertiary);
+  font-size: 12px;
+}
+
+.testResultOk {
+  color: var(--af-success);
+  font-size: 12px;
+}
+
+.testResultFail {
+  color: var(--af-danger);
+  font-size: 12px;
+}

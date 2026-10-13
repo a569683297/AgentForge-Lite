@@ -12,12 +12,72 @@ export interface SourceItem {
   page_ref: string | null;
 }
 
+/**
+ * 本轮回答的**实际执行模型**（S2 归因数据，`model_used` 字段的形状）。
+ *
+ * 三字段各回答一个问题（与后端 `app/schemas/chat.py::ModelUsed` 对齐）：
+ *   id    —— 配置里的哪个（内置通道名如 "deepseek" / 自定义模型 UUID，与请求 model_id 同口径）
+ *   name  —— 界面怎么称呼它（"DeepSeek" / 用户起的名字）
+ *   model —— 发给端点的真实模型标识（如 "deepseek-chat"）
+ *
+ * 注意：它是"**实际**用了什么"，不是"用户选了什么"——降级等场景下两者可能不同。
+ */
+export interface ModelUsed {
+  id: string;
+  name: string;
+  model: string;
+}
+
 export interface ChatResponse {
   session_id: string;
   answer: string;
   sources: SourceItem[];
   invalid_citations: number[];
   tool_calls: string[];
+  model_used: ModelUsed | null;
+}
+
+/**
+ * 模型列表项（`GET /api/models`；S1 模型注册表，与后端 `LlmModelOut` 对齐）。
+ *
+ * `kind` 三值：builtin=内置（.env）· local=自定义但指向本机 · custom=其余自定义。
+ * 内置模型 id 是通道名（如 "deepseek"）；自定义模型 id 是 UUID。
+ */
+export interface ModelItem {
+  id: string;
+  name: string;
+  model: string;
+  kind: 'builtin' | 'local' | 'custom';
+  enabled: boolean;
+  base_url: string | null;
+  api_key_masked: string | null;
+}
+
+/**
+ * 连通性测试结果（`POST /api/models/test` 与 `/api/models/{id}/test`）。
+ * 失败也是 **200**（ok=false + error 人话）——"通不通"正是接口要回答的问题本身。
+ */
+export interface ModelTestResult {
+  ok: boolean;
+  latency_ms: number | null;
+  error: string | null;
+  sample: string | null;
+}
+
+/** 连通性测试入参（对**表单里还没保存**的配置测试） */
+export interface ModelTestInput {
+  base_url: string;
+  api_key?: string;
+  model: string;
+}
+
+/** 新建/编辑自定义模型的表单载荷（编辑时字段可选；api_key 留空 = 不修改） */
+export interface ModelInput {
+  name?: string;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  enabled?: boolean;
 }
 
 /**
@@ -39,6 +99,7 @@ export type ChatStreamEvent =
       sources: SourceItem[];
       invalid_citations: number[];
       tool_calls: string[];
+      model_used: ModelUsed | null;
     }
   | { type: 'error'; message: string };
 

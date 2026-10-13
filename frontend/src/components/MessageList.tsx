@@ -1,6 +1,6 @@
 import { Alert } from 'antd';
 import type { ReactNode } from 'react';
-import type { SourceItem } from '../types/api';
+import type { ModelUsed, SourceItem } from '../types/api';
 import { extractCitationParts, formatDateTime } from '../lib/format';
 import { ToolCallCard } from './ToolCallCard';
 import styles from '../styles/chat.module.css';
@@ -21,6 +21,13 @@ export interface ChatMessageView {
    * 那是**还没到**，不是**不存在**。流结束（或从 PG 重读）后自然恢复引用渲染。
    */
   streaming?: boolean;
+  /**
+   * 本轮**实际执行模型**（S2 归因数据，来自 done 帧的 model_used）。
+   *
+   * 诚实边界：只存在于**实时对话**的气泡上 —— messages 表没有这一列，
+   * 刷新后从 PG 重读的历史消息没有归因（要持久化得给消息表加列，本次不做）。
+   */
+  modelUsed?: ModelUsed;
 }
 
 function renderAnswer(answer: string, sources: SourceItem[], invalid: number[], onCitation: (source: SourceItem) => void): ReactNode {
@@ -64,7 +71,18 @@ export function MessageList({ messages, sources, invalidCitations, loading, onCi
                 : message.content}
             </div>
           ) : null}
-          {message.createdAt ? <div className={styles.messageMeta}>{formatDateTime(message.createdAt)}</div> : null}
+          {message.createdAt || message.modelUsed ? (
+            <div className={styles.messageMeta}>
+              {message.createdAt ? <span>{formatDateTime(message.createdAt)}</span> : null}
+              {/* 归因（需求稿 §3.3）：显示的是**实际执行**的模型，不是"用户选了什么"——
+                  数据来自 done 帧的 model_used，id 对不上选中态正说明发生过降级（可见） */}
+              {message.modelUsed ? (
+                <span className={styles.attribution} title={`模型 id：${message.modelUsed.id}`}>
+                  本轮由 {message.modelUsed.name}（{message.modelUsed.model}）回答
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </article>
       ))}
       {loading ? <div className={styles.thinking}><Alert type="info" showIcon message="Agent 正在处理请求…" /></div> : null}

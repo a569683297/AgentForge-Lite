@@ -12,13 +12,16 @@ import {
   ToolOutlined,
   FundProjectionScreenOutlined,
 } from '@ant-design/icons';
-import { Button, Layout, Select, Tooltip } from 'antd';
+import { Button, Layout } from 'antd';
 import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { HealthResponse, SessionItem } from '../types/api';
+import type { HealthResponse, ModelItem, SessionItem } from '../types/api';
+import type { ModelSelection } from '../lib/modelMemory';
 import { formatDateTime } from '../lib/format';
 import { PAGE_PATHS, type PageKey } from '../lib/routes';
 import { useTheme } from '../theme/ThemeProvider';
+import { ModelConfigModal } from './ModelConfigModal';
+import { ModelSwitcher } from './ModelSwitcher';
 import { StatusDot } from './StatusDot';
 import styles from '../styles/shell.module.css';
 
@@ -36,16 +39,22 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
 
 const titles = Object.fromEntries(navItems.map((item) => [item.key, item.label])) as Record<PageKey, string>;
 
-export function AppShell({ page, children, sessions, health, onSessionSelect, selectedSessionId }: {
+export function AppShell({ page, children, sessions, health, onSessionSelect, selectedSessionId, models, selectedModelId, onModelSelect, onModelsRefresh }: {
   page: PageKey;
   children: ReactNode;
   sessions: SessionItem[];
   health: HealthResponse | null;
   onSessionSelect: (id: string) => void;
   selectedSessionId?: string;
+  models: ModelItem[];
+  selectedModelId: ModelSelection;
+  onModelSelect: (modelId: ModelSelection) => void;
+  onModelsRefresh: () => void;
 }) {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
+  // 配置弹窗的开合状态放在这里（入口在下拉底部，两者同属顶栏交互）
+  const [modelConfigOpen, setModelConfigOpen] = useState(false);
   const { mode, toggle } = useTheme();
   const status = health?.status === 'ok' ? { tone: 'success' as const, label: 'API 正常' } : health?.status === 'degraded' ? { tone: 'warning' as const, label: '依赖异常' } : { tone: 'danger' as const, label: '连接失败' };
   const activeSession = useMemo(() => selectedSessionId ?? sessions[0]?.id, [selectedSessionId, sessions]);
@@ -82,12 +91,23 @@ export function AppShell({ page, children, sessions, health, onSessionSelect, se
           <div className={styles.topbarLeft}><span className={styles.topbarTitle}>{titles[page]}</span><span className={styles.topbarSlash}>/</span><span className="af-mono af-muted">production</span></div>
           <div className={styles.topbarRight}>
             <StatusDot tone={status.tone} label={status.label} />
-            <Tooltip title="模型由后端环境变量决定，当前仅展示"><Select size="small" value="configured runtime" options={[{ value: 'configured runtime', label: 'configured runtime' }]} className={styles.modelSelect} /></Tooltip>
+            <ModelSwitcher
+              models={models}
+              selectedModelId={selectedModelId}
+              onSelect={onModelSelect}
+              onOpenConfig={() => setModelConfigOpen(true)}
+            />
             <Button type="text" aria-label="切换主题" icon={mode === 'dark' ? <SunOutlined /> : <MoonOutlined />} onClick={toggle} />
           </div>
         </Header>
         <Content className={styles.pageContent}>{children}</Content>
       </Layout>
+      <ModelConfigModal
+        open={modelConfigOpen}
+        models={models}
+        onClose={() => setModelConfigOpen(false)}
+        onModelsChanged={onModelsRefresh}
+      />
     </Layout>
   );
 }

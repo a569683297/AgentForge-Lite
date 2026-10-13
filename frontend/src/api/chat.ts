@@ -2,10 +2,12 @@ import { client } from './client';
 import { drainSseFrames } from '../lib/sse';
 import type { ChatResponse, ChatStreamEvent } from '../types/api';
 
-export async function sendMessage(message: string, sessionId?: string): Promise<ChatResponse> {
+export async function sendMessage(message: string, sessionId?: string, modelId?: string | null): Promise<ChatResponse> {
   const { data } = await client.post<ChatResponse>('/chat', {
     message,
     ...(sessionId ? { session_id: sessionId } : {}),
+    // 不传 model_id = 默认链路（主通道 + 失败降级）；传 = 锁定该模型（S2 语义）
+    ...(modelId ? { model_id: modelId } : {}),
   });
   return data;
 }
@@ -27,11 +29,17 @@ export async function sendMessageStream(
   message: string,
   sessionId: string | undefined,
   onEvent: (event: ChatStreamEvent) => void,
+  modelId?: string | null,
 ): Promise<void> {
   const response = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, ...(sessionId ? { session_id: sessionId } : {}) }),
+    body: JSON.stringify({
+      message,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      // 不传 model_id = 默认链路（主通道 + 失败降级）；传 = 锁定该模型（S2 语义）
+      ...(modelId ? { model_id: modelId } : {}),
+    }),
   });
   if (!response.ok || !response.body) {
     throw new Error(await readErrorMessage(response));

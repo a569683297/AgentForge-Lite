@@ -6,7 +6,8 @@ import { sendMessageStream } from '../api/chat';
 import { getSessionMessages } from '../api/sessions';
 import { getTools } from '../api/tools';
 import { pairToolMessages, type PairedToolCall } from '../lib/format';
-import type { MessageItem, SourceItem } from '../types/api';
+import type { ModelSelection } from '../lib/modelMemory';
+import type { MessageItem, ModelUsed, SourceItem } from '../types/api';
 import { CitationDrawer } from '../components/CitationDrawer';
 import { ErrorState } from '../components/EmptyState';
 import { MessageList, type ChatMessageView } from '../components/MessageList';
@@ -43,7 +44,13 @@ function consecutiveToolMessages(history: MessageItem[], index: number): Message
   return run;
 }
 
-export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void }) {
+export function ChatPage({ onSessionsRefresh, selectedModelId, onModelUsed }: {
+  onSessionsRefresh: () => void;
+  /** 当前会话选中的模型（来自 App 的会话级记忆；null = 默认自动降级） */
+  selectedModelId: ModelSelection;
+  /** done 时上报"本轮实际带上的选择"（App 用于新会话建立后的补记） */
+  onModelUsed: (sessionId: string, modelId: string) => void;
+}) {
   // 会话 id 直接从 URL 读（/chat/:sessionId）；/chat（新会话）时是 undefined。
   // 不再用 useState 镜像它 —— URL 是唯一真源：
   // 刷新 /chat/xxx 时 useParams 拿到的还是同一个 xxx，历史会话自然恢复。
@@ -58,6 +65,14 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
   const [selectedSource, setSelectedSource] = useState<SourceItem | null>(null);
   const [toolSources, setToolSources] = useState<Record<string, string>>({});
   const listRef = useRef<HTMLDivElement>(null);
+  /**
+   * 归因接力（首轮特有的时序）：
+   * 新会话 done 时气泡上有 modelUsed，但紧接着 navigate 到 /chat/:id → 本组件
+   * 重读 PG 历史并把全部消息替换（占位气泡含归因一起被换掉）——而 messages 表
+   * 没有 model_used 列，重读出来的消息不带归因。若不接力，"本轮由 XX 回答"
+   * 在首轮就永远看不到。约定：done 时写入、history effect 消费一次后清空。
+   */
+  const pendingAttributionRef = useRef<ModelUsed | null>(null);
 
   useEffect(() => {
     if (!sessionId) {
@@ -66,7 +81,18 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
       setInvalidCitations([]);
       return;
     }
-    void getSessionMessages(sessionId).then((history) => setMessages(fromHistory(history))).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法加载会话历史'));
+    void getSessionMessages(sessionId)
+      .then((history) => {
+        const views = fromHistory(history);
+        const pending = pendingAttributionRef.current;
+        if (pending) {
+          pendingAttributionRef.current = null;
+          const lastAssistant = [...views].reverse().find((view) => view.role === 'assistant');
+          if (lastAssistant) lastAssistant.modelUsed = pending;
+        }
+        setMessages(views);
+      })
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法加载会话历史'));
   }, [sessionId]);
 
   useEffect(() => {
@@ -104,6 +130,9 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
     // 这两个变量只是"当前进度"的累加器，没必要触发额外渲染。
     let answer = '';
     let tools: PairedToolCall[] = [];
+    // 发问时刻的模型选择（闭包固定）：请求携带它；done 时用它补记会话记忆。
+    // 为什么固定而不是读实时值：流式进行中用户若切换模型，本轮已发出的请求不该被追改。
+    const requestModelId = selectedModelId;
     const patchAssistant = (patch: Partial<ChatMessageView>) => {
       setMessages((current) => current.map((item) => (item.id === assistantId ? { ...item, ...patch } : item)));
     };
@@ -114,6 +143,7 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
     try {
       await sendMessageStream(message, sessionId, (event) => {
         switch (event.type) {
+          // 帧协议定义在 types/api.ts 的 ChatStreamEvent（meta/token/reset/tool/done/error）
           case 'token':
             answer += event.text;
             patchAssistant({ content: answer });
@@ -143,14 +173,21 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
             setSources(event.sources);
             setInvalidCitations(event.invalid_citations);
             // 以 done.answer 收口对齐：正常情况与累加值相同；reset 边界 / 丢帧时，
-            // 这一步保证"屏幕上的最终文本 == 落库文本"
-            patchAssistant({ content: event.answer });
+            // 这一步保证"屏幕上的最终文本 == 落库文本"。
+            // modelUsed 是**实际执行模型**（归因"本轮由 XX 回答"，S2 数据）
+            patchAssistant({ content: event.answer, modelUsed: event.model_used ?? undefined });
+            // 新会话补记：把"发问时的选择"固定到刚建立的会话名下（仅显式选择时；
+            // 默认=null 不记 —— 避免把"默认"钉死成某个具体模型）。
+            // 必须在 navigate 之前写：URL 变化会触发 App 里的记忆解析，后写会读到旧值。
+            if (requestModelId) onModelUsed(event.session_id, requestModelId);
             // 首条消息会产生新会话 id：把地址栏从 /chat 换成 /chat/:id。
             // **刻意等 done 才跳**（不在 meta 帧就跳）：navigate 会触发路由参数变化 →
             // 历史加载 effect 触发 setMessages(history) —— 流式期间跳会把正在生长的
             // 气泡冲掉；done 之后跳，PG 里已有本轮完整记录，重读出来就是对的。
             // 判断 id 变化才跳：多轮对话时 URL 没变，避免无意义的历史写入。
             if (event.session_id !== sessionId) {
+              // 跳走会触发历史重读 → 占位气泡连归因一起被替换，先暂存给重读路径接力
+              pendingAttributionRef.current = event.model_used ?? null;
               navigate(`/chat/${event.session_id}`, { replace: true });
             }
             // 侧栏「最近会话」需要包含这条新会话（列表数据在 App 手里）
@@ -164,7 +201,7 @@ export function ChatPage({ onSessionsRefresh }: { onSessionsRefresh: () => void 
             // 暂不消费：会话 id 以 done 为准（理由见上面 navigate 的注释）
             break;
         }
-      });
+      }, requestModelId);
       if (!settled) {
         setError('流式连接意外中断 —— 本轮回答可能不完整');
       }
