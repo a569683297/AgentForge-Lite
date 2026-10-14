@@ -37,8 +37,6 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: 'retriever', label: '检索检查器', icon: <SearchOutlined /> },
 ];
 
-const titles = Object.fromEntries(navItems.map((item) => [item.key, item.label])) as Record<PageKey, string>;
-
 export function AppShell({ page, children, sessions, health, onSessionSelect, selectedSessionId, models, selectedModelId, onModelSelect, onModelsRefresh }: {
   page: PageKey;
   children: ReactNode;
@@ -88,7 +86,6 @@ export function AppShell({ page, children, sessions, health, onSessionSelect, se
       </Sider>
       <Layout>
         <Header className={styles.topbar}>
-          <div className={styles.topbarLeft}><span className={styles.topbarTitle}>{titles[page]}</span><span className={styles.topbarSlash}>/</span><span className="af-mono af-muted">production</span></div>
           <div className={styles.topbarRight}>
             <StatusDot tone={status.tone} label={status.label} />
             <ModelSwitcher

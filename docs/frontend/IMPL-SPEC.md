@@ -1074,7 +1074,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 │   └── .sidebar-bottom    .nav-item（设置）+ .user-row（.avatar + 姓名/团队）
 ├── <Layout>（.main-area：flex column）
 │   ├── <Layout.Header>（.topbar）
-│   │   ├── .topbar-left   PanelLeft 图标 + 当前页标题 + "/" + "production"
+│   │   ├── .topbar-left   ❌ 已移除（2026-10-14：面包屑「页面名 / production」整体去掉，用户要求）
 │   │   └── .topbar-right  .api-status（绿点 + "API 正常"）+ <ModelSwitcher> 模型切换器（✅ 已落地，见 §5.1.2）+ 主题切换 + 帮助
 │   └── <Layout.Content>（.page-content）← 7 页在这里切换
 └── <Drawer>（引用抽屉，全局唯一，见 §5.9）
@@ -1100,7 +1100,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 | `.avatar` | **24×24**，bg `sunken`，1px `border-strong` 描边，圆角 4px，字号 10 | — |
 | `.topbar` | h **48px** | ✅ 与 §4.2 的 `headerHeight: 48` 一致 |
 | `.topbar` padding | `0 16px` | — |
-| `.topbar-left/right` | gap 10px | — |
+| `.topbar-right` | gap 10px | （`.topbar-left` 已移除，2026-10-14；顶栏改为 `justify-content: flex-end`） |
 | `.api-status` | gap 6px，11px `text-secondary`；圆点 **7×7** `success` | — |
 | `.model-select` | 已落地为切换器 `.trigger`：h **26px**，max-width **200px**，padding `0 9px`，1px 描边，圆角 4px；hover 描边变 `accent` | 见 §5.1.2 |
 | `.page-content` padding | **`20px 24px`** | — |
