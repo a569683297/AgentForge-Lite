@@ -69,6 +69,51 @@ const fingerprintTips: Record<'dataset' | 'corpus', InfoTip> = {
   },
 };
 
+// 四张指标卡的说明（挂在卡片标题旁的 info 图标上）——DESIGN「口径必须写在 UI 上」的延伸：
+// 内联一行说明保持不动，完整口径（判据/档位/归因阈值）进悬浮。
+// 口径出处（全部实读核对，非估计）：
+//   accuracy 与三维均分 → app/services/eval_service.summarize_results()
+//   单行「过/不过」判定   → app/services/failure_taxonomy.derive_case_outcome()
+//   0–5 档位判据         → app/services/judge_service.py 的 JUDGE_SYSTEM
+const metricTips: Record<'accuracy' | 'correctness' | 'faithfulness' | 'completeness', InfoTip> = {
+  accuracy: {
+    title: '准确率 · 按题统计的通过率',
+    steps: [
+      '先判每一行过不过：内容题看正确性是否 ≥ 4 分；工具题只看工具有没有调对（内容分数不参与）',
+      '再按题汇总：同一题的全部生成做「过 / 不过」多数决——严格过半才算这题过（平局记不过）',
+      '通过题数 ÷ 总题数。按「题」而非按「行」——每题生成几次都不影响它',
+    ],
+    note: '与另外三个均分是两套口径（这里数「题」、那里量「行」），不能互相换算或印证。',
+  },
+  correctness: {
+    title: '正确性均分 · 关键事实对不对（对照参考答案）',
+    steps: [
+      '每份回答与【参考答案】对照，只看关键事实，打 0–5 整数分',
+      '档位：5 完全一致 → 4 事实对、表述有别 → 3 漏限定条件 → 2 关键事实错 → 1 与参考答案相反 → 0 未回答',
+      '同一份回答重复判多次、取中位数；全轮按行求平均（分母 = scored_rows）',
+    ],
+    note: '它同时是准确率的单行判据：正确性 ≥ 4，这行才算通过。',
+  },
+  faithfulness: {
+    title: '引用忠实度 · 有没有编（对照检索片段）',
+    steps: [
+      '对照物不是参考答案，而是这轮实际喂给模型的【检索到的片段】',
+      '档位：5 全部有据 → 4 仅措辞超出 → 3 一处片段外细节 → 2 出现编造 → 1 多处编造 → 0 无依据',
+      '同一份回答重复判多次取中位数，全轮按行求平均',
+    ],
+    note: '专测「幻觉」：分低 = 模型在编。失败行归因里，忠实度 ≤ 2 优先记「编造内容」。',
+  },
+  completeness: {
+    title: '完整性 · 说全没有（对照参考答案的要点）',
+    steps: [
+      '对照物是【参考答案】的要点清单：看该说的要点覆盖了几个',
+      '档位：5 全覆盖 → 4 缺次要细节 → 3 漏一个要点 → 2 漏多个 → 1 不成回答 → 0 未答',
+      '答案的长短、语气、格式一律不计分——写得少不等于分低',
+    ],
+    note: '和正确性各看一面：正确性问「说的对不对」，完整性问「该说的说了没」。失败行归因里，完整性 ≤ 2 记「回答不完整」。',
+  },
+};
+
 function InfoTipContent({ tip }: { tip: InfoTip }) {
   return (
     <div className={styles.flowTip}>
@@ -138,10 +183,10 @@ export function EvalPage() {
           const flow = retrievalFlows[run.config_name];
           return <button className={`${styles.runCard} ${run.id === selectedRunId ? styles.runCardSelected : ''}`} key={run.id} onClick={() => setSelectedRunId(run.id)}><div className={styles.runCardTop}><span className={`af-mono ${styles.runCardName}`}>{configLabel[run.config_name] ?? run.config_name}{flow ? <Tooltip title={<InfoTipContent tip={flow} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip> : null}</span><strong className="af-num">{formatPercent(run.accuracy)}</strong></div><div className={styles.runCardMeta}>{formatDateTime(run.created_at)} · {run.judge_model ?? '未记录 judge'}</div><div className={styles.fingerprints}><span className={`af-mono ${styles.fingerprintItem}`}>题集 {run.dataset_fingerprint?.slice(0, 8) ?? '—'}…<Tooltip title={<InfoTipContent tip={fingerprintTips.dataset} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip></span><span className={`af-mono ${styles.fingerprintItem}`}>语料 {run.corpus_fingerprint?.slice(0, 8) ?? '—'}…<Tooltip title={<InfoTipContent tip={fingerprintTips.corpus} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip></span></div></button>;})}</div>
         <div className={styles.metricGrid}>
-          <MetricCard label="准确率" value={formatPercent(detail?.accuracy)} note="按题计算，每题多次生成先取多数结论" />
-          <MetricCard label="正确性均分" value={formatScore(detail?.score_correctness)} note={`按行计算，分母是 ${detail?.scored_rows ?? '—'} 行`} />
-          <MetricCard label="引用忠实度" value={formatScore(detail?.score_faithfulness)} note="工具题不计内容分数" />
-          <MetricCard label="完整性" value={formatScore(detail?.score_completeness)} note={`明细总行数 ${detail?.rows ?? '—'}`} />
+          <MetricCard label="准确率" value={formatPercent(detail?.accuracy)} note="按题计算，每题多次生成先取多数结论" labelTip={<InfoTipContent tip={metricTips.accuracy} />} />
+          <MetricCard label="正确性均分" value={formatScore(detail?.score_correctness)} note={`按行计算，分母是 ${detail?.scored_rows ?? '—'} 行`} labelTip={<InfoTipContent tip={metricTips.correctness} />} />
+          <MetricCard label="引用忠实度" value={formatScore(detail?.score_faithfulness)} note="工具题不计内容分数" labelTip={<InfoTipContent tip={metricTips.faithfulness} />} />
+          <MetricCard label="完整性" value={formatScore(detail?.score_completeness)} note={`明细总行数 ${detail?.rows ?? '—'}`} labelTip={<InfoTipContent tip={metricTips.completeness} />} />
         </div>
         <div className={styles.splitGrid}>
           <Card className={styles.panel} styles={{ body: { padding: 0 } }} title={<span>分类聚合</span>}>

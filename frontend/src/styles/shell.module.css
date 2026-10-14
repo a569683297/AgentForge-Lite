@@ -38,7 +38,9 @@
 .errorState { justify-items: start; align-content: center; gap: 6px; border: 1px solid var(--af-border-default); border-radius: 6px; color: var(--af-danger); }
 .inlineMeta { color: var(--af-text-tertiary); font-size: 11px; }
 .metricCard { min-height: 110px; }
-.metricLabel { color: var(--af-text-secondary); font-size: 11px; }
+.metricLabel { display: inline-flex; align-items: center; gap: 4px; color: var(--af-text-secondary); font-size: 11px; }
+.metricLabelInfo { display: inline-flex; color: var(--af-text-tertiary); font-size: 12px; cursor: help; }
+.metricLabelInfo:hover { color: var(--af-accent); }
 .metricValue { color: var(--af-text-primary); font: 500 24px/30px var(--af-font-mono); font-variant-numeric: tabular-nums; }
 .metricSuffix { margin-left: 5px; color: var(--af-text-secondary); font: 400 12px/20px var(--af-font-sans); }
 .metricNote { margin-top: 3px; color: var(--af-text-tertiary); font-size: 10px; }

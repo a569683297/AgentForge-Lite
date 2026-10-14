@@ -1407,7 +1407,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       ├── .fingerprints：题集指纹 + 语料指纹（各取前 8 位 + "…"）
       └── <small class="muted">judge 模型 · N 次生成</small>
 .metric-grid（4 列：准确率 / 正确性均分 / 引用忠实度 / 完整性）
-  └── .metric-card：11px 标签 + 24px mono 数值 + 10px 说明
+  └── .metric-card：11px 标签 + info 图标（✅ 悬浮显示完整口径，见 §5.4.2 落地补充）+ 24px mono 数值 + 10px 说明
 .split-grid（1.5fr : 1fr）
 ├── .panel 分类聚合（.compact-table：类别 | 题数 | 明细行数 | 通过行数 | 三维分数）
 │   └── .table-note（说明工具题为何是 —）
@@ -1480,6 +1480,15 @@ for (const run of runs) {                       // runs 已按 id 倒序
 
 3. **失败模式用 `failure_reason_label`，不要自己拼中文。**
    后端已经给了中文标签（在 schema 层算的，避免与枚举定义漂移）。直接用。
+
+> **落地补充（2026-10-14）：四张指标卡补齐悬浮口径。**
+> 运行卡片此前已有 info 图标（检索链路 / 两枚指纹），四张指标卡只有内联一行说明——
+> 已按同款补上：悬浮显示**完整口径**（多数决规则 / judge 0–5 档位判据 / 失败归因阈值），
+> 内联说明保持不动。文案出处与实现逐字核对：
+> `eval_service.summarize_results()`（准确率与均分口径）、
+> `failure_taxonomy.derive_case_outcome()`（单行通过判定、归因优先级）、
+> `judge_service.py` 的 `JUDGE_SYSTEM`（三档位判据）。
+> 组件侧：`MetricCard` 新增可选 `labelTip`（不传则无图标，分析页示例卡不受影响）。
 
 #### ★ 5.4.3 mock 数字纪律（**必读**）
 
