@@ -186,7 +186,12 @@ async def segment_d(conn) -> list[dict]:
     single = sum(1 for c in cases if len(c["doc_ids"]) == 1)
     cross = sum(1 for c in cases if len(c["doc_ids"]) >= 2)
     check("D4", single == 25 and cross == 10, f"单文档 {single} + 跨文档 {cross}")
-    check("D5", corpus_size == 8, f"语料文档数 {corpus_size}（检索任务的难度上限）")
+    # D5 原为 `corpus_size == 8`（D23 落笔时库里恰好 8 篇）。语料后来两次合法扩张：
+    # 2026-10-09 D35 补 3 份演示素材（→11 篇）、10-11 演示上传 1 篇（→12 篇）。
+    # 合法扩张不是故障 → 改为下界断言（误删到 8 篇以下仍会红、仍能抓真问题）。
+    # 2026-10-14 S4 回归发现并修正：此前自 10-09 起静默过期（最后全绿为 10-04 的 260/260）。
+    check("D5", corpus_size >= 8,
+          f"语料文档数 {corpus_size}（≥8：D21 基础语料在库；补素材/演示上传的合法扩张不设上限）")
     check("D6", n_gold == n_found and n_gold > 0,
           f"gold 对齐：{n_found}/{n_gold} 全部能在 documents 里找到"
           + (f"，缺失 {missing[:2]}" if missing else ""))

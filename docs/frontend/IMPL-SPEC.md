@@ -13,7 +13,7 @@
 
 ### 0.1 你要做什么
 
-在 `AgentForge-Lite/frontend/` 里，用 **Vite + React + TypeScript + Ant Design** 实现一个 **7 页**的中后台控制台，把已有的 Python 后端（FastAPI，14 个 REST 接口）可视化。
+在 `AgentForge-Lite/frontend/` 里，用 **Vite + React + TypeScript + Ant Design** 实现一个 **7 页**的中后台控制台，把已有的 Python 后端（FastAPI，接口清单见 §6.1）可视化。
 
 **这个前端的用户是工程师**，他要看的是"Agent 到底干了什么"。所以它的审美基准是**仪表盘**，不是宣传单。
 
@@ -71,7 +71,7 @@ docs/frontend/DESIGN.md（视觉唯一权威，684 行）
 
 ### 1.1 后端已经完成了什么（D01–D28）
 
-Python / FastAPI 后端**已经全部就绪**，14 个 REST 接口可用（清单见 §6.1）。你**不需要写任何后端代码**。
+Python / FastAPI 后端**已经全部就绪**，REST 接口见 §6.1（开工时 15 个端点；M6 期间陆续新增 SSE 流式对话、文档预览与模型管理，**当前 20 条路径 / 23 个端点**）。你**不需要写任何后端代码**。
 
 技术栈（了解即可，不用碰）：
 
@@ -1075,7 +1075,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 ├── <Layout>（.main-area：flex column）
 │   ├── <Layout.Header>（.topbar）
 │   │   ├── .topbar-left   PanelLeft 图标 + 当前页标题 + "/" + "production"
-│   │   └── .topbar-right  .api-status（绿点 + "API 正常"）+ <Select> 模型 + 主题切换 + 帮助
+│   │   └── .topbar-right  .api-status（绿点 + "API 正常"）+ <ModelSwitcher> 模型切换器（✅ 已落地，见 §5.1.2）+ 主题切换 + 帮助
 │   └── <Layout.Content>（.page-content）← 7 页在这里切换
 └── <Drawer>（引用抽屉，全局唯一，见 §5.9）
 ```
@@ -1102,7 +1102,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 | `.topbar` padding | `0 16px` | — |
 | `.topbar-left/right` | gap 10px | — |
 | `.api-status` | gap 6px，11px `text-secondary`；圆点 **7×7** `success` | — |
-| `.model-select` | h **28px**，w **140px**，1px `border-strong`，圆角 4px | — |
+| `.model-select` | 已落地为切换器 `.trigger`：h **26px**，max-width **200px**，padding `0 9px`，1px 描边，圆角 4px；hover 描边变 `accent` | 见 §5.1.2 |
 | `.page-content` padding | **`20px 24px`** | — |
 
 #### 数据源
@@ -1111,14 +1111,48 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 |---|---|---|
 | `.api-status` | `GET /api/health` | `status === 'ok'` → 绿点 + "API 正常"；`'degraded'` → 琥珀 + "依赖异常"；请求失败 → 红 + "连接失败" |
 | `.history`（最近会话） | `GET /api/sessions?limit=20` | `[{id, title, updated_at}]` |
-| 模型下拉 | **无接口**。后端的模型由 `.env` 决定，不是运行时可选 | ⚠ 见缺口 |
+| 模型切换器 | `GET /api/models`（列表 = 内置 + 自定义）；配置弹窗走 `POST/PATCH/DELETE /api/models` 与两个 `/api/models/**/test` | ✅ 已落地，见 §5.1.2 |
 
 #### 缺口
 
-1. **"模型选择"下拉没有后端支持。** 后端的 LLM 通道由 `.env` 配置（`deepseek` / `openai`），`POST /api/chat` **不接受模型参数**。
-   → **建议**：M6 期间把它做成**只读展示**（显示当前配置的模型名，不可切），或直接去掉。**不要**让它看起来能选却什么也不做。
+1. ~~**"模型选择"下拉没有后端支持。** 后端的 LLM 通道由 `.env` 配置（`deepseek` / `openai`），`POST /api/chat` **不接受模型参数**。~~
+   → **已解决（2026-10-14，模型切换需求 S1–S3）**：新增 `llm_models` 表 + `/api/models` 六端点 + 对话接口 `model_id` 参数（**不传 = 旧行为逐字节不变**，评测脚本零影响）；下拉做成真切换器。**落地记录见 §5.1.2**。
 2. `.user-row`（"Lin Wei / 工程团队"）是 v0 的假人。本项目**没有用户系统**。→ 建议换成**当前环境标识**（如 `production` / `local`）或整个删掉。
 3. `.nav-count`（"3"）在 v0 里是硬编码。真实可用的是**未读/进行中**语义，但**没有接口**。→ 建议去掉，或改成"文档处理中数量"（可从 `/api/documents` 统计）。
+
+#### 5.1.2 模型切换器与自定义模型（**已落地**）
+
+> **注解 · 模型注册表**：一张记着"有哪些模型可用"的表（本项目 = `llm_models` 数据库表，`scripts/d40_migrate.py` 建）。**表里只存用户自定义的模型**；内置模型（`.env` 里的 deepseek / openai）仍从环境变量读，不进表。
+> **注解 · 归因（attribution）**：返回结果时**记下"这一轮实际是哪个模型答的"**。锁定模式下它与用户选的一致；自动降级下可能不同 —— 把它显示出来，是为了**降级发生时用户看得见**，而不是悄悄换了人。
+
+**状态：✅ 已落地（2026-10-14，S1–S3）。** 原稿此处的建议是"只读展示或去掉"；实际按新需求做成了**真切换器**，需求稿见 `docs/模型切换与自定义模型-需求稿-2026-10-13.md`（含 5 项拍板记录）。
+
+**① 后端（S1 + S2）**
+
+| 组件 | 说明 |
+|---|---|
+| `llm_models` 表 | 8 列：id / name / base_url / api_key / model / enabled / created_at / updated_at。`api_key` 明文入库（出口打码：前 3 + 后 4） |
+| `GET /api/models` | 列表 = 内置（`.env` 里配了 key 的）+ 自定义（DB）。`kind` 三值：`builtin` / `local`（自定义但指向本机）/ `custom` |
+| `POST/PATCH/DELETE /api/models` | 配置弹窗的 CRUD。`api_key` 留空 = 不修改（改其他字段不必重填 key） |
+| `POST /api/models/test` · `POST /api/models/{id}/test` | 连通性测试（真发一次 `max_tokens=1` 的请求）。**失败也返回 200**：`{ok:false, error:"人话 + 修法"}` ——"通不通"正是接口要回答的问题，不是 HTTP 错误 |
+| 对话两链路 | `POST /api/chat` 与 `POST /api/chat/stream` 均接受 `model_id`；**不传 = 旧行为逐字节不变**。响应/`done` 帧带 `model_used` 归因 |
+
+**② 两条语义（最容易搞错的）**
+- **锁定不降级**：显式选定某模型 = 承诺用它，失败**报错不偷偷换**（非流式 422 / 流式 `error` 帧）。**不选**（= 列表首行「自动降级」）才是原有的主备降级行为。
+- **`model_used` 记的是实际执行者**：锁定模式下 = 选中项；自动降级下可能 ≠ 选中项（这正是要把它显示出来的原因 —— 降级可见）。
+
+**③ 前端**
+- `components/ModelSwitcher.tsx`：右上角真下拉。**不用 antd `Select`**（需要"分组 + 双行项 + 类型标签 + 底部固定入口"的自由版面，`Select` 的 option 模型表达不了）→ 改用 `Popover` + 自定义面板。列表 = 「自动降级」默认行 + 「内置模型」组 + 「自定义模型」组 + `ModelKindTag` 类型标签 + 停用置灰 + 底部「配置自定义模型」。
+- `components/ModelConfigModal.tsx`：CRUD + 启用开关 + 删除二次确认 + 测试连接。**测试连接的编辑态分叉是刻意的**：key 留空 → 测**已保存配置**（"留空=不修改"下表单值 ≠ 真实配置，拿表单值测会得到必然误导的 401）；填了新 key → 测表单值。
+- `lib/modelMemory.ts`：**会话级记忆**——每个会话各记各的模型 + 新会话继承最近选择（存 localStorage 的 `{会话 id → model_id}` 映射；`null` = 自动降级，是合法值）。
+- 归因显示：Agent 消息 `.message-meta` 内渲染 `本轮由 {name}（{model}）回答`（title 悬浮显示模型 id）。
+
+**④ 实测踩过的三个点**
+- **首轮归因的接力**：新会话 `done` → `navigate` 到 `/chat/:id` → 历史重读把流式气泡换成 PG 版本（`messages` 表没有归因列）→ 归因被覆盖。修法：`pendingAttributionRef` 接力（done 写入 → history effect 消费一次）。**教训：实时气泡上的信息，凡不在持久层里的，都要过"navigate 重读"这一关。**
+- **8080 容器访问宿主机要用 `host.docker.internal`**：容器里的 `127.0.0.1` 是它自己。自定义模型的 `base_url` 按**后端部署形态**填：本机 uvicorn → `127.0.0.1`；容器 api → `host.docker.internal`（这也正是 Ollama 本机接入的路径）。
+- **antd `autoInsertSpace`**：只有 2 个中文字的按钮文本会被插空格（"创建" → "创 建"），自动化测试 `getByRole(name:'创建')` 匹配不上 → 用 `/创\s*建/` 正则容忍。
+
+**⑤ 验收**：后端全量 pytest **204 passed / 3 skipped**；前端 typecheck + vitest **22** + build 全绿；双端浏览器验收各 **18/18**（5173 dev + 8080 生产部署；含"请求真的带着 `model=fake-model` 打到端点"的硬证据）。
 
 ---
 
@@ -1142,7 +1176,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 │       ├── .message-label "Agent" + <span class="mono muted">模型名</span>
 │       ├── .tool-call × N             ← 工具调用卡（可折叠）
 │       ├── <p>正文 + .citation-link "[1]"</p>
-│       └── .message-meta.mono 耗时 · token · 成本
+│       └── .message-meta.mono 耗时 · token · 成本 · 「本轮由 {name}（{model}）回答」← 归因（✅ 已落地，见 §5.1.2）
 ├── .composer（padding 10px 12px，上边框）
 │   ├── .composer-tools：回形针按钮 + "Enter 发送 · Shift+Enter 换行"
 │   ├── <textarea>（bg sunken，1px 描边，圆角 4px，resize none）
@@ -1161,7 +1195,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 | `.user-message` | bg `sunken`，**左边框 2px `border-default`**，圆角 4px |
 | `.agent-message` | **只有上下 1px 分隔线，无背景、无圆角** ← ★ 关键视觉特征 |
 | `.message-label` | 11px `text-secondary`，gap 8px |
-| `.message-meta` | 11px `text-tertiary` |
+| `.message-meta` | 11px `text-tertiary`；归因 `span.attribution` 与时间同排（flex gap 10px），**只在实时会话可见**（PG 的 messages 表无归因列，刷新后不显示） |
 | `.citation-link` | `accent` 色，**虚线下划线**（`text-decoration-style: dotted`） |
 | `.composer textarea` | bg `sunken`，padding `9px 10px`，`line-height: 20px`；focus 时描边变 `accent` |
 | `.chat-status` | h 28px，11px `text-tertiary`，上边框，padding `0 14px` |
@@ -1795,27 +1829,36 @@ v0 稿里的评测页数字**全部是编的**，与真实后端**完全不同**
 > **本章的每一条都是从后端代码（`app/api/*.py` + `app/schemas/*.py`）逐个核对来的，不是编的。**
 > 服务跑起来后，`http://localhost:8000/docs` 有自动生成的 OpenAPI 文档，可与本章对照。
 
-### 6.1 端点总表（14 条路径 / 15 个端点）
+### 6.1 端点总表（20 条路径 / 23 个端点）
 
 | # | 方法 | 路径 | 用途 | 页面 |
 |---|---|---|---|---|
 | 1 | GET | `/api/health` | 健康检查（含依赖状态） | 外壳顶栏 |
 | 2 | POST | `/api/chat` | 对话（**非流式**） | 对话台 |
-| 3 | GET | `/api/documents` | 文档列表 | 知识库 |
-| 4 | POST | `/api/documents` | 上传（multipart，**202**） | 知识库 |
-| 5 | DELETE | `/api/documents/{document_id}` | 删除（**204**，无响应体） | 知识库 |
-| 6 | GET | `/api/sessions` | 会话列表（最近活跃倒序） | 侧栏 |
-| 7 | GET | `/api/sessions/{id}/messages` | 会话历史（正序，含 `role:"tool"`） | 对话台 |
-| 8 | GET | `/api/eval/cases` | 评测集列表（**不含参考答案**） | 评测看板 |
-| 9 | GET | `/api/eval/cases/{case_key}` | 单条详情（**含参考答案**） | 评测看板 |
-| 10 | GET | `/api/eval/dataset` | 评测集指纹与分布 | 评测看板 |
-| 11 | GET | `/api/eval/runs` | 运行列表（最新在前） | 评测看板 |
-| 12 | GET | `/api/eval/runs/{run_id}` | 运行详情（含分类聚合） | 评测看板 |
-| 13 | GET | `/api/eval/runs/{run_id}/cases` | 运行明细（可按 category/passed 过滤） | 评测看板 |
-| 14 | GET | `/api/eval/runs/{run_id}/results/{case_key}` | 某题本次全部生成 | 评测看板 |
-| 15 | GET | `/api/tools` | 工具清单 + server 状态 | 工具注册表 |
+| 3 | POST | `/api/chat/stream` | 对话（**流式**，六事件协议见 §5.2.1） | 对话台 |
+| 4 | GET | `/api/documents` | 文档列表 | 知识库 |
+| 5 | POST | `/api/documents` | 上传（multipart，**202**） | 知识库 |
+| 6 | GET | `/api/documents/{document_id}/preview` | 文档元数据 + 文本切片预览 | 知识库（预览） |
+| 7 | DELETE | `/api/documents/{document_id}` | 删除（**204**，无响应体） | 知识库 |
+| 8 | GET | `/api/sessions` | 会话列表（最近活跃倒序） | 侧栏 |
+| 9 | GET | `/api/sessions/{id}/messages` | 会话历史（正序，含 `role:"tool"`） | 对话台 |
+| 10 | GET | `/api/eval/cases` | 评测集列表（**不含参考答案**） | 评测看板 |
+| 11 | GET | `/api/eval/cases/{case_key}` | 单条详情（**含参考答案**） | 评测看板 |
+| 12 | GET | `/api/eval/dataset` | 评测集指纹与分布 | 评测看板 |
+| 13 | GET | `/api/eval/runs` | 运行列表（最新在前） | 评测看板 |
+| 14 | GET | `/api/eval/runs/{run_id}` | 运行详情（含分类聚合） | 评测看板 |
+| 15 | GET | `/api/eval/runs/{run_id}/cases` | 运行明细（可按 category/passed 过滤） | 评测看板 |
+| 16 | GET | `/api/eval/runs/{run_id}/results/{case_key}` | 某题本次全部生成 | 评测看板 |
+| 17 | GET | `/api/tools` | 工具清单 + server 状态 | 工具注册表 |
+| 18 | GET | `/api/models` | 模型列表（内置 + 自定义，`api_key` **出口打码**） | 外壳顶栏（切换器） |
+| 19 | POST | `/api/models` | 新建自定义模型（**201**） | 配置弹窗 |
+| 20 | PATCH | `/api/models/{model_id}` | 编辑（`api_key` 留空 = 不修改） | 配置弹窗 |
+| 21 | DELETE | `/api/models/{model_id}` | 删除（**204**） | 配置弹窗 |
+| 22 | POST | `/api/models/test` | 连通性测试（**表单未保存值**；失败也 **200** + `ok:false`） | 配置弹窗 |
+| 23 | POST | `/api/models/{model_id}/test` | 连通性测试（**已保存模型**；编辑态 key 留空时的分支） | 配置弹窗 |
 
-**除了 2、4、5，其余全是 GET 只读。**
+**写操作（非 GET）**：#2、#3、#5、#7、#19–#23；其余全是 GET 只读。
+> 计数口径：上表 23 行 = `/api` 下全部端点（`GET /api/documents` 与 `POST /api/documents` 同路径不同方法，算两个端点）。以 `http://localhost:8000/openapi.json` 为唯一权威。
 
 ### 6.2 TS 类型定义（`src/types/api.ts`）
 
@@ -1843,6 +1886,63 @@ export interface ChatResponse {
   sources: SourceItem[];
   invalid_citations: number[];   // 幻觉引用：回答里引用了但来源表没有的编号
   tool_calls: string[];          // ★ 只有工具名，没有耗时/入参（见 §5.2 G3）
+  model_used: ModelUsed | null;  // 本轮**实际执行**的模型（归因，见 §5.1.2）
+}
+
+// ============ chat/stream（SSE 事件协议，见 §5.2.1）============
+export type ChatStreamEvent =
+  | { type: 'meta'; session_id: string }
+  | { type: 'token'; text: string }
+  | { type: 'reset' }                                    // 撤回已显示的预告文字
+  | { type: 'tool'; name: string; phase: 'start' | 'end'; ok?: boolean }  // ok 仅 end 携带
+  | {
+      type: 'done';
+      session_id: string;
+      answer: string;
+      sources: SourceItem[];
+      invalid_citations: number[];
+      tool_calls: string[];
+      model_used: ModelUsed | null;
+    }
+  | { type: 'error'; message: string };
+
+// ============ models（见 §5.1.2）============
+/** 本轮回答的实际执行模型。三字段各答一个问题：配置里的哪个 / 界面叫什么 / 发给端点的模型标识 */
+export interface ModelUsed {
+  id: string;                    // 内置=通道名（如 "deepseek"）；自定义=UUID —— 与请求 model_id 同口径
+  name: string;                  // 界面称呼（"DeepSeek" / 用户起的名字）
+  model: string;                 // 真实模型标识（如 "deepseek-chat"）
+}
+/** 模型列表项（`GET /api/models` 的响应形状为 `{ models: ModelItem[] }`） */
+export interface ModelItem {
+  id: string;                    // 内置=通道名；自定义=UUID
+  name: string;
+  model: string;
+  kind: 'builtin' | 'local' | 'custom';  // 内置 / 自定义但指向本机 / 其余自定义
+  enabled: boolean;              // false → 下拉置灰不可选（但保留，避免误删后重填 key）
+  base_url: string | null;       // 内置为 null
+  api_key_masked: string | null; // ★ 只有打码值（前 3 + 后 4），明文永不出接口
+}
+/** 连通性测试结果（两个 /test 端点共用）。失败也是 200：ok=false + error 人话 */
+export interface ModelTestResult {
+  ok: boolean;
+  latency_ms: number | null;
+  error: string | null;
+  sample: string | null;
+}
+/** 连通性测试入参（对**表单里还没保存**的配置测试） */
+export interface ModelTestInput {
+  base_url: string;
+  api_key?: string;
+  model: string;
+}
+/** 新建/编辑自定义模型的表单载荷（编辑时字段可选；api_key 留空 = 不修改） */
+export interface ModelInput {
+  name?: string;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  enabled?: boolean;
 }
 
 // ============ documents ============
@@ -1982,7 +2082,7 @@ export interface ToolsResponse {
 | 对话台 | ~~**无 SSE**（非流式）~~ → **已落地**：`POST /api/chat/stream` 真 SSE 流式 | ✅ 已实现，见 §5.2.1 |
 | 对话台 | 消息 meta（耗时/ token / 成本）**无源** | 不渲染或留空 |
 | 对话台 | 工具卡片的**耗时**无源 | 隐藏该格；入参/返回可走 messages 接口补 |
-| 外壳 | **模型切换**无源 | 只读展示或去掉 |
+| 外壳 | ~~**模型切换**无源~~ → **已落地**：`/api/models` 六端点 + 对话链路 `model_id` 参数 + 连通性测试 | ✅ 已实现，见 §5.1.2 |
 | 外壳 | 用户信息无源（无用户系统） | 换环境标识或去掉 |
 | 知识库 | **无"重试"接口** | failed 行只给"删除" |
 | 评测看板 | **无"触发评测"接口** | 按钮禁用 + tooltip 说明用命令行 |
@@ -2117,7 +2217,7 @@ export const MOCK_METRICS = [ /* { metric, dimension, points: [{ date, value }] 
 | Trace 页数据源 | Langfuse 有数据但无 REST 出口 | ⏳ 未排期 |
 | 检索检查器的结构化数据 | 后端只返回一段字符串 | ⏳ 未排期 |
 | `/api/metrics` | 语义层，D35 才做 | ⏳ 待 D35 |
-| 模型切换 | 后端由 `.env` 决定，非运行时可选 | ⏳ 未排期 |
+| 模型切换 | ~~后端由 `.env` 决定，非运行时可选~~ → **已落地**：`llm_models` 表 + `/api/models` 六端点 + 对话链路 `model_id`（不传 = 旧行为逐字节不变）+ 真切换器 / 配置弹窗 / 消息归因；双端验收各 18/18（2026-10-14，S1–S3） | ✅ 已完成 |
 | 用户系统 | 项目无用户体系，`.user-row` 无意义 | ⏳ 未排期 |
 | AntD `cssVar` 变量命名 | 未实跑验证，属推测 | ⏳ 待实跑 |
 | 路由 | ~~M6 用 `useState` 切页；是否需要真路由待定~~ → **已落地**：react-router v7，7 页 URL 化 + `/chat/:sessionId`，双端（5173/8080）验收通过（2026-10-12） | ✅ 已完成 |
