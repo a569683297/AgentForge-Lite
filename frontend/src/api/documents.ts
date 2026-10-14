@@ -1,7 +1,9 @@
 import { client } from './client';
 import type { DocumentOut, DocumentPreviewOut } from '../types/api';
 
-export async function listDocuments(limit = 50, offset = 0): Promise<DocumentOut[]> {
+// limit 默认取后端上限 200：知识库列表是「全量拉取 + 前端分页/筛选」模式，
+// 若用默认 50，文档超过 50 篇会被静默截断（第 51 篇起根本看不到）。
+export async function listDocuments(limit = 200, offset = 0): Promise<DocumentOut[]> {
   const { data } = await client.get<DocumentOut[]>('/documents', { params: { limit, offset } });
   return data;
 }

@@ -24,6 +24,8 @@ export function KnowledgePage() {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<'all' | DocumentOut['status']>('all');
   const [selectedDocument, setSelectedDocument] = useState<DocumentOut | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function refresh() {
@@ -48,6 +50,15 @@ export function KnowledgePage() {
   const filtered = useMemo(() => documents.filter((document) => (
     (status === 'all' || document.status === status) && document.filename.toLowerCase().includes(query.toLowerCase())
   )), [documents, query, status]);
+
+  // 搜索 / 状态筛选变化时回到第 1 页：页码是在「筛选后数据集」上的位置，
+  // 筛选条件一变，旧页码就失去意义（比如原在第 3 页，筛完只剩 2 页 → 空白页）。
+  useEffect(() => { setPage(1); }, [query, status]);
+
+  // 渲染时钳位：删除最后一条后当前页可能超界（page=2 但只剩 1 页）。
+  // 不直接改 state，而是在渲染时取 page 与最大页的较小值 —— 无副作用且天然兜底。
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
   const stats = useMemo(() => ({
     total: documents.length,
     ready: documents.filter((document) => document.status === 'ready').length,
@@ -59,6 +70,7 @@ export function KnowledgePage() {
     try {
       const document = await uploadDocument(file);
       setDocuments((current) => [document, ...current]);
+      setPage(1);                              // 新文档插在最前：跳回第 1 页，让它立刻可见
       message.success('文档已上传，正在处理');
     } catch (reason: unknown) {
       message.error(reason instanceof Error ? reason.message : '文档上传失败');
@@ -90,7 +102,28 @@ export function KnowledgePage() {
       <div className={styles.statStrip}><span><strong className="af-num">{stats.total}</strong> 份文档</span><i /><span><strong className="af-num">{stats.ready}</strong> 已就绪</span><i /><span><strong className="af-num">{stats.processing}</strong> 处理中</span><i /><span><strong className="af-num">{stats.chunks}</strong> 个切片</span></div>
       <Card className={styles.tableCard} styles={{ body: { padding: 0 } }}>
         <div className={styles.tableToolbar}><Input allowClear prefix={<InboxOutlined />} placeholder="搜索文件名" value={query} onChange={(event) => setQuery(event.target.value)} className={styles.searchBox} /><Select value={status} onChange={setStatus} options={[{ value: 'all', label: '全部状态' }, { value: 'ready', label: '已就绪' }, { value: 'processing', label: '处理中' }, { value: 'failed', label: '失败' }]} /></div>
-        {loading ? <TableSkeleton rows={5} columns={6} /> : error ? <div className={styles.panelPadding}><ErrorState message={error} action="重新加载" onAction={() => void refresh()} /></div> : !filtered.length ? <EmptyState message={documents.length ? '没有匹配的文档。' : '还没有文档，上传一份开始建立知识库。'} action={documents.length ? undefined : '上传文档'} onAction={documents.length ? undefined : () => inputRef.current?.click()} /> : <Table rowKey="id" size="middle" pagination={false} dataSource={filtered} columns={columns} onRow={(record) => ({ onClick: () => setSelectedDocument(record), style: { cursor: 'pointer' } })} />}
+        {loading ? <TableSkeleton rows={5} columns={6} /> : error ? <div className={styles.panelPadding}><ErrorState message={error} action="重新加载" onAction={() => void refresh()} /></div> : !filtered.length ? <EmptyState message={documents.length ? '没有匹配的文档。' : '还没有文档，上传一份开始建立知识库。'} action={documents.length ? undefined : '上传文档'} onAction={documents.length ? undefined : () => inputRef.current?.click()} /> : (
+          <Table
+            rowKey="id"
+            size="middle"
+            dataSource={filtered}
+            columns={columns}
+            pagination={{
+              current: currentPage,
+              pageSize,
+              total: filtered.length,
+              showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50],
+              showTotal: (total) => `共 ${total} 篇`,
+              // 切换每页条数时回到第 1 页（旧页号在新粒度下没有对应位置）；仅翻页时保持所选页
+              onChange: (nextPage, nextSize) => {
+                setPage(nextSize === pageSize ? nextPage : 1);
+                setPageSize(nextSize);
+              },
+            }}
+            onRow={(record) => ({ onClick: () => setSelectedDocument(record), style: { cursor: 'pointer' } })}
+          />
+        )}
       </Card>
       <div className={styles.footnote}><ReloadOutlined /> 共 <span className="af-num">{stats.total}</span> 份文档 · 已就绪 <span className="af-num">{stats.ready}</span> · 处理中 <span className="af-num">{stats.processing}</span> · 共 <span className="af-num">{stats.chunks}</span> 个切片</div>
       <DocumentPreviewModal document={selectedDocument} open={Boolean(selectedDocument)} onClose={() => setSelectedDocument(null)} />

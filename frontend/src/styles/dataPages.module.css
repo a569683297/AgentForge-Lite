@@ -2,6 +2,8 @@
 .statStrip strong { color: var(--af-text-primary); font-size: 14px; }
 .statStrip i { width: 1px; height: 14px; background: var(--af-border-default); }
 .tableCard { overflow: hidden; }
+/* antd 分页默认 margin: 16px 0（左右无边距），在无内边距的卡片里会贴边 */
+.tableCard :global(.ant-table-pagination.ant-pagination) { margin: 12px; }
 .tableToolbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--af-border-subtle); }
 .searchBox { width: 240px; }
 .fileCell { display: flex; align-items: center; gap: 8px; min-width: 220px; }
