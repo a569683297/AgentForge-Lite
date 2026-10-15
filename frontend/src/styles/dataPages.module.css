@@ -35,6 +35,9 @@
 .metricGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
 .splitGrid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 16px; margin-bottom: 16px; }
 .panel { overflow: hidden; border: 1px solid var(--af-border-default); border-radius: 6px; background: var(--af-surface); }
+.panelTitleLabel { display: inline-flex; align-items: center; gap: 6px; }
+.panelTitleInfo { display: inline-flex; color: var(--af-text-tertiary); font-size: 12px; cursor: help; }
+.panelTitleInfo:hover { color: var(--af-accent); }
 .panelTitle { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid var(--af-border-subtle); }
 .panelTitle h2 { margin: 0; font-size: 13px; font-weight: 500; }
 .panelNote { padding: 10px 12px; border-top: 1px solid var(--af-border-subtle); color: var(--af-text-tertiary); font-size: 11px; }

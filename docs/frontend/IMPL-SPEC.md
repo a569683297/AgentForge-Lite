@@ -1409,9 +1409,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 .metric-grid（4 列：准确率 / 正确性均分 / 引用忠实度 / 完整性）
   └── .metric-card：11px 标签 + info 图标（✅ 悬浮显示完整口径，见 §5.4.2 落地补充）+ 24px mono 数值 + 10px 说明
 .split-grid（1.5fr : 1fr）
-├── .panel 分类聚合（.compact-table：类别 | 题数 | 明细行数 | 通过行数 | 三维分数）
+├── .panel 分类聚合（标题 + info 图标 ✅ 悬浮口径见 §5.4.2 落地补充；.compact-table：类别 | 题数 | 明细行数 | 通过行数 | 三维分数）
 │   └── .table-note（说明工具题为何是 —）
-└── .panel 失败模式（.failure-list：5 行，每行 = 名称 + 5px 横条 + 计数）
+└── .panel 失败模式（标题 + info 图标 ✅ 悬浮口径见 §5.4.2 落地补充；.failure-list：每行 = 一个失败原因 + 5px 横条 + 计数，按实际出现的原因渲染）
 .panel.cases-panel 逐题明细（.compact-table + .truncate-cell）
     thead: 题号 | 类别 | 答案摘要 | 引用数 | 三维分数 | 结果 | 失败原因
 ```
@@ -1489,6 +1489,16 @@ for (const run of runs) {                       // runs 已按 id 倒序
 > `failure_taxonomy.derive_case_outcome()`（单行通过判定、归因优先级）、
 > `judge_service.py` 的 `JUDGE_SYSTEM`（三档位判据）。
 > 组件侧：`MetricCard` 新增可选 `labelTip`（不传则无图标，分析页示例卡不受影响）。
+
+> **落地补充（2026-10-15）：分类聚合 / 失败模式两块面板补齐悬浮说明。**
+> 与指标卡同款做法：面板标题旁挂 info 图标，悬浮显示完整口径；面板内容保持不动。
+> 文案出处逐字核对：`eval_service.aggregate_by_category()`（行级聚合口径、各列定义、
+> 工具题无内容分的由来）与 `eval_service.summarize_results()` 的 `failure_breakdown` /
+> `failure_taxonomy` 的归因优先级（失败模式只数失败行、条形按最大项归一化、
+> 归因链与枚举值对照）。样式：`.panelTitleLabel` / `.panelTitleInfo`（dataPages 模块）。
+> ⚠ 现状说明：失败模式分布图的条目仍是后端原始枚举值（`failure_breakdown` 的 key），
+> 与逐题明细的 `failure_reason_label` 中文标签并存；中文对照已写进悬浮说明，
+> 是否将分布图改用中文标签显示**待定**（改动很小，等拍板）。
 
 #### ★ 5.4.3 mock 数字纪律（**必读**）
 

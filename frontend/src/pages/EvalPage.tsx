@@ -114,6 +114,31 @@ const metricTips: Record<'accuracy' | 'correctness' | 'faithfulness' | 'complete
   },
 };
 
+// 两块面板的说明（挂在面板标题旁的 info 图标上）。口径出处（全部实读核对，非估计）：
+//   行级聚合与各列定义   → app/services/eval_service.aggregate_by_category()
+//   失败分布（仅失败行） → app/services/eval_service.summarize_results() 的 breakdown
+//   归因优先级 / 枚举值  → app/services/failure_taxonomy.py
+const panelTips: Record<'byCategory' | 'failure', InfoTip> = {
+  byCategory: {
+    title: '分类聚合 · 按题型拆分的行级账本',
+    steps: [
+      '按题型分组统计：doc_qa 文档问答 / cross_doc 跨文档 / tool_call 工具调用',
+      '每一行 = 一次生成：明细行数 = 题数 × 每题生成次数；「通过行数」是行级口径，与顶部准确率的按题口径不同',
+      '三维均分 = 该类「有分数」行的平均——工具题不判内容分，故显示 —',
+    ],
+    note: '作用：看哪一类题拖后腿——全局均分掩盖的弱项类型在这里显形。',
+  },
+  failure: {
+    title: '失败模式 · 只统计失败行的归因分布',
+    steps: [
+      '只数「没过」的行（通过的完全不参与）；条形长度按最大项归一化——看的是占比，不是绝对数',
+      '失败行归因优先级：系统未跑通 → 工具未调对 → 编造内容 → 回答不完整 → 答案错误',
+      '图上条目为原始值，对照速查：system_error / tool_miss / hallucination / incomplete / wrong_answer',
+    ],
+    note: '作用：指出往哪修——编造多查检索与语料；不完整多改生成 prompt；工具未调对查工具选择。',
+  },
+};
+
 function InfoTipContent({ tip }: { tip: InfoTip }) {
   return (
     <div className={styles.flowTip}>
@@ -189,11 +214,11 @@ export function EvalPage() {
           <MetricCard label="完整性" value={formatScore(detail?.score_completeness)} note={`明细总行数 ${detail?.rows ?? '—'}`} labelTip={<InfoTipContent tip={metricTips.completeness} />} />
         </div>
         <div className={styles.splitGrid}>
-          <Card className={styles.panel} styles={{ body: { padding: 0 } }} title={<span>分类聚合</span>}>
+          <Card className={styles.panel} styles={{ body: { padding: 0 } }} title={<span className={styles.panelTitleLabel}>分类聚合<Tooltip title={<InfoTipContent tip={panelTips.byCategory} />}><span className={styles.panelTitleInfo}><InfoCircleOutlined /></span></Tooltip></span>}>
             <Table size="small" pagination={false} rowKey="category" dataSource={categories} columns={[{ title: '类别', dataIndex: 'category' }, { title: '题数', dataIndex: 'cases', align: 'right', render: (value: number) => <span className="af-num">{value}</span> }, { title: '明细行数', dataIndex: 'rows', align: 'right', render: (value: number) => <span className="af-num">{value}</span> }, { title: '通过行数', dataIndex: 'passed_rows', align: 'right', render: (value: number) => <span className="af-num">{value}</span> }, { title: '正确 / 忠实 / 完整', key: 'scores', align: 'right', render: (_: unknown, row) => <span className="af-num">{formatScore(row.avg_correctness)} / {formatScore(row.avg_faithfulness)} / {formatScore(row.avg_completeness)}</span> }]} />
             <div className={styles.panelNote}>工具题只看工具调用，不送 judge 判内容，因此三维分数显示为 —。</div>
           </Card>
-          <Card className={styles.panel} styles={{ body: { padding: 0 } }} title={<span>失败模式</span>}>
+          <Card className={styles.panel} styles={{ body: { padding: 0 } }} title={<span className={styles.panelTitleLabel}>失败模式<Tooltip title={<InfoTipContent tip={panelTips.failure} />}><span className={styles.panelTitleInfo}><InfoCircleOutlined /></span></Tooltip></span>}>
             <div className={styles.failureList}>{Object.entries(detail?.failure_breakdown ?? {}).map(([name, count]) => <div className={styles.failureRow} key={name}><span>{name}</span><div className={styles.failureBar}><span style={{ width: `${(count / maxFailure) * 100}%` }} /></div><span className="af-num">{count}</span></div>)}{!Object.keys(detail?.failure_breakdown ?? {}).length ? <div className={styles.panelPadding}>当前运行没有失败记录。</div> : null}</div>
           </Card>
         </div>
