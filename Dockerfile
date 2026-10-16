@@ -33,7 +33,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.4 /uv /uvx /usr/local/bin/
 # 所以这里**只拷依赖清单**先装依赖 ——
 #   之后改多少 .py 文件都不会触发重装依赖（否则每次 build 都要等 3 分钟）。
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen
+# ★ PyPI 走清华镜像（UV_DEFAULT_INDEX）—— 2026-10-15 部署上线补：
+#   国内服务器直连 pypi.org 慢（构建依赖阶段可能卡十分钟以上），
+#   换清华源后该阶段通常 1~3 分钟（实测源可达、onnxruntime/langgraph 等关键包齐全）。
+#   该变量只作用于这一条 RUN（不进镜像运行时环境）；本机构建同样受益。
+#   如需回退官方源：删掉 `UV_DEFAULT_INDEX=... ` 前缀即可。
+RUN UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --frozen
 
 # ---------- 3. 再拷代码 ----------
 # 这三份都是运行时真的用到的：
@@ -44,10 +49,15 @@ RUN uv sync --frozen
 #   tests/       → ★ D34 验收要求「一键起 + 测试过」，所以镜像必须是
 #                  **完整可复现环境**：`docker compose exec api pytest` 要直接能跑。
 #                  这也是上面 `uv sync` 不带 `--no-dev` 的同一个理由。
+#   metrics.yaml → ★ 语义层（D37）的口径文件，在**项目根**（不在 app/ 里）：
+#                  metrics_service 模块级加载它（写错/缺失 = fail fast 启动即炸）。
+#                  漏拷时的症状：容器 CrashLoop，日志 FileNotFoundError '/app/metrics.yaml'
+#                  —— 2026-10-16 实际踩过（块 1 加的文件、块 2 首次重建镜像才暴露）。
 COPY app/ ./app/
 COPY scripts/ ./scripts/
 COPY mcp_servers/ ./mcp_servers/
 COPY tests/ ./tests/
+COPY metrics.yaml ./
 
 # ---------- 4. 运行 ----------
 EXPOSE 8000
