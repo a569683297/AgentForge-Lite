@@ -35,7 +35,8 @@ from langgraph.graph import END, START, StateGraph
 
 from app.core.citation import check_citations, get_sources, reset_sources
 from app.core.logging import logger
-from app.schemas.chat import ChatResult, SourceItem
+from app.core.metric_results import get_metric_results, reset_metric_results
+from app.schemas.chat import ChatResult, MetricResultItem, SourceItem
 from app.services.llm_gateway import chat_with_tools, chat_with_tools_stream
 
 # D28：观测层唯一出口（span 命名规范、根 span、trace 级属性都从这里取）
@@ -367,7 +368,9 @@ async def run_agent(
 
     # ⓪ 引用收集器必须在跑图之前重新绑定。
     #    ContextVar 复制的是「绑定」不是「对象内容」，不重新绑定会读到上个请求的残留。
+    #    （D37 块 3：指标结果收集器同族同理，并排重置。）
     reset_sources()
+    reset_metric_results()
 
     # ① 读历史（Redis 优先，未命中/不可用走 PG 兜底）
     history = await get_window(session_id)
@@ -420,6 +423,12 @@ async def run_agent(
             # ⑤ 取出本请求累计的来源（结构通道）
             raw_sources = get_sources()
             sources = [SourceItem(**item) for item in raw_sources]
+
+            # ⑤.5 取出本请求的指标查询结果（D37 块 3：结构通道之二）。
+            #      与 sources 同族同位置 —— 两个收集器都在跑图后一次性取出，
+            #      出口分别是 ChatResult 的两个字段（非流式）/ done 帧（流式）。
+            raw_metric_results = get_metric_results()
+            metric_results = [MetricResultItem(**item) for item in raw_metric_results]
 
             # ⑥ 校验引用编号有没有越界（幻觉引用检测）
             invalid = check_citations(final_answer, len(sources))
@@ -505,6 +514,8 @@ async def run_agent(
         # S2：实际执行模型（归因）。这里**必须显式传**——有默认值 None，
         # 漏传不报错、只是归因静默丢失（D36 的教训同源：默认值会吞掉漏传的字段）
         model_used=model_used,
+        # D37 块 3：指标查询的结构化结果（同样必须显式传，理由同上）
+        metric_results=metric_results,
     )
 
 
@@ -548,7 +559,9 @@ async def run_agent_stream(
     from app.services.session_service import append_messages, get_summary
 
     # ⓪ 引用收集器重绑（同 run_agent：ContextVar 复制的是绑定不是对象，必须每请求重绑）
+    #    （D37 块 3：指标结果收集器同族同理，并排重置。）
     reset_sources()
+    reset_metric_results()
 
     # ① 读历史（Redis 优先，未命中/不可用走 PG 兜底）
     history = await get_window(session_id)
@@ -599,6 +612,10 @@ async def run_agent_stream(
 
                 raw_sources = get_sources()
                 sources = [SourceItem(**item) for item in raw_sources]
+
+                # D37 块 3：指标查询结果（与 sources 同位置取出，出口是 done 帧）
+                raw_metric_results = get_metric_results()
+                metric_results = [MetricResultItem(**item) for item in raw_metric_results]
 
                 invalid = check_citations(final_answer, len(sources))
                 if invalid:
@@ -665,4 +682,6 @@ async def run_agent_stream(
         "tool_calls": tool_names,
         # S2：实际执行模型（归因"本轮由谁回答"；前端据此在消息上显示）
         "model_used": model_used,
+        # D37 块 3：指标查询的结构化结果（前端图表数据；F11.3 的结构通道出口）
+        "metric_results": [m.model_dump() for m in metric_results],
     }

@@ -11,6 +11,7 @@
 所以：新增工具文件后，**必须在这里 import 一次**。
 """
 
+from app.tools import analytics  # noqa: F401  D37：指标查询工具（Agentic BI 入口）
 from app.tools import current_time  # noqa: F401  导入即注册（副作用导入）
 from app.tools import retrieval  # noqa: F401  D10：知识库检索工具
 from app.tools.registry import (
@@ -25,6 +26,7 @@ __all__ = [
     "get_tools_schema",
     "execute_tool",
     "list_tools",
+    "analytics",
     "current_time",
     "retrieval",
 ]

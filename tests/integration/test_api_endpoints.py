@@ -160,7 +160,13 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
     再断言哨兵能原样读回 —— 漏传哪个字段，哪个就退回默认值 → 这边红。
     """
     from app.api import chat as chat_module
-    from app.schemas.chat import ChatResponse, ChatResult, ModelUsed, SourceItem
+    from app.schemas.chat import (
+        ChatResponse,
+        ChatResult,
+        MetricResultItem,
+        ModelUsed,
+        SourceItem,
+    )
 
     fake = ChatResult(
         answer="哨兵回答",
@@ -177,6 +183,18 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
         tool_calls=["SENTINEL_TOOL"],
         # S2：元断言逼出来的新哨兵（就是下面那条 assert 设计的用途）
         model_used=ModelUsed(id="sentinel-id", name="哨兵模型", model="sentinel-model-v9"),
+        # D37 块 3：指标结果的转发哨兵（同样被元断言逼出来的）
+        metric_results=[
+            MetricResultItem(
+                metric="SENTINEL_METRIC",
+                label="哨兵指标",
+                dimension="sentinel_dim",
+                source="sql",
+                start_date="2026-01-01",
+                end_date="2026-01-02",
+                rows=[{"dim": "x", "value": 42}],
+            )
+        ],
     )
 
     # 签名对齐路由里的调用（S2 新增关键字参数 model_id）
@@ -201,6 +219,20 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
         "name": "哨兵模型",
         "model": "sentinel-model-v9",
     }
+    # D37 块 3：metric_results 漏传的话这里会退回 [] —— 前端图表数据静默消失
+    assert body["metric_results"] == [
+        {
+            "metric": "SENTINEL_METRIC",
+            "label": "哨兵指标",
+            "dimension": "sentinel_dim",
+            "source": "sql",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-02",
+            "degraded": False,
+            "error": None,
+            "rows": [{"dim": "x", "value": 42}],
+        }
+    ]
 
     # 轻量一致性：不出现模型里没有的键、也不缺键。
     # （对"默认值兜底"型 bug 恒真，真正的守卫是上面的哨兵断言。）
@@ -208,8 +240,16 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
 
     # ★ 元断言：桩必须覆盖 ChatResult 的**全部**字段。
     # 将来给 ChatResult 加字段时这条会红，逼你回来补哨兵 —— 不让新字段裸奔。
-    # （S2 加 model_used 时它确实红了，哨兵就是按它要求补的。）
-    covered = {"answer", "sources", "invalid_citations", "tool_calls", "model_used"}
+    # （S2 加 model_used 时它确实红了，哨兵就是按它要求补的；
+    #   D37 加 metric_results 时同样红了一次 —— 机制在正常工作。）
+    covered = {
+        "answer",
+        "sources",
+        "invalid_citations",
+        "tool_calls",
+        "model_used",
+        "metric_results",
+    }
     assert covered == set(ChatResult.model_fields), (
         "ChatResult 字段变了：请在桩里为新字段补哨兵值，并加一条能原样读回的断言"
     )
@@ -259,6 +299,20 @@ async def test_chat_stream_forwards_service_events_as_sse_frames(api_client, mon
             "tool_calls": ["SENTINEL_TOOL"],
             # S2：done 帧的归因哨兵
             "model_used": {"id": "sentinel-id", "name": "哨兵模型", "model": "sentinel-model-v9"},
+            # D37 块 3：done 帧的指标结果哨兵（漏传 → 前端收不到图表数据）
+            "metric_results": [
+                {
+                    "metric": "SENTINEL_METRIC",
+                    "label": "哨兵指标",
+                    "dimension": None,
+                    "source": "sql",
+                    "start_date": "2026-01-01",
+                    "end_date": "2026-01-02",
+                    "degraded": False,
+                    "error": None,
+                    "rows": [{"value": 42}],
+                }
+            ],
         }
 
     monkeypatch.setattr(chat_module, "run_agent_stream", _fake_stream)
@@ -296,6 +350,20 @@ async def test_chat_stream_forwards_service_events_as_sse_frames(api_client, mon
         "name": "哨兵模型",
         "model": "sentinel-model-v9",
     }
+    # D37 块 3：指标结果字段同理（漏了 → 帧里退回 [] → 图表数据静默消失）
+    assert done["metric_results"] == [
+        {
+            "metric": "SENTINEL_METRIC",
+            "label": "哨兵指标",
+            "dimension": None,
+            "source": "sql",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-02",
+            "degraded": False,
+            "error": None,
+            "rows": [{"value": 42}],
+        }
+    ]
 
 
 async def test_chat_stream_rejects_empty_message_with_422(api_client):

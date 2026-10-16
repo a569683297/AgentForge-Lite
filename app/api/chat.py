@@ -110,6 +110,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         tool_calls=result.tool_calls,
         # S2 新增字段，同一个坑（漏传 → 静默退回 None）—— 已并入上面那条哨兵守卫
         model_used=result.model_used,
+        # D37 块 3 新增字段，又是同一个坑（漏传 → 静默退回 []）——
+        # 哨兵守卫当场抓到过一次，这行就是它的产物。
+        metric_results=result.metric_results,
     )
 
 

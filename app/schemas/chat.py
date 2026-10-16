@@ -25,9 +25,14 @@ D14 变化：session_id 的类型从 str（正则宽松匹配）收口为 uuid.U
 S2（模型切换）：ChatRequest 新增 model_id（不传 = 旧行为；传了 = 锁定所选模型）；
 ChatResult 新增 model_used（本轮**实际执行**的模型，"实际"二字是刻意的 ——
 默认链路降级到备用后，归因必须报备用而不是"配置上本应是谁"）。
+
+D37（块 3）：ChatResult 新增 metric_results —— query_metric 工具的结构化查询结果
+（F11.3"返回结构化 dict 供前端直接消费"的出口；文本给 LLM、结构给前端，走收集器
+双通道，与 sources 同族。形状定义见 MetricResultItem）。
 """
 
 import uuid
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +47,36 @@ class SourceItem(BaseModel):
     page_ref: str | None = Field(
         default=None,
         description="页码引用（如 p.3）；仅 PDF 类文档有，其他格式为 null（D12 新增）",
+    )
+
+
+class MetricResultItem(BaseModel):
+    """
+    一次 query_metric 查询的结构化结果（D37 块 3；前端图表直接消费，F11.3）。
+
+    为什么形状是这些字段：
+      · metric / label   —— 机器名与中文名（前端画图标题用，不必再查目录接口）
+      · dimension        —— 分组维度（None = 聚合值；前端据此决定画柱状还是单值卡）
+      · rows             —— 数据行（形状由该指标定义：`[{dim, value, ...}]`；
+                            列名随指标而变，所以这里用 dict 透传不强约束）
+      · source / degraded / error —— 数据来源与降级状态（Langfuse 不可达时前端
+                            渲染"暂不可用"占位；PRD §9.10.5 约束 3）
+      · start_date / end_date     —— 数据窗口（画图标注"这段数据对应哪几天"）
+    """
+
+    metric: str = Field(description="指标名（如 eval_accuracy）")
+    label: str = Field(description="指标中文名（如 评测准确率）")
+    dimension: str | None = Field(default=None, description="分组维度；None = 聚合值")
+    source: str = Field(description="数据源：sql | langfuse_api")
+    start_date: str = Field(default="", description="查询起始日 YYYY-MM-DD（北京时间）")
+    end_date: str = Field(default="", description="查询结束日 YYYY-MM-DD（含当天）")
+    degraded: bool = Field(
+        default=False,
+        description="True = 该指标降级（Langfuse 不可达），rows 为空、error 有说明",
+    )
+    error: str | None = Field(default=None, description="降级原因（degraded=True 时）")
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list, description="数据行（列名随指标定义；已归一为 JSON 安全值）"
     )
 
 
@@ -95,6 +130,15 @@ class ChatResult(BaseModel):
             "归因的是'实际用了什么'而不是'用户选了什么'——"
             "默认链路中主通道失败降级到备用时，这里记录的是备用（真实执行者）。"
             "流式出口放在 done 帧的同名字段里。"
+        ),
+    )
+    metric_results: list[MetricResultItem] = Field(
+        default_factory=list,
+        description=(
+            "本轮 query_metric 查询到的结构化结果（D37 块 3）。"
+            "F11.3 要求工具'返回结构化 dict 供前端直接消费'——落地方式与 sources "
+            "同族：工具返回文本给 LLM，结构化结果走请求级收集器（core/metric_results.py），"
+            "在 run_agent 出口随结果一起返回；流式出口放在 done 帧的同名字段里。"
         ),
     )
 
