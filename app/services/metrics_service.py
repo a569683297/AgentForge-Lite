@@ -19,8 +19,10 @@
     run_metric("tool_usage", dimension="tool_name", start="2026-09-01", end="2026-10-16")
       ① 查注册表（防护①）→ ② 渲染模板前校验维度（防护②）→ ③ 渲染出 SQL
       ④ 解析时间窗（北京时间自然日 → 左闭右开的带时区边界）
-      ⑤ 按 source 分派：sql → 项目库执行；langfuse_api → 取数层（块 2）
+      ⑤ 按 source 分派：sql → 项目库执行；langfuse_api → 取数层 + query()（块 2）
       ⑥ 行归一化（date / Decimal → JSON 安全值）→ 统一结构返回
+    两个源的出口返回同一个 dict schema（含 degraded 标记）—— 上层对数据来自
+    哪里无感知（PRD §9.10.5 约束 1），唯一例外是 langfuse 源可整体降级（约束 3）。
 
 两条口径约定（写在这里，全项目只此一处）：
     · **业务时区 = Asia/Shanghai**：日期窗口指北京时间自然日 [start, end] 闭区间。
@@ -32,7 +34,8 @@
       上层（Agent / 前端）对数据来自哪里无感知。
 
 不做的事（边界要清楚）：
-    · 不缓存（块 2 随 Langfuse 降级一起设计——SQL 源快且新，缓存是 Langfuse 专属需求）
+    · 不缓存：SQL 源快且新；Langfuse 源的 60s 缓存由**取数层**负责（D28 已实现，
+      query() 直接复用）—— 缓存放在离数据源近的地方，语义层只管口径
     · 不做权限（单用户演示系统，PRD 范围如此）
 """
 
@@ -48,6 +51,12 @@ import yaml
 from sqlalchemy import text
 
 from app.core.db import async_session_factory
+from app.core.logging import logger
+
+# 白名单常量从取数层导入（**单向依赖**：语义层 → langfuse_client；
+# 反向引用只存在于 langfuse_client.query() 的函数内延迟导入里），
+# 保证"YAML 加载期校验"与"运行时聚合校验"用的是**同一份**定义。
+from app.services.langfuse_client import SUPPORTED_AGGS, SUPPORTED_FIELDS
 
 # ---- 业务时区（全项目唯一出处，见模块头"两条口径约定"）----
 BUSINESS_TZ = ZoneInfo("Asia/Shanghai")
@@ -109,6 +118,10 @@ def _load_registry(path: Path = METRICS_YAML_PATH) -> dict[str, MetricSpec]:
       · 模板里的占位符**只有** {dimension} —— 见模块头 _ALLOWED_PLACEHOLDER 说明
       · 声明了维度 ⇔ 模板用了 {dimension}  —— 两者不一致时：要么渲染漏做替换、
         要么占位符没人替换，两种都是"到运行期才炸"的静默缺口
+      · langfuse 源（块 2）：endpoint 非空 + query 是 dict + agg/field 命中取数层
+        白名单 + group_by 属于 dimensions —— 这四项写错的话，跑查询才炸/静默少数据；
+        另外两个源**互斥的配置段**（sql 源带 query 段 / langfuse 源带 sql_template）
+        也被拒 —— 那是复制粘贴 YAML 时最典型的误写，而误写的配置会被静默忽略。
     """
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     raw_metrics: dict[str, Any] = raw.get("metrics") or {}
@@ -129,6 +142,11 @@ def _load_registry(path: Path = METRICS_YAML_PATH) -> dict[str, MetricSpec]:
         if source == "sql":
             if not template:
                 raise MetricsError(f"指标 {name} 是 sql 源，但 sql_template 为空")
+            if item.get("query"):
+                raise MetricsError(
+                    f"指标 {name} 是 sql 源，却带着 query 段（那是 langfuse_api 源的配置）"
+                    " —— 检查是不是复制粘贴时改了 source 没删配置"
+                )
             placeholders = set(_PLACEHOLDER_RE.findall(template)) - {_ALLOWED_PLACEHOLDER}
             if placeholders:
                 raise MetricsError(
@@ -139,6 +157,38 @@ def _load_registry(path: Path = METRICS_YAML_PATH) -> dict[str, MetricSpec]:
                 raise MetricsError(f"指标 {name} 声明了维度 {list(dimensions)}，但模板里没有 {_ALLOWED_PLACEHOLDER}")
             if not dimensions and _ALLOWED_PLACEHOLDER in template:
                 raise MetricsError(f"指标 {name} 未声明维度，模板里却出现了 {_ALLOWED_PLACEHOLDER}")
+
+        elif source == "langfuse_api":
+            # 块 2：langfuse 源的四条校验（每条都对应一种"运行期才炸 / 静默少数据"的写法）
+            if not item.get("endpoint"):
+                raise MetricsError(f"指标 {name} 是 langfuse_api 源，但 endpoint 为空")
+            if template:
+                raise MetricsError(
+                    f"指标 {name} 是 langfuse_api 源，却带着 sql_template"
+                    " —— 检查是不是复制粘贴时改了 source 没删模板"
+                )
+            q = item.get("query")
+            if not isinstance(q, dict):
+                raise MetricsError(
+                    f"指标 {name} 的 query 必须是键值映射（YAML 里写成嵌套 dict），"
+                    f"收到：{type(q).__name__}"
+                )
+            if q.get("agg") not in SUPPORTED_AGGS:
+                raise MetricsError(
+                    f"指标 {name} 的 query.agg 非法：{q.get('agg')!r}；"
+                    f"允许：{' / '.join(SUPPORTED_AGGS)}"
+                )
+            if q.get("field") not in SUPPORTED_FIELDS:
+                raise MetricsError(
+                    f"指标 {name} 的 query.field 非法：{q.get('field')!r}；"
+                    f"允许：{sorted(SUPPORTED_FIELDS)}"
+                )
+            group_by = q.get("group_by")
+            if group_by is not None and group_by not in dimensions:
+                raise MetricsError(
+                    f"指标 {name} 的 query.group_by（{group_by!r}）不在 dimensions"
+                    f" 白名单 {list(dimensions)} 里"
+                )
 
         specs[name] = MetricSpec(
             name=name,
@@ -268,28 +318,40 @@ async def run_metric(
     """
     对外主入口：按「指标名 + 维度 + 时间窗」查询，统一结构返回。
 
-    返回：{"metric", "dimension", "source", "rows"}
+    返回：{"metric", "dimension", "source", "rows", "degraded", "error"}
     三种"用户参数错误"（未知指标 / 维度非法 / 日期非法）都抛 MetricsError，
     调用方据此回 400 或把消息交回 LLM —— 错误消息本身就是给 LLM 的纠错提示。
+
+    ⚠ 唯一不抛错的失败：Langfuse 源不可用（网络/凭据/限流）。此时返回
+      degraded=True + error 说明 + rows=[] —— **只降级该指标**（PRD §9.10.5 约束 3）：
+      外部系统挂了不等于这次查询"失败"，前端该渲染"暂不可用"占位、
+      Agent 该转述一句人话，两者都不需要理解异常。SQL 源不受它影响。
     """
     spec = get_spec(metric)
 
     # 空串归一为 None：工具调用里 LLM 常把"不分组"写成 ""，不该因此报错；
-    # 空白串同理。真正的非法维度（不在白名单）仍然会被 render_sql 拒绝。
+    # 空白串同理。真正的非法维度（不在白名单）仍然会被 render_sql / query 拒绝。
     dimension = (dimension or "").strip() or None
 
     start_dt, end_dt = parse_window(start, end)
+
+    degraded = False
+    error: str | None = None
 
     if spec.source == "sql":
         sql = render_sql(spec, dimension)
         rows = await _fetch_sql(sql, {"start": start_dt, "end": end_dt})
     elif spec.source == "langfuse_api":
-        # 块 2 实现：langfuse_client.query() 目前是留位（NotImplementedError），
-        # 且当前 YAML 里没有 langfuse 指标 —— 此分支暂不可达。
-        # 保留真实调用而不抛假错误：块 2 完成 query() 后这里零改动即可用。
-        from app.services.langfuse_client import get_langfuse_client
+        from app.services.langfuse_client import (
+            LangfuseUnavailableError,
+            get_langfuse_client,
+        )
 
-        rows = await get_langfuse_client().query(spec, dimension, start, end)
+        try:
+            rows = await get_langfuse_client().query(spec, dimension, start, end)
+        except LangfuseUnavailableError as exc:
+            logger.warning("指标降级：%s 读通道不可用：%s", spec.name, exc)
+            rows, degraded, error = [], True, str(exc)[:300]
     else:  # pragma: no cover —— 加载期已校验 source 合法，这里只是防御
         raise MetricsError(f"指标 {spec.name} 的数据源暂不支持：{spec.source}")
 
@@ -298,4 +360,6 @@ async def run_metric(
         "dimension": dimension,
         "source": spec.source,
         "rows": rows,
+        "degraded": degraded,
+        "error": error,
     }

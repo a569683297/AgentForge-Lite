@@ -45,20 +45,25 @@ Langfuse 取数通道（D28 / F8.5 / PRD §9.12）
   **当前处理：不自动重试，一律抛 `LangfuseUnavailableError`。** 两个理由：
     ① 重试只会加剧限流，而且把"读不到"变成"更久地读不到"；
     ② "这一项暂时不可用"本来就是设计要能表达的状态（PRD F8.5.4 只降级该指标）。
-  **减小调用量的手段**（D35 用）：60s 缓存（已实现）+ 更窄的时间窗 + 按需单指标查询，
-  而不是"一次把一个月的数据全拉回来再本地过滤"。
+  **减小调用量的手段**（D37 已落地）：`query()` 按"单指标 + 时间窗"取数（而非整月
+  拉回再本地过滤）+ 60s 缓存 + YAML 的 `limit: 300` 控制单次最多 3 页 ——
+  取舍说明见 `query()` 的 docstring。
 """
 
 from __future__ import annotations
 
 import math
 import time
-from typing import Any
+from datetime import timezone
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from app.config import settings
 from app.core.logging import logger
+
+if TYPE_CHECKING:  # 仅为类型注解；运行时不导入（依赖方向保持单向：语义层 → 本站）
+    from app.services.metrics_service import MetricSpec
 
 
 class LangfuseUnavailableError(RuntimeError):
@@ -77,6 +82,9 @@ OBSERVATIONS_PATH = "/api/public/observations"
 # 单页条数。实测 v1 单页 limit 上限为 100（传 100 返回 100 条）。
 PAGE_SIZE = 100
 
+# 单次取数默认条数上限（语义层 metrics.yaml 的 query.limit 可覆盖；取舍见 query() 说明）。
+DEFAULT_OBS_LIMIT = 300
+
 # 字段名映射：语义层用的是 **SDK 侧命名**（`usage.totalTokens`），
 # 而 REST 返回的是**另一套键名** —— 这是实测出来的差异，必须显式对照而不是猜。
 # （PRD 例子里写的是 `field: latency / usage.totalTokens`，直接拿它去取会静默拿到 None。）
@@ -87,6 +95,11 @@ _FIELD_PATHS: dict[str, tuple[str, ...]] = {
     "usage.outputTokens": ("usageDetails", "output"),
     "cost.total": ("calculatedTotalCost",),               # 可能为 None（未配价目表）
 }
+
+# ---- 聚合方式 / 字段的公开白名单（语义层加载期校验与运行期校验**共用此处**，
+#      保证"YAML 里合法的配置"与"运行时跑得动的配置"永远同一份定义）----
+SUPPORTED_AGGS: tuple[str, ...] = ("p95", "sum", "avg", "count")
+SUPPORTED_FIELDS: frozenset[str] = frozenset(_FIELD_PATHS)
 
 
 def _dig(obj: Any, path: tuple[str, ...]) -> Any:
@@ -255,9 +268,9 @@ class LangfuseClient:
             group_by: 分组维度（本项目用 `name` —— 就是 span 名，如 `vector_search`）
         Returns:
             `[{"<group_by>": 值 或 None, "value": 数值, "count": 样本数}, ...]`
-            ⚠ 这个 schema 是 **D28 暂定** 的：真正的行结构由语义层 `metrics.yaml`
-              （D35 / PRD F11）定义，届时以那边为准并对齐 —— 这里只保证"与 SQL 源
-              同构"这条约束成立（两边都返回 list[dict]，上层不感知数据来自哪）。
+            ⚠ 行结构的最终定案在语义层（`query()` 会把它归一为 `dim/value/count`，
+              与 SQL 源同构，PRD §9.10.5 约束 1）；本函数的输出是**中间形态**，
+              分组键名随 `group_by` 传入而变化（不传时为 `"group"`）。
         Raises:
             ValueError: agg 或 field 不在白名单（**不猜、不兜底**）
         """
@@ -265,8 +278,10 @@ class LangfuseClient:
             raise ValueError(
                 f"不支持的 field: {field!r}，可选 {sorted(_FIELD_PATHS)}"
             )
-        if agg not in ("p95", "sum", "avg", "count"):
-            raise ValueError(f"不支持的 agg: {agg!r}，可选 p95 / sum / avg / count")
+        if agg not in SUPPORTED_AGGS:
+            raise ValueError(
+                f"不支持的 agg: {agg!r}，可选 {' / '.join(SUPPORTED_AGGS)}"
+            )
 
         path = _FIELD_PATHS[field]
         buckets: dict[Any, list[float]] = {}
@@ -302,32 +317,92 @@ class LangfuseClient:
                                  str(r.get(group_by or "group"))))
         return rows
 
-    # ---------------- 对外（形状留位，D35 接）----------------
+    # ---------------- 对外：语义层出口（D37 / 块 2 实现）----------------
     async def query(
         self,
-        spec: Any,
+        spec: "MetricSpec",
         dimension: str | None,
         start: str,
         end: str,
     ) -> list[dict]:
         """
-        PRD §9.12.2 的对外接口。**D28 只留形状，不实现**（范围决定，不是遗漏）。
+        语义层出口（PRD §9.12.2）：执行一个 `langfuse_api` 指标的取数 + 聚合。
 
-        为什么留空壳 —— `spec` 的类型 `MetricSpec` 属**语义层**（PRD F11 = D35 的活）：
-          当前全仓没有语义层模块、没有 `metrics.yaml`，`MetricSpec` **还不存在**。
-          硬造一个临时的，大概率与 D35 的真实定义不一致，等于埋一个必改的债
-          （与"先用临时参数顶一下"这类教训同型）。
-          → D28 交付的是**取数层**：`_fetch_observations()` + `_aggregate()`，
-            两个函数都不依赖 `MetricSpec`，D35 定义好 spec 后由它来组合调用。
+        端到端（在 metrics_service.run_metric 里与 SQL 源对称分派）：
+            spec（指标定义）+ dimension + [start, end]
+              → ① 维度白名单校验（与 SQL 源**同规则**：换数据源不放松，§9.12.3 约束 4）
+              → ② 时间窗换算：北京时间自然日 → UTC ISO
+                   （复用 metrics_service.parse_window —— "业务时区"的口径
+                    只能有一处实现，两个数据源必须是同一个日界）
+              → ③ _fetch_observations（分页 + 60s 缓存）→ _aggregate
+              → ④ 归一为语义层行结构 `[{"dim", "value", "count"}, ...]`；
+                   无维度时没有 dim 列 —— 与 SQL 源完全同构（§9.10.5 约束 1）
 
-        ⚠ 留下一条**D35 必须遵守**的约束：维度白名单要在这里生效
-          （PRD §9.12.3 约束 4：`dimension not in spec.dimensions` 直接拒绝），
-          不能因为换了数据源就放松 —— "模型不能自由查询"的原则与数据源无关。
+        降级**不在这里做**：不可达 / 限流一律抛 `LangfuseUnavailableError`，
+        由上层翻译成 degraded 响应（"只降级该指标"，约束 3，是产品语义；
+        数据源层只负责如实报告自己不可用）。
+
+        ⚠ limit 取舍（为什么不是 PRD 例子的 2000）：v1 端点实测限流很紧
+          （连续拉 ~5 页就 429），而本系统 1–3 天窗口只有几十~几百条 ——
+          300 条（3 页）兼顾"样本足够算 P95"与"远离限流线"。被截断时
+          logger 告警，且每行的 count 是**实际样本数**（诚实口径优先于完整口径）。
+
+        Raises:
+            MetricsError: 维度不在白名单 / 聚合指标被传了维度（用户参数问题）
+            LangfuseUnavailableError: 不可达 / 非 200（系统问题，由上层降级）
         """
-        raise NotImplementedError(
-            "query() 依赖语义层的 MetricSpec（D35 / PRD F11），D28 不实现；"
-            "本日交付取数层：_fetch_observations() 与 _aggregate()。"
-        )
+        # 延迟导入：本模块与语义层互相引用（语义层分派 → 这里 query；这里借它的
+        # parse_window / MetricsError），顶层导入会成环。依赖仍保持单向：
+        # 本站不触碰语义层的运行时状态，只复用它的两个纯函数/异常。
+        from app.services.metrics_service import MetricsError, parse_window
+
+        # ① 维度白名单（与 render_sql 的规则逐字对齐：白名单原文才放行）
+        if spec.dimensions:
+            if dimension not in spec.dimensions:
+                raise MetricsError(
+                    f"指标 {spec.name} 不支持的维度：{dimension!r}；"
+                    f"可用维度：{list(spec.dimensions)}"
+                )
+        elif dimension is not None:
+            raise MetricsError(f"指标 {spec.name} 是聚合指标，不支持分组维度：{dimension!r}")
+
+        # ② 查询配置（加载期已校验过合法性与白名单；这里的兜底只为防御性）
+        q = spec.query or {}
+        agg = str(q.get("agg") or "count")
+        field = str(q.get("field") or "latency")
+        limit = int(q.get("limit") or DEFAULT_OBS_LIMIT)
+
+        # ③ 时间窗：北京日 [start, end] → UTC ISO 字符串。
+        #    parse_window 返回的 end 已是"end 次日 00:00（北京）"（左闭右开），
+        #    换算到 UTC 后作为 toStartTime —— 与 SQL 源的边界语义完全一致。
+        start_dt, end_dt = parse_window(start, end)
+        from_ts = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_ts = end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # ④ 取数 + 聚合（group_by 用调用方传入的维度；非法值已在 ① 拦下）
+        observations = await self._fetch_observations(from_ts, to_ts, limit=limit)
+        if len(observations) >= limit:
+            logger.warning(
+                "Langfuse 指标 %s 取数触顶（%d 条）：窗口内数据可能超过 limit，"
+                "聚合口径为**前 N 条**而非全量 —— 确认时看每行 count",
+                spec.name, limit,
+            )
+        raw_rows = self._aggregate(observations, agg=agg, field=field, group_by=dimension)
+
+        # ⑤ 归一为语义层行结构（维度列统一叫 dim；count 样本量保留）
+        rows: list[dict] = []
+        for r in raw_rows:
+            row: dict = {}
+            if dimension:
+                row["dim"] = r.get(dimension)
+            row["value"] = r.get("value")
+            row["count"] = r.get("count")
+            rows.append(row)
+
+        # 降序（找瓶颈的默认读法，与 tool_usage 的 ORDER BY value DESC 同取向）；
+        # dim 作次序键，保证同值时输出稳定（前端柱序不随机跳）
+        rows.sort(key=lambda r: (-(r["value"] or 0.0), str(r.get("dim"))))
+        return rows
 
 
 # ---------------- 模块级单例 ----------------

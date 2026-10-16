@@ -45,9 +45,18 @@ class MetricsQueryOut(BaseModel):
 
     rows 的形状：分组查询 `[{"dim": 分组值, "value": 数值, ...}]`；
     聚合指标 `[{"value": 数值, ...}]`（单行、无 dim 列）。
+    langfuse 源的行还带 count（样本数）—— P95 这类"分位数"必须能看出样本量。
+
+    degraded / error：**langfuse 源专有的降级标记**（PRD §9.10.5 约束 3）——
+    读通道不可用时 rows=[]、degraded=True、error 给一句可读的原因；
+    此时 HTTP 仍是 200（"该指标暂不可用"是正常业务状态，不是请求失败），
+    前端渲染占位符、Agent 转述原因，两者都按标记行事而不是解析错误。
+    sql 源恒为 degraded=False（本地库没有"外部依赖不可用"这种状态）。
     """
 
     metric: str
     dimension: str | None
     source: str
     rows: list[dict[str, Any]]
+    degraded: bool = False
+    error: str | None = None

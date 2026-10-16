@@ -146,7 +146,48 @@ metrics:
       ORDER BY fail_count DESC, correctness ASC NULLS LAST
 
   # ══ 数据源二：Langfuse API（source: langfuse_api）════════════════
-  # 块 2 加入 latency_p95 / token_cost 两个指标：
-  #   · 取数走 langfuse_client.query(spec, dimension, start, end)（D28 已交付取数层）
-  #   · Langfuse 不可达时**只降级该指标**，不影响 SQL 源（PRD §9.10.5 约束 3）
-  #   · 返回结构与 sql 源完全一致（约束 1）
+  # 取数走 langfuse_client.query(spec, dimension, start, end)（D28 取数层 + D37 query 实现）。
+  # 两条通用规则（与 sql 源完全一致，PRD §9.10.5 约束 1/4）：
+  #   · dimensions 非空 ⇔ 查询必须传 dimension（逐字命中白名单）；空 ⇔ 不传
+  #   · 时间窗同样按**北京时间自然日** [start, end] 闭区间（query 内部换算成 UTC）
+  # Langfuse 不可达/限流时**只降级该指标**（约束 3）：run_metric 捕获后返回
+  # degraded 结构，不影响 sql 源 —— 上层（前端/Agent）按 degraded 标记渲染"暂不可用"。
+  #
+  # query 段字段说明（加载期校验：agg/field 必须命中白名单，group_by 必须属于 dimensions）：
+  #   · agg      p95 | sum | avg | count（langfuse_client.SUPPORTED_AGGS）
+  #   · field    latency | usage.totalTokens | ...（langfuse_client.SUPPORTED_FIELDS）
+  #   · group_by 运行时的分组列（查询时以调用方传入的 dimension 为准，本字段是声明+校验锚点）
+  #   · limit    单次最多抓取的 observation 条数。PRD 设计值 2000，**按实测收紧为 300**：
+  #              v1 端点限流很紧（连续 ~5 页即 429），而 1–3 天窗口只有几十~几百条。
+  #              触顶时日志告警，每行 count 是实际样本数（诚实口径优先）。
+
+  latency_p95:
+    label: 各阶段延迟 P95
+    description: 按 span 名称统计的 P95 耗时（秒），用于定位性能瓶颈。
+                 span 名清单的唯一权威出处：app/services/observability.py 的 SPAN_* 常量
+                 （run_agent / retrieval / embedding / vector_search / bm25 / rerank / tool:*）。
+                 count = 参与 P95 的样本数 —— 样本很小时 P95≈最大值，读数是"观测值"而非统计结论
+    source: langfuse_api
+    endpoint: /api/public/observations
+    time_column: startTime
+    dimensions: [name]
+    query:
+      agg: p95
+      field: latency
+      group_by: name
+      limit: 300
+
+  token_cost:
+    label: Token 消耗
+    description: 按模型统计的 token 总消耗（sum of usage.totalTokens）。
+                 ⚠ 成本（cost）字段依赖 Langfuse 侧配置模型价目表，当前未配、
+                 calculatedTotalCost 恒为空 —— 所以本指标现在只给 token 量，不含金额
+    source: langfuse_api
+    endpoint: /api/public/observations
+    time_column: startTime
+    dimensions: [model]
+    query:
+      agg: sum
+      field: usage.totalTokens
+      group_by: model
+      limit: 300

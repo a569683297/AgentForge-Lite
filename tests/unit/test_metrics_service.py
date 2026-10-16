@@ -27,6 +27,9 @@ EXPECTED_METRICS = {
     "eval_accuracy",
     "eval_dimension_scores",
     "eval_failures_by_category",
+    # 块 2：Langfuse 源
+    "latency_p95",
+    "token_cost",
 }
 
 
@@ -47,9 +50,13 @@ def test_all_specs_have_core_fields():
 
 
 def test_dimensioned_metrics_use_placeholder():
-    """声明了维度的指标，模板里必须真有 {dimension}（加载期已校验，这里防回归）。"""
+    """声明了维度的 **sql 源** 指标，模板里必须真有 {dimension}（加载期已校验，这里防回归）。
+
+    langfuse 源没有 sql_template，维度通过 query.group_by 表达 —— 不在本用例范围
+    （它的对应校验是 test_load_rejects_bad_yaml 的 ⑧）。
+    """
     for name, spec in ms.METRIC_REGISTRY.items():
-        if spec.dimensions:
+        if spec.source == "sql" and spec.dimensions:
             assert "{dimension}" in (spec.sql_template or ""), name
 
 
@@ -100,6 +107,52 @@ def test_load_rejects_bad_yaml():
             write_and_load(
                 "metrics:\n  m:\n    label: x\n    source: sql\n    dimensions: []\n"
                 "    sql_template: SELECT {dimension} AS dim, COUNT(*) AS value FROM t GROUP BY {dimension}\n"
+            )
+
+        # ⑤ langfuse 源缺 endpoint
+        with pytest.raises(ms.MetricsError, match="endpoint 为空"):
+            write_and_load(
+                "metrics:\n  m:\n    label: x\n    source: langfuse_api\n    dimensions: []\n"
+                "    query: {agg: sum, field: latency}\n"
+            )
+
+        # ⑥ langfuse 源的 agg 不在取数层白名单（写错 = 运行时才炸）
+        with pytest.raises(ms.MetricsError, match="query.agg 非法"):
+            write_and_load(
+                "metrics:\n  m:\n    label: x\n    source: langfuse_api\n    dimensions: []\n"
+                "    endpoint: /api/public/observations\n"
+                "    query: {agg: median, field: latency}\n"
+            )
+
+        # ⑦ langfuse 源的 field 不在取数层白名单
+        with pytest.raises(ms.MetricsError, match="query.field 非法"):
+            write_and_load(
+                "metrics:\n  m:\n    label: x\n    source: langfuse_api\n    dimensions: []\n"
+                "    endpoint: /api/public/observations\n"
+                "    query: {agg: sum, field: temperature}\n"
+            )
+
+        # ⑧ group_by 不在该指标的 dimensions 白名单里（分组列与声明不一致）
+        with pytest.raises(ms.MetricsError, match="group_by"):
+            write_and_load(
+                "metrics:\n  m:\n    label: x\n    source: langfuse_api\n    dimensions: [name]\n"
+                "    endpoint: /api/public/observations\n"
+                "    query: {agg: p95, field: latency, group_by: model}\n"
+            )
+
+        # ⑨ 互斥配置段（复制粘贴 YAML 改 source 不删配置的典型误写）
+        with pytest.raises(ms.MetricsError, match="却带着 query 段"):
+            write_and_load(
+                "metrics:\n  m:\n    label: x\n    source: sql\n    dimensions: []\n"
+                "    sql_template: SELECT 1 AS value\n"
+                "    query: {agg: sum, field: latency}\n"
+            )
+        with pytest.raises(ms.MetricsError, match="却带着 sql_template"):
+            write_and_load(
+                "metrics:\n  m:\n    label: x\n    source: langfuse_api\n    dimensions: []\n"
+                "    endpoint: /api/public/observations\n"
+                "    sql_template: SELECT 1 AS value\n"
+                "    query: {agg: sum, field: latency}\n"
             )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
