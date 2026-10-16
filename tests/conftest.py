@@ -93,6 +93,29 @@ class FakeLangfuse:
         yield _Observation()
 
 
+@pytest.fixture
+def silence_langfuse(monkeypatch):
+    """
+    静音 Langfuse：把**两处**模块级引用都换成 FakeLangfuse。
+
+    ⚠ 为什么必须是两处（实测踩坑，10-16 修复）：
+      · `llm_gateway.langfuse`    —— 网关 generation 埋点的**属性引用**，patch 它有效；
+      · `observability.langfuse`  —— `from ... import langfuse` 的**导入时绑定**：
+        patch 网关模块的属性**改不到它**。只 patch 网关时，observability 的 span
+        （run_agent / tool / retrieval 整棵树）仍然打真 Langfuse —— 症状是
+        每跑一轮集成测试，Langfuse 上就多一批"没有 generation 的 run_agent 树"
+        （latency 只有 0.001s 的假数据），测试数据污染了可观测性数据，且全程不报错。
+      → 修复后跑测试不再产生任何 Langfuse 数据（当天以"跑测试 → 拉最近数据无新增"复核）。
+    """
+    from app.services import llm_gateway as gateway
+    from app.services import observability
+
+    fake = FakeLangfuse()
+    monkeypatch.setattr(gateway, "langfuse", fake)
+    monkeypatch.setattr(observability, "langfuse", fake)
+    return fake
+
+
 class MockLLM:
     """
     确定性假模型。
@@ -157,18 +180,19 @@ class MockLLM:
 
 
 @pytest.fixture
-def mock_llm(monkeypatch):
+def mock_llm(monkeypatch, silence_langfuse):
     """
-    把网关的单通道调用点换成 MockLLM，并顺手静音 Langfuse。
+    把网关的单通道调用点换成 MockLLM，并静音 Langfuse（后者由 `silence_langfuse`
+    统一负责 —— 它同时覆盖 observability 的 span 树，见该 fixture 的说明）。
 
-    ⚠ 只 patch 这一个函数：`_call_with_failover` / `chat` / `chat_with_tools`
-      全部保持真实实现，所以"降级链"是被真跑出来的，不是被 mock 掉的。
+    ⚠ 只 patch `_call_once` 这一个函数：`_call_with_failover` / `chat` /
+      `chat_with_tools` 全部保持真实实现，所以"降级链"是被真跑出来的，
+      不是被 mock 掉的。
     """
     from app.services import llm_gateway as gateway
 
     fake = MockLLM()
     monkeypatch.setattr(gateway, "_call_once", fake)
-    monkeypatch.setattr(gateway, "langfuse", FakeLangfuse())
     return fake
 
 

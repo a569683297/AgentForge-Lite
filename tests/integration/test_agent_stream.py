@@ -84,21 +84,21 @@ class MockStreamLLM:
 
 
 @pytest.fixture
-def mock_stream_llm(monkeypatch):
+def mock_stream_llm(monkeypatch, silence_langfuse):
     """
-    把 `_call_once` / `_call_once_stream` 一起换成 MockStreamLLM，并静音 Langfuse。
+    把 `_call_once` / `_call_once_stream` 一起换成 MockStreamLLM，并静音 Langfuse
+    （静音由 `silence_langfuse` 统一负责 —— 它同时覆盖 observability 的 span 树，
+    只 patch 网关属性时那棵树会打到真 Langfuse，见该 fixture 的说明）。
 
-    ⚠ 为什么两个都换：本模块要**对照运行**两条出口（run_agent vs run_agent_stream），
+    ⚠ 为什么两个调用点都换：本模块要**对照运行**两条出口（run_agent vs run_agent_stream），
       它们分别命中这两个调用点 —— 用同一个对象替换，"两边的 LLM 输出完全一样"
       才成为事实，对照断言才是公平的。
     """
-    from tests.conftest import FakeLangfuse
     from app.services import llm_gateway as gateway
 
     fake = MockStreamLLM()
     monkeypatch.setattr(gateway, "_call_once", fake)
     monkeypatch.setattr(gateway, "_call_once_stream", fake)
-    monkeypatch.setattr(gateway, "langfuse", FakeLangfuse())
     return fake
 
 
@@ -200,3 +200,20 @@ async def test_stream_reset_retracts_intermediate_preface(mock_stream_llm, llm_c
     done = events[-1]
     assert done["answer"] == "现在是 10 点"
     assert "我来查一下" not in done["answer"], "预告文本不得混进最终回答"
+
+
+# ============================================================
+# 隔离守卫（防 10-16 的"Langfuse 逃逸"回归）
+# ============================================================
+def test_silence_langfuse_covers_both_references(silence_langfuse):
+    """静音生效时，**两个**模块级 langfuse 引用都必须是 Fake。
+
+    为什么单独立一条：修复前只 patch `llm_gateway.langfuse`，而
+    `observability.langfuse` 是导入时绑定、改不到 —— span 树（run_agent /
+    tool / retrieval）静默打到真 Langfuse，测试数据污染可观测性数据。
+    这条断言不需要网络就能钉死"两处都被换掉"。
+    """
+    from app.services import llm_gateway, observability
+
+    assert llm_gateway.langfuse is silence_langfuse
+    assert observability.langfuse is silence_langfuse
