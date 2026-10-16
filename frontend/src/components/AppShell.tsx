@@ -1,5 +1,4 @@
 import {
-  BarChartOutlined,
   BulbOutlined,
   DatabaseOutlined,
   ExperimentOutlined,
@@ -30,8 +29,10 @@ const { Sider, Header, Content } = Layout;
 const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: 'chat', label: '对话台', icon: <MessageOutlined /> },
   { key: 'knowledge', label: '知识库', icon: <DatabaseOutlined /> },
-  { key: 'eval', label: '评测看板', icon: <ExperimentOutlined /> },
-  { key: 'analytics', label: '分析', icon: <BarChartOutlined /> },
+  // 块 4：原「评测看板」与「分析」两页合并为一页（/eval），导航 7 → 6 项。
+  // 两页本就同类（都是"看系统"的数据页），且分析页的四卡/曲线与评测页的指标卡
+  // 是同一套视觉语言——分开反而把"质量"与"成本/延迟"割成两个入口。
+  { key: 'eval', label: '评测与分析', icon: <ExperimentOutlined /> },
   { key: 'tools', label: '工具注册表', icon: <ToolOutlined /> },
   { key: 'trace', label: 'Trace 时间线', icon: <FundProjectionScreenOutlined /> },
   { key: 'retriever', label: '检索检查器', icon: <SearchOutlined /> },

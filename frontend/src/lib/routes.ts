@@ -17,18 +17,27 @@
 //   - 链接可分享（把 /eval 发给别人，对方打开就是评测页）
 //   - 刷新子路径不 404 —— nginx 的 SPA 兜底（try_files ... /index.html）已就位
 
-export type PageKey = 'chat' | 'knowledge' | 'eval' | 'analytics' | 'tools' | 'trace' | 'retriever';
+export type PageKey = 'chat' | 'knowledge' | 'eval' | 'tools' | 'trace' | 'retriever';
 
 /** 页面 → URL 路径（侧栏导航用它跳转） */
 export const PAGE_PATHS: Record<PageKey, string> = {
   chat: '/chat',
   knowledge: '/knowledge',
   eval: '/eval',
-  analytics: '/analytics',
   tools: '/tools',
   trace: '/trace',
   retriever: '/retriever',
 };
+
+/**
+ * 历史路径别名（块 4：评测看板与分析页合并）。
+ *
+ * 合并前的 /analytics 已并入 /eval —— 旧书签 / 外部链接仍可能指向它。
+ * App 里有一条 `<Route path="/analytics">` 负责把它们重定向到 /eval；
+ * 这里再映射一份是为了**重定向发生前**的一瞬间：侧栏高亮直接从 URL 反推
+ * （pageFromPath），没有别名的话 /analytics 会先命中默认值 'chat'（高亮闪一下对话台）。
+ */
+const PAGE_ALIASES: Record<string, PageKey> = { analytics: 'eval' };
 
 const PAGE_KEYS = Object.keys(PAGE_PATHS) as PageKey[];
 
@@ -41,5 +50,6 @@ const PAGE_KEYS = Object.keys(PAGE_PATHS) as PageKey[];
  */
 export function pageFromPath(pathname: string): PageKey {
   const segment = pathname.split('/')[1] ?? '';
+  if (segment in PAGE_ALIASES) return PAGE_ALIASES[segment];
   return PAGE_KEYS.includes(segment as PageKey) ? (segment as PageKey) : 'chat';
 }

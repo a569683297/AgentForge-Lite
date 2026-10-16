@@ -35,6 +35,8 @@ export interface ChatResponse {
   invalid_citations: number[];
   tool_calls: string[];
   model_used: ModelUsed | null;
+  /** 本轮 query_metric 的结构化结果（D37 块 3；非流式出口与 done 帧同名字段对齐） */
+  metric_results: MetricResultItem[];
 }
 
 /**
@@ -100,6 +102,8 @@ export type ChatStreamEvent =
       invalid_citations: number[];
       tool_calls: string[];
       model_used: ModelUsed | null;
+      /** 本轮 query_metric 的结构化结果（D37 块 3）——与 sources 同族的"结构给前端"通道 */
+      metric_results: MetricResultItem[];
     }
   | { type: 'error'; message: string };
 
@@ -247,4 +251,64 @@ export interface ToolsResponse {
   by_source: Record<string, string[]>;
   servers: MCPServerStatus[];
   tools: ToolItem[];
+}
+
+// ────────────────────────────────────────────────────────────────
+// 语义层（D37 / PRD §9.10 · F11）
+// 与后端 app/schemas/metrics.py 对齐。三类类型的分工：
+//   · MetricInfo       —— GET /api/metrics 的目录项（口径说明的只读出口）
+//   · MetricsQueryOut  —— POST /api/metrics/query 的响应（HTTP 直接消费）
+//   · MetricResultItem —— done 帧 / ChatResponse 里的结构化结果（比 HTTP 版多
+//                         中文名与数据窗口——那是"对话里查了什么"的归因需要）
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * 指标数据源二值：`sql` = 项目 PostgreSQL；`langfuse_api` = Langfuse 运行追踪。
+ *
+ * 用字面量联合而不是 string 是刻意的：**只有 langfuse 源会降级**（degraded），
+ * 消费方（如分析区的 Token 卡）按 source 分支渲染的特性交给类型系统把关 —— 
+ * 若后端将来加入第三种源，这里会直接编译报错，而不是静默走进某个分支。
+ */
+export type MetricSource = 'sql' | 'langfuse_api';
+
+/** `GET /api/metrics` 列表项：一个指标的"口径目录"信息（与后端 MetricInfo 对齐）。 */
+export interface MetricInfo {
+  name: string;
+  label: string;
+  description: string;
+  source: MetricSource;
+  /** 可分组维度白名单（空数组 = 聚合指标，不支持分组） */
+  dimensions: string[];
+}
+
+/**
+ * 指标结果的一行：形状由该指标定义（列名随指标而变），所以按字典透传不强约束。
+ * 约定：每行至少含 `value`（主数值列）；分组查询多一列 `dim`；
+ * langfuse 源的分位数指标还带 `count`（样本数）。
+ */
+export type MetricRow = Record<string, unknown>;
+
+/** `POST /api/metrics/query` 的响应（与后端 MetricsQueryOut 对齐）。 */
+export interface MetricsQueryOut {
+  metric: string;
+  dimension: string | null;
+  source: MetricSource;
+  rows: MetricRow[];
+  /**
+   * langfuse 源专有的降级标记：数据源不可达时 true（rows 为空、error 给原因）。
+   * 注意此时 HTTP 仍是 200 ——"该指标暂不可用"是正常业务状态，渲染占位而不是报错。
+   * sql 源恒为 false。
+   */
+  degraded: boolean;
+  error: string | null;
+}
+
+/** done 帧 / ChatResponse 里的结构化查询结果（与后端 MetricResultItem 对齐）。 */
+export interface MetricResultItem extends MetricsQueryOut {
+  /** 指标中文名（画图标题用，不必再查目录接口） */
+  label: string;
+  /** 数据窗口起始日 YYYY-MM-DD（北京时间，含当天） */
+  start_date: string;
+  /** 数据窗口结束日 YYYY-MM-DD（含当天） */
+  end_date: string;
 }

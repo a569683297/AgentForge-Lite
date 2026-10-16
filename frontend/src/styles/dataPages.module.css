@@ -82,7 +82,7 @@
 .rankDot { width: 8px; height: 8px; border-radius: 50%; background: var(--af-border-default); }
 .rankDotGold { background: var(--af-success); }
 .retrieverNote { margin-top: 10px; color: var(--af-text-tertiary); font-size: 11px; }
-.analyticsGrid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; }
+.analyticsGrid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; margin-bottom: 16px; }
 .chartPanel { min-height: 300px; }
 .chartBody { padding: 12px; }
 .rankList { padding: 0 12px; }
@@ -112,3 +112,26 @@
 .markdownSurface ul, .markdownSurface ol { padding-left: 20px; }
 .markdownSurface code { padding: 1px 4px; border-radius: 3px; background: var(--af-sunken); font-family: var(--af-font-mono); }
 .markdownSurface pre { margin: 10px 0; padding: 10px; border-radius: 4px; background: var(--af-sunken); overflow: auto; }
+
+/* ── 分析区（块 4：与评测页合并为纵向单页，接语义层真数据）────────────── */
+/* 区块分隔线：评测区（上）与分析区（下）的视觉分界 */
+.analyticsSection { margin-top: 4px; padding-top: 18px; border-top: 1px solid var(--af-border-default); }
+.sectionHead { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.sectionTitle { margin: 0; font-size: 15px; font-weight: 500; }
+.sectionDescription { margin: 4px 0 0; color: var(--af-text-tertiary); font-size: 11px; }
+.sectionHeadRight { display: flex; align-items: center; gap: 10px; }
+/* 切换时间窗后的"静默刷新"提示（旧窗口数据保留展示，不闪骨架） */
+.sectionLoading { color: var(--af-text-tertiary); font-size: 11px; }
+/* Langfuse 降级时 Token 卡的值：「暂不可用」用正文语气，不冒充数字 */
+.degradedValue { color: var(--af-text-tertiary); font: 400 15px/30px var(--af-font-sans); }
+/* 面板内的空态 / 降级占位（比 panelPadding 的行高更接近列表节奏） */
+.panelInlineEmpty { padding: 22px 12px; color: var(--af-text-tertiary); font-size: 11px; text-align: center; }
+/* 各阶段延迟 P95：名称 / 条 / 秒值 / 样本数 四列 */
+.latencyPanel { margin-bottom: 16px; }
+.latencyList { padding: 8px 12px; }
+.latencyRow { display: grid; grid-template-columns: 168px 1fr 92px 76px; align-items: center; gap: 10px; min-height: 32px; font-size: 11px; }
+.latencyName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.latencyBar { height: 5px; overflow: hidden; border-radius: 2px; background: var(--af-sunken); }
+.latencyBar span { display: block; height: 100%; background: var(--af-accent); opacity: .75; }
+.latencyValue { text-align: right; }
+.latencyCount { color: var(--af-text-tertiary); text-align: right; }

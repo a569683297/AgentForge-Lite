@@ -3,7 +3,9 @@ import { Button, Card, Modal, Select, Table, Tooltip } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { getEvalCaseResult, getEvalRun, listEvalRunCases, listEvalRuns } from '../api/eval';
+import { AnalyticsSection } from '../components/AnalyticsSection';
 import { EmptyState, ErrorState } from '../components/EmptyState';
+import { InfoTipContent, type InfoTip } from '../components/InfoTip';
 import { MetricCard } from '../components/MetricCard';
 import { PageHeader } from '../components/PageHeader';
 import { TableSkeleton } from '../components/Skeleton';
@@ -12,8 +14,6 @@ import type { EvalCaseResultDetailOut, EvalCaseResultOut, EvalRunDetailOut, Eval
 import styles from '../styles/dataPages.module.css';
 
 const configLabel: Record<string, string> = { pure_vector: 'pure_vector', hybrid: 'hybrid', hybrid_rerank: 'hybrid_rerank' };
-
-interface InfoTip { title: string; steps: string[]; note: string }
 
 // 三种检索配置的完整链路（与 app/services/retrieval_service.py 的 retrieve() 一一对应）。
 // 挂在运行卡片的 info 图标上：悬浮即解释"这一轮用的检索方案具体怎么跑"。
@@ -139,22 +139,7 @@ const panelTips: Record<'byCategory' | 'failure', InfoTip> = {
   },
 };
 
-function InfoTipContent({ tip }: { tip: InfoTip }) {
-  return (
-    <div className={styles.flowTip}>
-      <div className={styles.flowTipTitle}>{tip.title}</div>
-      <div className={styles.flowTipSteps}>
-        {tip.steps.map((step, index) => (
-          <div className={styles.flowTipStep} key={step}>
-            <span className={styles.flowTipIndex}>{index + 1}</span>
-            <span>{step}</span>
-          </div>
-        ))}
-      </div>
-      <div className={styles.flowTipNote}>{tip.note}</div>
-    </div>
-  );
-}
+// InfoTipContent 已提取为共享组件（components/InfoTip.tsx）——分析区与评测区共用同一套悬浮说明结构。
 
 export function EvalPage() {
   const [runs, setRuns] = useState<EvalRunOut[]>([]);
@@ -202,8 +187,8 @@ export function EvalPage() {
 
   return (
     <div>
-      <PageHeader title="评测看板" description="比较检索配置，定位回答质量与失败模式。" badge={detail ? undefined : '等待数据'} action={<Tooltip title="评测暂由命令行触发：uv run python -m scripts.eval_run"><span><Button disabled icon={<PlayCircleOutlined />}>运行新评测</Button></span></Tooltip>} />
-      {loading ? <TableSkeleton rows={5} columns={4} /> : error && !runs.length ? <ErrorState message={error} action="重新加载" onAction={() => window.location.reload()} /> : !runs.length ? <EmptyState message="还没有评测记录。评测暂由命令行触发。" /> : <>
+      <PageHeader title="评测与分析" description="比较检索配置的质量差异，并观察系统运行成本与延迟。" badge={detail ? undefined : '等待数据'} action={<Tooltip title="评测由命令行触发：uv run python -m scripts.d22_run --config <配置>（三个配置各跑一次）"><span><Button disabled icon={<PlayCircleOutlined />}>运行新评测</Button></span></Tooltip>} />
+      {loading ? <TableSkeleton rows={5} columns={4} /> : error && !runs.length ? <ErrorState message={error} action="重新加载" onAction={() => window.location.reload()} /> : !runs.length ? <EmptyState message="还没有评测记录。在项目根目录运行：uv run python -m scripts.d22_run --config <配置>" /> : <>
         <div className={styles.runGrid}>{runs.slice(0, 3).map((run) => {
           const flow = retrievalFlows[run.config_name];
           return <button className={`${styles.runCard} ${run.id === selectedRunId ? styles.runCardSelected : ''}`} key={run.id} onClick={() => setSelectedRunId(run.id)}><div className={styles.runCardTop}><span className={`af-mono ${styles.runCardName}`}>{configLabel[run.config_name] ?? run.config_name}{flow ? <Tooltip title={<InfoTipContent tip={flow} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip> : null}</span><strong className="af-num">{formatPercent(run.accuracy)}</strong></div><div className={styles.runCardMeta}>{formatDateTime(run.created_at)} · {run.judge_model ?? '未记录 judge'}</div><div className={styles.fingerprints}><span className={`af-mono ${styles.fingerprintItem}`}>题集 {run.dataset_fingerprint?.slice(0, 8) ?? '—'}…<Tooltip title={<InfoTipContent tip={fingerprintTips.dataset} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip></span><span className={`af-mono ${styles.fingerprintItem}`}>语料 {run.corpus_fingerprint?.slice(0, 8) ?? '—'}…<Tooltip title={<InfoTipContent tip={fingerprintTips.corpus} />}><span className={styles.runCardInfo}><InfoCircleOutlined /></span></Tooltip></span></div></button>;})}</div>
@@ -230,6 +215,9 @@ export function EvalPage() {
         </Modal>
       </>}
       {selectedRun ? <div className={styles.footnote}>当前配置：<span className="af-mono">{selectedRun.config_name}</span> · 生成次数 <span className="af-num">{selectedRun.generation_runs ?? '—'}</span> · generation 不一致题数 <span className="af-num">{detail?.generation_inconsistent ?? '—'}</span></div> : null}
+      {/* 分析区（块 4 合并进来）：数据源与评测完全独立（语义层 /api/metrics/query），
+          所以放在"有无评测数据"的条件渲染**之外** —— 评测为空时分析区照样完整展示 */}
+      <AnalyticsSection />
     </div>
   );
 }

@@ -1,12 +1,12 @@
-import type { MetricPoint } from '../components/MetricChart';
-
 /**
  * 注意：本文件是**全站唯一的 mock 出口**（`IMPL-SPEC.md` §6.3 的要求：无数据源的页面集中 mock，不得虚构接口）。
  *
- * 本文件里的三块数据分别等三个**尚不存在**的后端出口：
+ * 本文件里的两块数据分别等两个**尚不存在**的后端出口：
  *   · `MOCK_TRACES`            —— Trace 页：**后端完全没有 trace 查询接口**（span 在 Langfuse，无 REST 出口）
  *   · `MOCK_RETRIEVAL`         —— 检索检查器：现在只有 `retrieved_chunks: str`（**一段字符串**，无名次 / 无 logit / 无 gold）
- *   · `MOCK_METRICS` / `MOCK_ANALYTICS_SUMMARY` —— 分析页：`GET /api/metrics` 属 **D35 语义层**
+ *
+ * （块 4 已删除 `MOCK_METRICS` / `MOCK_ANALYTICS_SUMMARY`：分析区并入评测页后，
+ *   数据改接 D37 语义层 `POST /api/metrics/query` 的**真实指标**，不再是 mock。）
  *
  * 规矩：mock **可以**是编的数字，但**命名与形状必须照抄真实口径** —— 否则接真数据时形状对不上，
  * 而且演示时会说出错的名字（比"数字是假的"更容易穿帮）。
@@ -108,34 +108,3 @@ export const MOCK_RETRIEVAL: MockRetrievalRow[] = Array.from({ length: 20 }, (_,
     is_gold: index === 1 || index === 7,
   };
 });
-
-/** 等后端 `GET /api/metrics`（属 **D35 语义层**）：分析页的曲线。 */
-export const MOCK_METRICS: Array<{ metric: string; dimension: string; points: MetricPoint[] }> = [{
-  metric: 'agent_latency',
-  dimension: 'daily',
-  points: [
-    { date: '10/01', value: 810 }, { date: '10/02', value: 772 }, { date: '10/03', value: 835 },
-    { date: '10/04', value: 728 }, { date: '10/05', value: 690 }, { date: '10/06', value: 716 },
-    { date: '10/07', value: 642 },
-  ],
-}];
-
-/**
- * 等后端 `GET /api/metrics`（属 **D35 语义层**）：分析页汇总卡与热门工具。
- *
- * 注意：四个工具名取自本机 `GET /api/tools` 的**真实** `tools[].name`
- * （2026-10-07 实测：registry 共 14 个工具，harness 侧为本项目自己封装的 `harness_*`），
- * 让示例数据至少与真实命名空间一致；**`count` 全是编的，不可当实测值引用**。
- */
-export const MOCK_ANALYTICS_SUMMARY = {
-  totalRequests: 1284,
-  averageLatencyMs: 642,
-  tokenUsage: '1.82M',
-  successRate: '98.4%',
-  popularTools: [
-    { name: 'search_documents', count: 72 },
-    { name: 'harness_list', count: 46 },
-    { name: 'current_time', count: 24 },
-    { name: 'inventory_query_inventory', count: 18 },
-  ],
-};

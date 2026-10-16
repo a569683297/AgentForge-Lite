@@ -4,7 +4,6 @@ import { getHealth } from './api/health';
 import { listModels } from './api/models';
 import { listSessions } from './api/sessions';
 import { AppShell } from './components/AppShell';
-import { AnalyticsPage } from './pages/AnalyticsPage';
 import { ChatPage } from './pages/ChatPage';
 import { EvalPage } from './pages/EvalPage';
 import { KnowledgePage } from './pages/KnowledgePage';
@@ -104,7 +103,8 @@ export default function App() {
         <Route path="/chat/:sessionId" element={<ChatPage onSessionsRefresh={refreshSessions} selectedModelId={selectedModelId} onModelUsed={handleModelUsed} />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/eval" element={<EvalPage />} />
-        <Route path="/analytics" element={<AnalyticsPage />} />
+        {/* 块 4：分析页已并入 /eval —— 旧链接重定向（replace：不在历史里留一条死路径） */}
+        <Route path="/analytics" element={<Navigate to="/eval" replace />} />
         <Route path="/tools" element={<ToolsPage />} />
         <Route path="/trace" element={<TracePage />} />
         <Route path="/retriever" element={<RetrieverPage />} />
