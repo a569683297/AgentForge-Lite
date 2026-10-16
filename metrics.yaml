@@ -1,0 +1,152 @@
+# AgentForge 语义层指标定义（D37 / PRD §9.10 · F11）
+# ==================================================================
+# 这是"口径的唯一来源"：每个指标的名字、含义、可分组维度、取数 SQL 都只写在这里。
+# **LLM 不写 SQL，只选「指标名 + 维度 + 时间窗」**——SQL 由本文件的模板渲染，
+# 维度必须命中 dimensions 白名单，时间参数走绑定（三层防护，见 metrics_service.py）。
+#
+# 结构约定（metrics_service._load_registry 会做加载期校验，写错启动即报）：
+#   · source          sql（项目 PostgreSQL）| langfuse_api（Langfuse 运行追踪，块 2 加入）
+#   · dimensions      分组维度白名单。空列表 = 聚合指标（不支持分组，返回单行）
+#   · sql_template    只允许出现 {dimension} 一个占位符；它**只会**被白名单里的原文替换
+#   · 输出列约定      分组列**一律输出为 dim**（前端/工具按固定列名消费）；
+#                     value = 主数值列（必有）；允许多个数值列（如失分统计的
+#                     correctness/faithfulness/fail_count）；聚合指标（无维度）无 dim 列。
+#                     ⚠ 衍生维度（day / tool_name 这类不是表列的值）：用子查询先起
+#                     语义名，外层 `SELECT 语义名 AS dim ... GROUP BY {dimension}`。
+#                     不能像表列那样直接 `AS dim` 再 `GROUP BY {dimension}` ——
+#                     替换出来的名字必须是查询里**能解析到的输入列**（表列可以，
+#                     表达式不行）。
+#   · 时间窗          :start / :end 为绑定参数，指**北京时间自然日** [start, end] 闭区间；
+#                     service 在 Python 侧换算成左闭右开的时间戳边界再传参（不依赖
+#                     PostgreSQL 会话时区；实测 PG 是 UTC，裸传 'YYYY-MM-DD' 会以
+#                     08:00 为日界）。按日聚合也用 AT TIME ZONE 'Asia/Shanghai' 显式截断。
+#
+# 每个指标都必须能在 docs/可分析数据资产清单-2026-09-22.md 找到来源说明（F11.8）。
+
+metrics:
+  # ══ 数据源一：项目 PostgreSQL（source: sql）══════════════════════
+
+  session_count:
+    label: 会话总数
+    description: 时间窗内新建的对话会话数（sessions 表一行 = 一个会话）
+    source: sql
+    table: sessions
+    time_column: created_at
+    dimensions: []
+    sql_template: |
+      SELECT COUNT(*) AS value
+      FROM sessions
+      WHERE created_at >= :start AND created_at < :end
+
+  message_count:
+    label: 消息总数
+    description: 时间窗内的消息条数（messages 表全部角色：user / assistant / tool）
+    source: sql
+    table: messages
+    time_column: created_at
+    dimensions: []
+    sql_template: |
+      SELECT COUNT(*) AS value
+      FROM messages
+      WHERE created_at >= :start AND created_at < :end
+
+  message_volume:
+    label: 每日消息量
+    description: 按北京时间自然日统计的消息条数，用于对话量趋势曲线
+    source: sql
+    table: messages
+    time_column: created_at
+    dimensions: [day]
+    sql_template: |
+      SELECT day AS dim, COUNT(*) AS value
+      FROM (
+        SELECT date_trunc('day', created_at AT TIME ZONE 'Asia/Shanghai')::date AS day
+        FROM messages
+        WHERE created_at >= :start AND created_at < :end
+      ) t
+      GROUP BY {dimension}
+      ORDER BY {dimension}
+
+  tool_usage:
+    label: 工具调用排行
+    description: 按工具名统计的调用次数（展开 messages.tool_calls JSONB；
+                 结构为 OpenAI function calling 格式，名字在 elem->'function'->>'name'）
+    source: sql
+    table: messages
+    time_column: created_at
+    dimensions: [tool_name]
+    sql_template: |
+      SELECT tool_name AS dim, COUNT(*) AS value
+      FROM (
+        SELECT elem->'function'->>'name' AS tool_name
+        FROM messages, jsonb_array_elements(tool_calls) AS elem
+        WHERE elem->'function'->>'name' IS NOT NULL
+          AND created_at >= :start AND created_at < :end
+      ) t
+      GROUP BY {dimension}
+      ORDER BY value DESC
+
+  eval_accuracy:
+    label: 评测准确率
+    description: 各检索配置的评测二值化准确率均分（correctness ≥ 4 记对，PRD F7.5），
+                 用于消融对比与趋势；runs = 参与均分的运行数
+    source: sql
+    table: eval_runs
+    time_column: created_at
+    dimensions: [config_name]
+    sql_template: |
+      SELECT config_name AS dim,
+             AVG(accuracy)::float AS value,
+             COUNT(*) AS runs
+      FROM eval_runs
+      WHERE created_at >= :start AND created_at < :end
+        AND accuracy IS NOT NULL
+      GROUP BY {dimension}
+      ORDER BY value DESC
+
+  eval_dimension_scores:
+    label: 评测维度得分
+    description: 正确性 / 引用忠实度 / 完整性 三维度均分（按运行均值；scored_runs = 有分的运行数）
+    source: sql
+    table: eval_runs
+    time_column: created_at
+    dimensions: [score_type]
+    sql_template: |
+      SELECT {dimension} AS dim,
+             AVG(score)::float AS value,
+             COUNT(score) AS scored_runs
+      FROM (
+        SELECT 'correctness'  AS score_type, score_correctness  AS score, created_at FROM eval_runs
+        UNION ALL
+        SELECT 'faithfulness' AS score_type, score_faithfulness AS score, created_at FROM eval_runs
+        UNION ALL
+        SELECT 'completeness' AS score_type, score_completeness AS score, created_at FROM eval_runs
+      ) t
+      WHERE created_at >= :start AND created_at < :end
+      GROUP BY {dimension}
+      ORDER BY value ASC
+
+  eval_failures_by_category:
+    label: 分类失分
+    description: 按题目类别聚合的失分情况（明细行级），用于定位最弱的题型。
+                 ⚠ 分母是**明细行数**（一行 = 一次生成），与准确率的按题口径不同
+    source: sql
+    table: eval_case_results
+    time_column: created_at
+    dimensions: [category]
+    sql_template: |
+      SELECT category AS dim,
+             AVG(score_correctness)::float  AS correctness,
+             AVG(score_faithfulness)::float AS faithfulness,
+             COUNT(*) FILTER (WHERE NOT passed) AS fail_count,
+             COUNT(*) AS total
+      FROM eval_case_results
+      WHERE created_at >= :start AND created_at < :end
+      GROUP BY {dimension}
+      ORDER BY fail_count DESC, correctness ASC NULLS LAST
+
+  # ══ 数据源二：Langfuse API（source: langfuse_api）════════════════
+  # 块 2 加入 latency_p95 / token_cost 两个指标：
+  #   · 取数走 langfuse_client.query(spec, dimension, start, end)（D28 已交付取数层）
+  #   · Langfuse 不可达时**只降级该指标**，不影响 SQL 源（PRD §9.10.5 约束 3）
+  #   · 返回结构与 sql 源完全一致（约束 1）
