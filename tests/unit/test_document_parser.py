@@ -107,3 +107,84 @@ async def test_unknown_extension_reaching_parser_raises():
     """路由层已拦过一次，但解析器自己也要兜底（防有人绕过路由直接调）。"""
     with pytest.raises(ValueError, match="没有对应的解析器"):
         await parse_file("a.zip", b"PK\x03\x04")
+
+
+# ============================================================
+# 三、DOCX 表格（块 3：修静默丢数据）
+# ============================================================
+
+
+def _docx_bytes(document) -> bytes:
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+async def test_docx_table_content_is_kept_in_document_order():
+    """
+    ★ 这条用例对应一个真实的静默故障：
+    `document.paragraphs` 只返回正文直接段落，表格在另一棵树上，
+    于是"以表格为主"的文档入库后等于空文档 —— ready、切片数正常、检索永远查不到。
+
+    同时锁住**顺序**：段落 → 表格 → 段落，错序会让"结论"和它对应的表对不上。
+    """
+    document = DocxDocument()
+    document.add_paragraph("一、报销标准如下表所示。")
+    table = document.add_table(rows=3, cols=2)
+    rows = [("项目", "上限"), ("市内交通", "每天 50 元"), ("住宿", "每晚上限 600 元")]
+    for row_index, (key, value) in enumerate(rows):
+        table.cell(row_index, 0).text = key
+        table.cell(row_index, 1).text = value
+    document.add_paragraph("以上标准自 2026 年 1 月起执行。")
+
+    segments = await parse_file("a.docx", _docx_bytes(document))
+    text = segments[0].text
+
+    assert "市内交通 | 每天 50 元" in text
+    assert "住宿 | 每晚上限 600 元" in text
+    assert text.index("一、报销标准") < text.index("市内交通") < text.index("以上标准")
+
+
+async def test_docx_table_only_document_is_not_an_empty_parse():
+    """整篇只有一个表格：旧实现会得到空文本 → 抛「未提取到任何文本」，用户以为文件坏了。"""
+    document = DocxDocument()
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "型号"
+    table.cell(0, 1).text = "E104"
+
+    segments = await parse_file("only-table.docx", _docx_bytes(document))
+    assert segments[0].text == "型号 | E104"
+
+
+async def test_docx_merged_cells_are_not_repeated():
+    """合并单元格时 `row.cells` 会把同一个格子返回多次，不去重就会入库成重复文本。"""
+    document = DocxDocument()
+    table = document.add_table(rows=1, cols=2)
+    merged = table.cell(0, 0).merge(table.cell(0, 1))
+    merged.text = "住宿标准"
+
+    segments = await parse_file("merged.docx", _docx_bytes(document))
+    assert segments[0].text.count("住宿标准") == 1
+
+
+async def test_docx_empty_table_does_not_produce_separator_noise():
+    """整行都是空单元格时跳过该行 —— 否则切片里会堆出一排 ` | `。"""
+    document = DocxDocument()
+    document.add_paragraph("正文")
+    document.add_table(rows=2, cols=2)
+
+    segments = await parse_file("empty-table.docx", _docx_bytes(document))
+    assert segments[0].text == "正文"
+
+
+async def test_docx_nested_table_is_flattened_into_its_cell():
+    """单元格里还能嵌表格，单元格本身也是一棵块级树。"""
+    document = DocxDocument()
+    outer = document.add_table(rows=1, cols=2)
+    outer.cell(0, 0).text = "一级"
+    inner = outer.cell(0, 1).add_table(rows=1, cols=2)
+    inner.cell(0, 0).text = "子项"
+    inner.cell(0, 1).text = "值"
+
+    segments = await parse_file("nested.docx", _docx_bytes(document))
+    assert "一级 | 子项 | 值" in segments[0].text

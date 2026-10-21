@@ -13,6 +13,9 @@
     "差 8 小时的静默错位"在这里被钉死，而不是等对账时才发现）。
 """
 
+import asyncio
+
+import httpx
 import pytest
 
 from app.services import langfuse_client as lfc
@@ -244,3 +247,152 @@ async def test_fetch_observations_reuses_cache(monkeypatch):
 
     assert len(calls) == 1, "同窗口同 limit 的第二次读取应命中缓存、不再发请求"
     assert first is second
+
+
+# ============================================================
+# 七、单飞：并发的同窗口读取只落一次 HTTP（D37 补充 / 2026-10-19）
+# ============================================================
+async def test_concurrent_reads_share_single_flight(monkeypatch):
+    """两个指标（token_cost / latency_p95）窗口与 limit 相同，缓存键也相同。
+
+    原来的写法在**串行**时能复用缓存，但前端 Promise.all 是并发发起的 ——
+    两个协程同时 miss、各拉 3 页，6 次请求直接超过 Langfuse 的 5 次/分钟配额。
+    这条用例钉住"并发也只取一次"。
+    """
+    calls: list[str] = []
+
+    async def fake_pages(from_ts: str, to_ts: str, limit: int):
+        calls.append(from_ts)
+        await asyncio.sleep(0.05)      # 模拟真实 HTTP 飞行时间（让第二个调用者能搭车）
+        return [{"name": "run_agent", "latency": 1.0}]
+
+    client = _client()
+    monkeypatch.setattr(client, "_fetch_pages", fake_pages)
+
+    first, second = await asyncio.gather(
+        client._fetch_observations("2026-10-15", "2026-10-16", limit=300),
+        client._fetch_observations("2026-10-15", "2026-10-16", limit=300),
+    )
+
+    assert len(calls) == 1, "并发的同窗口读取必须合并成一次取数"
+    assert first == second, "两个调用者拿到同一个结果（聚合口径不同，但原始明细是同一份）"
+    assert client._inflight == {}, "取数完成后在途表必须清空，否则下次会搭上一个已死的 Task"
+
+
+async def test_single_flight_propagates_failure_to_all_waiters(monkeypatch):
+    """共享 Task 的异常要同时传给两个等待者，且失败后不能在途表里留下死 Task。"""
+
+    async def fake_pages(from_ts: str, to_ts: str, limit: int):
+        await asyncio.sleep(0.02)
+        raise LangfuseUnavailableError("Langfuse 返回 500: boom", status=500)
+
+    client = _client()
+    monkeypatch.setattr(client, "_fetch_pages", fake_pages)
+
+    results = await asyncio.gather(
+        client._fetch_observations("2026-10-15", "2026-10-16", limit=300),
+        client._fetch_observations("2026-10-15", "2026-10-16", limit=300),
+        return_exceptions=True,
+    )
+
+    assert all(isinstance(r, LangfuseUnavailableError) for r in results)
+    assert client._inflight == {}
+
+
+# ============================================================
+# 八、负缓存：429 之后冷却期内不再发请求（D37 补充 / 2026-10-19）
+# ============================================================
+async def test_rate_limit_opens_cooldown_and_short_circuits(monkeypatch):
+    """429 是**配额型**失败，不是网络抖动：retry-after 期间再打一定是同一个 429。
+
+    第一次调用抛错并写入冷却；第二次调用必须**一次 HTTP 都不发**，
+    且异常里仍带着剩余冷却秒数（前端据此显示"约 N 秒后恢复"）。
+    """
+    calls: list[int] = []
+
+    async def fake_pages(from_ts: str, to_ts: str, limit: int):
+        calls.append(1)
+        raise LangfuseUnavailableError(
+            "Langfuse 接口限流（每分钟 5 次），约 56 秒后自动恢复",
+            status=429,
+            retry_after_s=56.0,
+        )
+
+    client = _client()
+    monkeypatch.setattr(client, "_fetch_pages", fake_pages)
+
+    with pytest.raises(LangfuseUnavailableError):
+        await client._fetch_observations("2026-10-15", "2026-10-16", limit=300)
+
+    with pytest.raises(LangfuseUnavailableError) as exc:
+        await client._fetch_observations("2026-10-15", "2026-10-16", limit=300)
+
+    assert len(calls) == 1, "冷却期内必须短路，不能再打一次 HTTP"
+    remaining = exc.value.retry_after_s or 0.0
+    assert 0 < remaining <= 56.0
+    assert "限流" in str(exc.value), "错误消息必须是给人看的中文，而不是 Langfuse 英文原文"
+
+
+async def test_non_429_failure_is_not_negatively_cached(monkeypatch):
+    """只有 429 进负缓存：网络抖动/5xx 一秒后可能就恢复了，挡 30 秒是自伤。"""
+    calls: list[int] = []
+
+    async def fake_pages(from_ts: str, to_ts: str, limit: int):
+        calls.append(1)
+        raise LangfuseUnavailableError("Langfuse 不可达: ConnectError", status=None)
+
+    client = _client()
+    monkeypatch.setattr(client, "_fetch_pages", fake_pages)
+
+    for _ in range(2):
+        with pytest.raises(LangfuseUnavailableError):
+            await client._fetch_observations("2026-10-15", "2026-10-16", limit=300)
+
+    assert len(calls) == 2, "非限流失败必须允许下一次重试"
+
+
+async def test_cooldown_expires_and_allows_new_attempt(monkeypatch):
+    """冷却到期后要能重新取数，而不是永久拉黑（用极短 retry-after 验证解封逻辑）。"""
+    calls: list[int] = []
+
+    async def fake_pages(from_ts: str, to_ts: str, limit: int):
+        calls.append(1)
+        if len(calls) == 1:
+            raise LangfuseUnavailableError(
+                "Langfuse 接口限流，约 0.05 秒后自动恢复", status=429, retry_after_s=0.05
+            )
+        return [{"name": "run_agent", "latency": 2.0}]
+
+    client = _client()
+    monkeypatch.setattr(client, "_fetch_pages", fake_pages)
+
+    with pytest.raises(LangfuseUnavailableError):
+        await client._fetch_observations("2026-10-15", "2026-10-16", limit=300)
+
+    await asyncio.sleep(0.06)          # 等冷却过去
+    rows = await client._fetch_observations("2026-10-15", "2026-10-16", limit=300)
+
+    assert rows == [{"name": "run_agent", "latency": 2.0}]
+    assert len(calls) == 2
+
+
+# ============================================================
+# 九、retry-after 解析（冷却时长必须来自服务端，不能写死）
+# ============================================================
+def test_parse_retry_after_prefers_header():
+    resp = httpx.Response(
+        429,
+        headers={"retry-after": "56"},
+        json={"details": {"retryAfterSeconds": 99}},   # body 与头不一致时以头为准
+    )
+    assert lfc._parse_retry_after(resp) == 56.0
+
+
+def test_parse_retry_after_falls_back_to_body():
+    resp = httpx.Response(429, json={"details": {"retryAfterSeconds": 42}})
+    assert lfc._parse_retry_after(resp) == 42.0
+
+
+def test_parse_retry_after_returns_none_when_absent():
+    """两个来源都没有时返回 None（由调用方决定兜底值）——数据源层不做策略选择。"""
+    assert lfc._parse_retry_after(httpx.Response(429, text="too many requests")) is None

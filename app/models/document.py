@@ -20,7 +20,7 @@ D12 拆表背景：
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, Uuid, func
+from sqlalchemy import DateTime, Index, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -46,6 +46,17 @@ class Document(Base):
 
     __tablename__ = "documents"
 
+    # 内容指纹唯一索引：幂等去重的**最后一道防线**。
+    # 应用层的「先查再插」有一个时间窗（SELECT 与 INSERT 之间），
+    # 双击 / 双标签页 / 网关重试 / 多 worker 都会从那个窗口钻进来。
+    # 唯一索引让数据库来判：第二个 INSERT 抛 IntegrityError，物理上不可能重复。
+    #
+    # ⚠ PostgreSQL 的唯一索引允许多个 NULL，所以历史数据（没有 hash）之间不会互相冲突。
+    #   代价是它们不参与去重 —— 原始文件从没存过，hash 补不出来，这一点绕不过去。
+    __table_args__ = (
+        Index("uq_documents_content_hash", "content_hash", unique=True),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
         primary_key=True,
@@ -59,6 +70,17 @@ class Document(Base):
     file_type: Mapped[str] = mapped_column(
         String(16),
         comment="文件类型：pdf/docx/md/txt",
+    )
+    content_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment=(
+            "内容指纹 = sha256(原始文件字节) 的十六进制串（64 位）。"
+            "算原始字节而不是解析后文本：解析可能失败（坏 PDF/扫描件），"
+            "失败时算不出文本指纹，那些记录就永远无法参与去重；"
+            "而且解析器升级会让同一文件的文本指纹漂移。"
+            "NULL = 本字段上线前的历史数据（原始文件未留存，无法回填）"
+        ),
     )
     status: Mapped[str] = mapped_column(
         String(16),
@@ -80,7 +102,16 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        comment="上传时间",
+        comment="首次上传时间（重试不改写它——那是历史事实）",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        comment=(
+            "最后一次状态变更时间。"
+            "processing 卡死没有出口，靠它判断「多久没动静了」→ 超时回收（块 2）"
+        ),
     )
 
     def __repr__(self) -> str:

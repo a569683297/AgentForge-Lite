@@ -5,7 +5,12 @@ POST   /api/documents         上传（multipart）→ 立刻返回 processing�
 GET    /api/documents         列表（带状态，前端轮询它看进展）
 DELETE /api/documents/{id}    删除（切片由数据库外键级联删除）
 
-路由层的三件事：校验输入 → 建记录 → 派后台任务。业务逻辑全在 document_service。
+上传是**幂等**的（按内容指纹 sha256(原始字节) 判）：
+    同一份文件第二次上传不会产生第二条记录 —— 已就绪/处理中返回 409，
+    上次失败则复用原记录原地重试并返回 202。
+
+路由层的三件事：校验输入 → 裁决（新建/重试/拒收）→ 派后台任务。
+业务逻辑全在 document_service。
 """
 
 from uuid import UUID
@@ -19,12 +24,31 @@ from app.services.document_parser import check_upload
 
 router = APIRouter(tags=["documents"])
 
+# 可正常受理的两种判定：全新的文档 / 复用失败记录重试
+_ACCEPTED_OUTCOMES = (document_service.UploadOutcome.CREATED, document_service.UploadOutcome.RETRIED)
+
+
+def _duplicate_detail(outcome: str, document) -> str:
+    """
+    把"拒收"的判定翻译成用户能看懂的一句话。
+
+    为什么要在文案里带上已有文档的名字：用户手上可能同时有
+    `报销标准-终版.pdf` 和 `报销标准-终版(1).pdf`，只说"已存在"等于让他自己猜是哪一份。
+    """
+    if outcome == document_service.UploadOutcome.DUPLICATE_READY:
+        return f"《{document.filename}》已在知识库中，无需重复上传"
+    return f"《{document.filename}》正在处理中，请稍候再看列表"
+
+
 
 @router.post(
     "/documents",
     response_model=DocumentOut,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="上传文档（异步入库）",
+    summary="上传文档（异步入库，按内容指纹幂等）",
+    responses={
+        409: {"description": "同一份内容已存在（已就绪或正在处理）。响应头 X-Document-Id 指向已有记录"},
+    },
 )
 async def upload_document(
     background: BackgroundTasks,
@@ -41,6 +65,11 @@ async def upload_document(
     两条失败路径分开处理：
       - 扩展名 / 大小不合格 → 这里直接 400（用户输入问题，不必建记录）
       - 解析时才发现的问题（坏 PDF）→ 后台任务里落成 failed 状态（PRD F4 验收点）
+
+    第三条路径是**重复上传**（409）：
+    同一份内容（sha256 相同）已存在时不再新建记录 —— 已就绪的拒收，上次失败的复用重试。
+    这不是"额外的功能"，而是修复一个静默错误：重复入库会让同一段文本占掉 top_k 的多个名额，
+    检索质量下降但**不报任何错**。
     """
     filename = file.filename or "untitled"
     data = await file.read()
@@ -50,15 +79,32 @@ async def upload_document(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
-    document_id = await document_service.create_document(filename=filename, file_type=file_type)
+    content_hash = document_service.compute_content_hash(data)
+    document, outcome = await document_service.begin_upload(
+        filename=filename, file_type=file_type, content_hash=content_hash
+    )
+
+    if outcome not in _ACCEPTED_OUTCOMES:
+        logger.info(
+            "拒绝重复上传 filename=%s 命中=%s 已有文档=%s", filename, outcome, document.id
+        )
+        # 409 + 已有文档的 id：前端可以据此定位到列表里那一行（也可当作排障线索）
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_duplicate_detail(outcome, document),
+            headers={"X-Document-Id": str(document.id)},
+        )
 
     # 派后台任务：响应发回给客户端之后才执行。
     # 注意它跑在**同一个进程**里 —— 进程重启任务就没了，文档会卡在 processing。
     # 可接受的取舍：我们要的是链路完整，不是生产级任务队列（阶段 2 再上 Celery/ARQ）。
-    background.add_task(document_service.process_upload, document_id, filename, data)
+    background.add_task(document_service.process_upload, document.id, filename, data)
 
-    logger.info("收到上传 filename=%s 大小=%dB 文档ID=%s", filename, len(data), document_id)
-    document = await document_service.get_document(document_id)
+    logger.info(
+        "收到上传 filename=%s 大小=%dB 文档ID=%s 判定=%s",
+        filename, len(data), document.id, outcome,
+    )
+    document = await document_service.get_document(document.id)  # 取回 server_default 字段
     if document is None:                                    # 理论上不可能，防御性处理
         raise HTTPException(status_code=500, detail="文档创建失败")
     return DocumentOut.model_validate(document)

@@ -41,17 +41,29 @@ Langfuse 取数通道（D28 / F8.5 / PRD §9.12）
     `429 {"code":"rate_limited","message":"Rate limit exceeded for GET /api/public/observations.
      Use GET /api/public/v2/observations?... for high-volume reads."}`
   —— 服务端这句话**又一次**指向 v2（与 `_deprecation` 同一个方向）。
+  **实测配额：5 次请求 / 分钟**（响应头 `x-ratelimit-limit: 5`、`retry-after: 56`）。
 
-  **当前处理：不自动重试，一律抛 `LangfuseUnavailableError`。** 两个理由：
-    ① 重试只会加剧限流，而且把"读不到"变成"更久地读不到"；
-    ② "这一项暂时不可用"本来就是设计要能表达的状态（PRD F8.5.4 只降级该指标）。
-  **减小调用量的手段**（D37 已落地）：`query()` 按"单指标 + 时间窗"取数（而非整月
-  拉回再本地过滤）+ 60s 缓存 + YAML 的 `limit: 300` 控制单次最多 3 页 ——
+  **当前处理（D37 补充 / 2026-10-19 重做，原方案不够）**：
+    ① **不自动重试**，一律抛 `LangfuseUnavailableError` ——
+       重试只会加剧限流，而且把"读不到"变成"更久地读不到"；
+    ② **负缓存**（`_blocked`）：429 时按响应头的 `retry-after` 记下解封时刻，
+       冷却期内直接短路，**一次 HTTP 都不发**。原来的"失败一律不缓存"对网络抖动
+       成立，对配额型失败不成立 —— 每次刷新都重打，会把仅剩的额度也打光；
+    ③ **单飞**（`_inflight`）：同窗口的并发取数合并成一次。这条是必需的：
+       `token_cost` 与 `latency_p95` 的缓存键完全相同，串行时能复用缓存，
+       但前端是并发发起的，两个协程会同时 miss、各拉 3 页 —— 6 次请求直接爆掉 5 次配额。
+  **减小调用量的手段**（累计）：`query()` 按"单指标 + 时间窗"取数（而非整月拉回再
+  本地过滤）+ 60s 缓存 + 单飞合并 + YAML 的 `limit: 300` 控制单次最多 3 页 +
+  `POST /api/metrics/overview` 把分析页 6 个查询合成 1 个 HTTP ——
   取舍说明见 `query()` 的 docstring。
+
+  🚩 **仍未解决**：`limit: 300` 只覆盖窗口内最新的 300 条 observation（实测 7 天
+  窗口有 3146 条），token 与 P95 都是"前 300 条"的口径，不是全量。
 """
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from datetime import timezone
@@ -68,16 +80,47 @@ if TYPE_CHECKING:  # 仅为类型注解；运行时不导入（依赖方向保�
 
 class LangfuseUnavailableError(RuntimeError):
     """
-    Langfuse 读通道不可用（网络不通 / 凭据无效 / 返回非 200）。
+    Langfuse 读通道不可用（网络不通 / 凭据无效 / 返回非 200 / 限流 429）。
 
     单独一个异常类型，是为了让上层能**只降级这一个指标**（PRD F8.5.4）：
     若混在 RuntimeError 里，调用方分不清"Langfuse 挂了"还是"我的代码写错了" ——
     前者该降级（Agent 该说"该指标暂不可用"），后者该修，处理方式完全相反。
+
+    两个附加字段（D37 补充，2026-10-19）：
+        status          HTTP 状态码（网络层失败时为 None）
+        retry_after_s   限流时**服务端明说**的冷却秒数（`retry-after` 头）
+    为什么冷却时长要跟着异常走、而不是上层写死：见 `_fetch_observations`
+    负缓存那段的取舍说明 —— 写死 30 或 60 秒都会和服务端真实窗口错位。
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        retry_after_s: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after_s = retry_after_s
 
 
 # ---- 端点（见文件头对 v1/v2 的取舍说明）----
 OBSERVATIONS_PATH = "/api/public/observations"
+
+# Trace 页走的端点。**与上面不是一回事**，三处差异决定了它适合"看某一次运行"：
+#   ① v1（上面那个）是**指标**用的：5 次/分钟配额，还要拿去算 P95，Trace 页不能挤占；
+#   ② v2 是实时路径（官方原话：唯一实时的读路径就是 v2 observations + v2 metrics），
+#      而 v1 与 `/api/public/traces` 都有约 10 分钟延迟；
+#   ③ v2 支持 `?traceId=` 精确过滤 —— 实测 4 个 span 一次拿全，画一棵树只需 1 次请求。
+# 代价：v2 **不带 metadata 与 usageDetails**，所以 Trace 页看不到「工具属于哪台 server」
+# 与 token 数。这两项由 /api/metrics 那条链路回答，不在这个页面重复。
+V2_OBSERVATIONS_PATH = "/api/public/v2/observations"
+
+# Trace 页单次最多拉多少条 observation。
+# 200 条约等于 20~40 次对话（一次 run_agent 出 4~10 个 span），覆盖"最近 24 小时"通常够；
+# 触顶时上层会明说"只统计了最近 N 条"，而不是假装完整（与 metrics 的 limit 同一条原则）。
+TRACE_FETCH_LIMIT = 200
 
 # 单页条数。实测 v1 单页 limit 上限为 100（传 100 返回 100 条）。
 PAGE_SIZE = 100
@@ -133,6 +176,42 @@ def _to_iso(ts: str, *, end_of_day: bool = False) -> str:
     return f"{ts}T{'23:59:59' if end_of_day else '00:00:00'}Z"
 
 
+# 限流冷却的兜底秒数：服务端**没给** retry-after 时用它。
+# 为什么必须有兜底：没有冷却 = 下一次刷新继续把额度打光。宁可保守挡 30 秒，
+# 也不让"越失败越打、越打越失败"的循环继续（实测该端点 429 时一定给 retry-after，
+# 这个常量只防代理改写响应头这种边角情况）。
+DEFAULT_RETRY_AFTER_S = 30.0
+
+
+def _parse_retry_after(resp: httpx.Response) -> float | None:
+    """
+    从 429 响应里取"还要等多少秒"：优先 `retry-after` 头，退回 body 的
+    `details.retryAfterSeconds`。
+
+    为什么优先头：`retry-after` 是 HTTP 标准字段，代理/网关改写 body 也动不了它；
+    body 那条是 Langfuse 自己的冗余字段（实测两者同时给出同一个值 56）。
+    为什么返回 None 而不是默认值：这一层只负责"如实报告服务端说了什么"，
+    兜底常量留给调用方决定 —— 数据源层不该替上层做策略选择。
+    """
+    raw = resp.headers.get("retry-after")
+    if raw:
+        try:
+            value = float(raw)
+            if value >= 0:
+                return value
+        except ValueError:
+            pass  # HTTP-date 格式（本接口不返回）：落到 body 分支
+
+    try:
+        details = (resp.json() or {}).get("details") or {}
+        value = details.get("retryAfterSeconds")
+        if value is not None:
+            return max(0.0, float(value))
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 def _percentile(values: list[float], p: float) -> float:
     """
     最近秩法（nearest-rank）求分位数。
@@ -170,14 +249,46 @@ class LangfuseClient:
         # 60s 短期缓存（PRD §9.12.4 明确要求）：键是查询窗口，
         # 值 (过期时刻, rows)。只缓存**成功**结果 —— 失败也缓存的话，
         # 一次网络抖动会被放大成"接下来 60 秒都读不到"。
+        # （配额型失败不适用这条理由，单独走下面的 `_blocked` 负缓存。）
         self._cache: dict[tuple[str, str, int], tuple[float, list[dict]]] = {}
+
+        # 单飞（single-flight）：键 → 正在飞的那次取数。
+        # 两个指标（token_cost / latency_p95）窗口与 limit 完全相同，缓存键也相同；
+        # 但前端是并发发起的，两个协程会**同时** miss 缓存、各拉 3 页 ——
+        # 实测 6 次请求超过端点 5 次/分钟的配额，必然有指标被 429 打降级。
+        # 有了这张表，第二个调用者直接 await 第一个的 Task，取数只发生一次。
+        self._inflight: dict[tuple[str, str, int], asyncio.Task[list[dict]]] = {}
+
+        # 负缓存（negative cache）：键 → (解封时刻, 错误消息)。
+        # 「负」指缓存的是**失败**。为什么失败也要缓存：429 是**配额型**失败，
+        # 不是网络抖动 —— 响应头 retry-after 明确说了还要等多久，
+        # 期间再打一定是同一个 429，只会把额度继续打光。
+        # 冷却时长从响应头读（不写死）：写死 30 秒会在第 31 秒撞回同一个窗口，
+        # 写死 60 秒会在服务端已放行后白挡 4 秒。
+        self._blocked: dict[tuple[str, str, int], tuple[float, str]] = {}
+
+        # ---- v2（Trace 页专用）的**独立**三件套 ----
+        # 为什么不复用上面三个字典：v1 的键语义是「时间窗 + limit」，v2 的键可能带
+        # traceId。混用同一张表会让"缓存命中"变成巧合，而这类 bug 的表现是
+        # 「页面画的树和选中的那条 trace 对不上」—— 不报错，只是错了。
+        # 更重要的是：v1 是 metrics 指标的命脉（配额只有 5 次/分钟），
+        # Trace 页的高频查询绝不能挤占它，两者必须各自计数、各自冷却。
+        self._v2_cache: dict[tuple[str, ...], tuple[float, list[dict]]] = {}
+        self._v2_inflight: dict[tuple[str, ...], asyncio.Task[list[dict]]] = {}
+        self._v2_blocked: dict[tuple[str, ...], tuple[float, str]] = {}
 
     # ---------------- 取数 ----------------
     async def _fetch_observations(
         self, from_ts: str, to_ts: str, limit: int = 1000
     ) -> list[dict]:
         """
-        按时间窗拉回 observations（分页 + 60s 缓存）。
+        按时间窗拉回 observations（负缓存 → 60s 缓存 → 单飞合并 → 真正发 HTTP）。
+
+        四层顺序不能乱，各有分工：
+            ① 负缓存（`_blocked`）：上次限流还没解封 → 直接抛，**一次 HTTP 都不发**
+            ② 成功缓存（`_cache`）：窗口数据 60s 内不重复拉
+            ③ 单飞（`_inflight`）：同一窗口已有取数在飞 → 等它，不另起一次
+            ④ `_fetch_pages`：真正分页拉取
 
         Args:
             from_ts / to_ts: ISO 时间或 `YYYY-MM-DD`（后者会被规整，见 `_to_iso`）
@@ -185,10 +296,27 @@ class LangfuseClient:
         Returns:
             原始 observation dict 列表（未做字段映射 —— 那是 `_aggregate` 的事）
         Raises:
-            LangfuseUnavailableError: 不可达 / 非 200
+            LangfuseUnavailableError: 不可达 / 非 200 / 限流（限流时带 `retry_after_s`）
         """
         key = (from_ts, to_ts, limit)
         now = time.monotonic()
+
+        # ① 负缓存：冷却期内直接短路。
+        blocked = self._blocked.get(key)
+        if blocked is not None:
+            until, message = blocked
+            remaining = until - now
+            if remaining > 0:
+                logger.info(
+                    "Langfuse 负缓存命中（限流冷却中）窗口=%s~%s 剩余=%.0fs",
+                    from_ts, to_ts, remaining,
+                )
+                raise LangfuseUnavailableError(
+                    message, status=429, retry_after_s=remaining
+                )
+            self._blocked.pop(key, None)   # 已解封：删掉，往下走正常取数
+
+        # ② 成功缓存
         cached = self._cache.get(key)
         if cached is not None and cached[0] > now:
             logger.info(
@@ -197,14 +325,71 @@ class LangfuseClient:
             )
             return cached[1]
 
-        rows = await self._fetch_pages(from_ts, to_ts, limit)
-        self._cache[key] = (now + self._cache_ttl_s, rows)
+        # ③ 单飞：已有在途取数就搭车，没有才起飞。
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(
+                self._fetch_and_cache(key, from_ts, to_ts, limit)
+            )
+            self._inflight[key] = task
+            # 完成后从表里摘掉；`add_done_callback` 保证异常路径也会执行
+            # （否则失败一次就会永久占住这个键，后续全部搭上一个已死的 Task）。
+            task.add_done_callback(lambda _t, k=key: self._inflight.pop(k, None))
+            logger.info("Langfuse 取数起飞 窗口=%s~%s limit=%d", from_ts, to_ts, limit)
+        else:
+            logger.info(
+                "Langfuse 取数合并到在途请求（单飞）窗口=%s~%s limit=%d",
+                from_ts, to_ts, limit,
+            )
+
+        # `shield` 必须加：直接 await 共享 Task 时，某个调用者被取消
+        # （浏览器断开 / 前端切窗口放弃请求）会把 Task 一起取消，
+        # 另一个正常等待的调用者会收到 CancelledError —— 一个用户的取消不该连累另一个。
+        return await asyncio.shield(task)
+
+    async def _fetch_and_cache(
+        self, key: tuple[str, str, int], from_ts: str, to_ts: str, limit: int
+    ) -> list[dict]:
+        """
+        单飞 Task 的本体：取数 → 成功写缓存 / 429 写负缓存 → 原样抛或返回。
+
+        为什么把"写缓存"放在 Task 里而不是外层 await 之后：
+        多个等待者 await 同一个 Task，若写缓存放在外层，就会重复写 N 次
+        （虽然无害，但负缓存的解封时刻会被最后一次写覆盖，语义变糊）。
+        放在 Task 内部，一个键只写一次，所有等待者共享同一个结果/异常。
+        """
+        try:
+            rows = await self._fetch_pages(from_ts, to_ts, limit)
+        except LangfuseUnavailableError as exc:
+            # 只有限流才进负缓存：网络抖动/凭据错误缓存了没有意义
+            # （网络可能一秒后就恢复，挡 30 秒反而是自伤）。
+            if exc.status == 429:
+                cooldown = (
+                    exc.retry_after_s
+                    if exc.retry_after_s is not None
+                    else DEFAULT_RETRY_AFTER_S
+                )
+                self._blocked[key] = (
+                    time.monotonic() + cooldown,
+                    str(exc),
+                )
+                logger.warning(
+                    "Langfuse 限流，进入冷却 %.0fs（窗口=%s~%s）",
+                    cooldown, from_ts, to_ts,
+                )
+            raise
+
+        self._cache[key] = (time.monotonic() + self._cache_ttl_s, rows)
         return rows
 
     async def _fetch_pages(self, from_ts: str, to_ts: str, limit: int) -> list[dict]:
         """真正发 HTTP 的部分：按页把结果攒齐。"""
         rows: list[dict] = []
         page = 1
+        # 单独计数"实际发了几页"：`page` 在循环末尾会 +1，直接拿它记日志会多报一页
+        # （300 条/100 每页 = 实际 3 次请求，但循环结束时 page 已经是 4）——
+        # 排障时"日志说 4 页、实际 3 页"会让人白查一轮。
+        pages_fetched = 0
 
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             while len(rows) < limit and page <= self._max_pages:
@@ -214,6 +399,7 @@ class LangfuseClient:
                     "fromStartTime": _to_iso(from_ts),
                     "toStartTime": _to_iso(to_ts, end_of_day=True),
                 }
+                pages_fetched += 1
                 try:
                     resp = await client.get(
                         f"{self._host}{OBSERVATIONS_PATH}",
@@ -226,9 +412,31 @@ class LangfuseClient:
                         f"Langfuse 不可达: {type(e).__name__}: {e}"
                     ) from e
 
+                if resp.status_code == 429:
+                    # 限流单独一条分支：它不是"读通道坏了"，而是"现在不让你读"。
+                    # 上层要据此给出**"约 N 秒后恢复"**的人话，所以把 retry-after
+                    # 一并带出去（原始英文 body 只进日志 —— 前端展示它是上一版的 bug：
+                    # 用户在卡片上看到的就是被截断的 "Rate limit exceeded for GET /ap..."）。
+                    retry_after = _parse_retry_after(resp)
+                    logger.warning(
+                        "Langfuse 限流 429 窗口=%s~%s 第%d页 retry_after=%s 原文=%s",
+                        from_ts, to_ts, page, retry_after, resp.text[:200],
+                    )
+                    wait = (
+                        f"约 {retry_after:.0f} 秒后自动恢复"
+                        if retry_after is not None
+                        else "稍后自动恢复"
+                    )
+                    raise LangfuseUnavailableError(
+                        f"Langfuse 接口限流（每分钟 5 次），{wait}",
+                        status=429,
+                        retry_after_s=retry_after,
+                    )
+
                 if resp.status_code != 200:
                     raise LangfuseUnavailableError(
-                        f"Langfuse 返回 {resp.status_code}: {resp.text[:200]}"
+                        f"Langfuse 返回 {resp.status_code}: {resp.text[:200]}",
+                        status=resp.status_code,
                     )
 
                 data = resp.json()
@@ -244,7 +452,7 @@ class LangfuseClient:
 
         logger.info(
             "Langfuse 取数完成 窗口=%s~%s 条数=%d 页数=%d limit=%d",
-            from_ts, to_ts, len(rows[:limit]), page, limit,
+            from_ts, to_ts, len(rows[:limit]), pages_fetched, limit,
         )
         return rows[:limit]
 
@@ -403,6 +611,149 @@ class LangfuseClient:
         # dim 作次序键，保证同值时输出稳定（前端柱序不随机跳）
         rows.sort(key=lambda r: (-(r["value"] or 0.0), str(r.get("dim"))))
         return rows
+
+
+    # ---------------- v2 观测：Trace 页的实时路径 ----------------
+    async def fetch_v2_observations(
+        self,
+        *,
+        trace_id: str | None = None,
+        from_ts: str | None = None,
+        to_ts: str | None = None,
+        limit: int = TRACE_FETCH_LIMIT,
+        cache_ttl_s: float = 20.0,
+    ) -> list[dict]:
+        """
+        拉 v2 observations 明细（**不分页**，一次请求）。
+
+        两种用法，对应 Trace 页的两级视图：
+            · 列表：给时间窗，拿回窗口内所有 span，上层按 traceId 自己分组；
+            · 详情：给 `trace_id`，一次拿全这棵树的全部节点。
+
+        为什么不翻页：单次 limit 已按「一次页面能画多少」定死（200），
+        翻页只会让一次刷新变成 2~3 次请求 —— 而 Trace 页是会被反复点开的。
+        触顶时返回条数 == limit，上层据此提示"只统计了最近 N 条"。
+
+        Args:
+            trace_id: 精确过滤某一条 trace。传了它就不该再传时间窗（实测可混用，但没有意义）。
+            from_ts / to_ts: ISO8601（`2026-10-20T00:00:00Z`）。按 span 的 **startTime** 过滤。
+            limit: 最多返回条数。
+            cache_ttl_s: 成功结果的缓存时长。为什么比指标的 60s 短：
+                         这是"刚刚发生了什么"的视图，缓存太久会让人以为新对话没被埋点。
+
+        Returns:
+            原始 observation dict 列表（字段：id / traceId / parentObservationId /
+            name / type / startTime / endTime / latency / level / sessionId / modelId）。
+
+        Raises:
+            LangfuseUnavailableError: 不可达 / 非 200 / 限流
+        """
+        key = ("v2", trace_id or "", from_ts or "", to_ts or "", str(limit))
+        now = time.monotonic()
+
+        # ① 负缓存：上一次限流还没解封 → 一次 HTTP 都不发。
+        blocked = self._v2_blocked.get(key)
+        if blocked is not None:
+            until, message = blocked
+            if until > now:
+                raise LangfuseUnavailableError(
+                    message, status=429, retry_after_s=until - now
+                )
+            self._v2_blocked.pop(key, None)
+
+        # ② 成功缓存
+        cached = self._v2_cache.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+        # ③ 单飞：Trace 页"刷新"按钮很容易被连点，同一窗口的并发合并成一次。
+        task = self._v2_inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(
+                self._fetch_v2_once(key, trace_id, from_ts, to_ts, limit, cache_ttl_s)
+            )
+            self._v2_inflight[key] = task
+            task.add_done_callback(lambda _t, k=key: self._v2_inflight.pop(k, None))
+        return await asyncio.shield(task)
+
+    async def _fetch_v2_once(
+        self,
+        key: tuple[str, ...],
+        trace_id: str | None,
+        from_ts: str | None,
+        to_ts: str | None,
+        limit: int,
+        cache_ttl_s: float,
+    ) -> list[dict]:
+        """单飞 Task 的本体：取数 → 成功写缓存 / 429 写负缓存 → 原样抛或返回。"""
+        try:
+            rows = await self._fetch_v2_pages(
+                trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, limit=limit
+            )
+        except LangfuseUnavailableError as exc:
+            if exc.status == 429:
+                cooldown = (
+                    exc.retry_after_s
+                    if exc.retry_after_s is not None
+                    else DEFAULT_RETRY_AFTER_S
+                )
+                self._v2_blocked[key] = (time.monotonic() + cooldown, str(exc))
+                logger.warning("Langfuse v2 限流，冷却 %.0fs", cooldown)
+            raise
+
+        self._v2_cache[key] = (time.monotonic() + cache_ttl_s, rows)
+        logger.info(
+            "Langfuse v2 取数完成 trace_id=%s 窗口=%s~%s 条数=%d",
+            trace_id or "-", from_ts or "-", to_ts or "-", len(rows),
+        )
+        return rows
+
+    async def _fetch_v2_pages(
+        self,
+        *,
+        trace_id: str | None,
+        from_ts: str | None,
+        to_ts: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """真正发 HTTP 的部分（v2 无 totalPages，单次取完）。"""
+        params: dict[str, Any] = {"limit": limit}
+        if trace_id:
+            params["traceId"] = trace_id
+        if from_ts:
+            params["fromStartTime"] = _to_iso(from_ts)
+        if to_ts:
+            params["toStartTime"] = _to_iso(to_ts)
+
+        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+            try:
+                resp = await client.get(
+                    f"{self._host}{V2_OBSERVATIONS_PATH}",
+                    params=params,
+                    auth=self._auth,
+                )
+            except httpx.HTTPError as e:
+                raise LangfuseUnavailableError(
+                    f"Langfuse 不可达: {type(e).__name__}: {e}"
+                ) from e
+
+        if resp.status_code == 429:
+            retry_after = _parse_retry_after(resp)
+            wait = (
+                f"约 {retry_after:.0f} 秒后自动恢复"
+                if retry_after is not None
+                else "稍后自动恢复"
+            )
+            raise LangfuseUnavailableError(
+                f"Langfuse 观测接口限流，{wait}", status=429, retry_after_s=retry_after
+            )
+        if resp.status_code != 200:
+            raise LangfuseUnavailableError(
+                f"Langfuse v2 返回 {resp.status_code}: {resp.text[:200]}",
+                status=resp.status_code,
+            )
+
+        return resp.json().get("data") or []
 
 
 # ---------------- 模块级单例 ----------------

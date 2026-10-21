@@ -127,10 +127,27 @@ def _rerank_sync(query: str, documents: list[str]) -> list[float]:
     return list(model.rerank(query, documents))
 
 
+def _fallback(candidates: list[dict], top_n: int, return_all: bool) -> list[dict]:
+    """
+    降级时的返回：**原样沿用传入顺序**（融合序），不重排。
+
+    为什么 return_all 在这里也要生效：页面拿到 20 条才能画出"候选池"那一列；
+    只给 5 条的话，降级状态下左列会突然从 20 行缩成 5 行，
+    看起来像"检索变少了"，而真相是"重排没跑起来"——两个完全不同的问题。
+
+    ⚠ 这里**不带 rerank_score**（一条都没有分数），页面上"重排后"那列
+    因此显示的是融合分。这是刻意的：编一个 0 分或者沿用融合分冒充 logit，
+    正是这个页面最该避免的误导。
+    """
+    picked = candidates if return_all else candidates[:top_n]
+    return [dict(item) for item in picked]
+
+
 async def rerank(
     query: str,
     candidates: list[dict],
     top_n: int,
+    return_all: bool = False,
 ) -> tuple[list[dict], bool]:
     """
     对候选做精排，返回 (结果列表, 是否真的重排过)。
@@ -151,8 +168,14 @@ async def rerank(
         query: 用户问题（原始文本）
         candidates: 融合后的候选，**顺序即融合名次**（降级时直接沿用这个顺序）
         top_n: 重排后保留条数
+        return_all: 是否返回**全部**候选（按重排分排序）。
+            ⚠ 只为「检索检查器」页面而加，默认 False —— 检索主链路与评测都只要前 top_n，
+            多返回的 15 条是纯浪费（每条 300 字正文）。页面需要它是因为
+            "左边第 12 名这条被挤到第几去了"只有在完整排序里才看得到；
+            只看前 5 名，能说的只有"没进去"，说不出"掉了几名"。
     Returns:
         (结果列表, reranked)。reranked=True 时每条结果带 `rerank_score`（logit）。
+        顺序即重排名次；`return_all=True` 时长度等于候选数，否则等于 top_n。
 
     ⚠ 返回的是**新 dict**（浅拷贝），不原地改调用方传进来的融合结果：
       这样降级/成功两条路径对调用方的输入都没有副作用，调用方可以放心复用原列表。
@@ -191,7 +214,7 @@ async def rerank(
                 level="WARNING",
                 status_message="重排超时降级（返回融合序）",
             )
-            return [dict(item) for item in candidates[:top_n]], False
+            return _fallback(candidates, top_n, return_all), False
         except Exception as e:
             # 降级日志**不带堆栈**（铁律 13④）：这是高频可预期事件（模型没起来时每个请求都会走这里），
             # 带 exc_info 会把真正的故障埋进噪音里。只留异常消息。
@@ -201,7 +224,7 @@ async def rerank(
                 level="WARNING",
                 status_message="重排失败降级（返回融合序）",
             )
-            return [dict(item) for item in candidates[:top_n]], False
+            return _fallback(candidates, top_n, return_all), False
 
         if len(scores) != len(candidates):
             # 防御性断言：分数与候选错位会让「内容 A 配上分数 B」静默发生，
@@ -214,7 +237,7 @@ async def rerank(
                 level="WARNING",
                 status_message="重排分数条数与候选数不匹配，降级",
             )
-            return [dict(item) for item in candidates[:top_n]], False
+            return _fallback(candidates, top_n, return_all), False
 
         # 排序键：① 分数降序 ② chunk_id 升序兜底
         # 第②档的存在理由和 D17 融合一样 —— 只需保证"同一份数据两次跑出同一顺序"，
@@ -225,7 +248,9 @@ async def rerank(
         )
 
         results: list[dict] = []
-        for score, item in paired[:top_n]:
+        # return_all=True 时保留完整排序（页面要看"谁被挤到第几"），否则只取前 top_n
+        picked = paired if return_all else paired[:top_n]
+        for score, item in picked:
             enriched = dict(item)                        # 浅拷贝，见 docstring 的⚠
             enriched["rerank_score"] = round(float(score), 4)
             results.append(enriched)
@@ -235,7 +260,8 @@ async def rerank(
         obs.update(
             output={
                 "reranked": True,
-                "top_n": len(results),
+                "top_n": min(top_n, len(results)),
+                "returned": len(results),
                 "score_range": [
                     results[0]["rerank_score"] if results else 0.0,
                     results[-1]["rerank_score"] if results else 0.0,

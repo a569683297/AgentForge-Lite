@@ -18,7 +18,7 @@ LOG_DIR := logs
 # 全量回归的脚本清单（不含 harness 依赖项 —— 那两个要 `--with-harness`，别混进日常回归）
 VERIFY_SCRIPTS := d21_delete_scope d21_eval d22 d23_metrics d24_report d26 d27 d28
 
-.PHONY: help up down restart logs ps warmup warmup-dry seed seed-clean test verify web-dev web-build
+.PHONY: help up down restart logs ps warmup warmup-dry seed seed-clean test verify web-dev web-build sandbox
 
 help:
 	@echo "AgentForge 常用命令"
@@ -29,6 +29,7 @@ help:
 	@echo "    make restart     重建并重启"
 	@echo "    make logs        跟踪全部容器日志"
 	@echo "    make ps          看容器状态"
+	@echo "    make sandbox     ★ 构建工具沙箱镜像（用户上传工具的前置，首次必须跑）"
 	@echo ""
 	@echo "  演示前"
 	@echo "    make warmup      ★ 预热 MCP（演示前必跑；日志落 $(LOG_DIR)/）"
@@ -62,6 +63,19 @@ logs:
 
 ps:
 	docker compose ps
+
+# ------------------------------------------------------------------ 工具沙箱
+# 用户上传的 MCP Server 跑在这个镜像里（sandbox/Dockerfile）。
+#
+# ⚠ 为什么不并进 `make up`：它要联网装 mcp SDK，多花一次构建时间；
+#   而绝大多数开发/回归根本不碰"上传工具"这条路。
+#   但**必须先跑一次** —— 否则 api 起沙箱容器时会去 pull，表现为几分钟无输出。
+#
+# 最后那行是自检：镜像能起来、mcp 能 import、python 版本对。失败就是构建坏了，
+# 不用等到用户上传第一个工具才发现。
+sandbox:
+	docker build -f sandbox/Dockerfile -t agentforge-tool-sandbox:local sandbox/
+	@docker run --rm agentforge-tool-sandbox:local -c "import importlib.metadata as m, sys; print('sandbox ok · python', sys.version.split()[0], '· mcp', m.version('mcp'))"
 
 # ------------------------------------------------------------------ 演示前
 warmup:

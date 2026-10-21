@@ -1,6 +1,7 @@
 import { DeleteOutlined, FileTextOutlined, InboxOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons';
 import { Button, Card, Input, Popconfirm, Select, Space, Table, Tag, message } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError } from '../api/client';
 import { deleteDocument, listDocuments, uploadDocument } from '../api/documents';
 import { DocumentPreviewModal } from '../components/DocumentPreviewModal';
 import { EmptyState, ErrorState } from '../components/EmptyState';
@@ -26,6 +27,7 @@ export function KnowledgePage() {
   const [selectedDocument, setSelectedDocument] = useState<DocumentOut | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [uploading, setUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function refresh() {
@@ -67,13 +69,28 @@ export function KnowledgePage() {
   }), [documents]);
 
   async function handleUpload(file: File) {
+    // 防连点：服务端有唯一索引兜底，但这里先挡住「点了两下产生两次请求」这种无谓往返。
+    if (uploading) return;
+    setUploading(true);
     try {
       const document = await uploadDocument(file);
-      setDocuments((current) => [document, ...current]);
+      // 失败后重传会**复用原记录**（同 id），所以不能无脑往前插 ——
+      // 直接 prepend 会让表格里出现两行相同的 rowKey，React 渲染就乱了。
+      setDocuments((current) => (current.some((item) => item.id === document.id)
+        ? current.map((item) => (item.id === document.id ? document : item))
+        : [document, ...current]));
       setPage(1);                              // 新文档插在最前：跳回第 1 页，让它立刻可见
       message.success('文档已上传，正在处理');
     } catch (reason: unknown) {
-      message.error(reason instanceof Error ? reason.message : '文档上传失败');
+      if (reason instanceof ApiError && reason.status === 409) {
+        // 409 不是错误，是「这份内容已经在库里 / 正在处理」，把最新状态拉回来即可
+        message.warning(reason.message);
+        await refresh();
+      } else {
+        message.error(reason instanceof Error ? reason.message : '文档上传失败');
+      }
+    } finally {
+      setUploading(false);
     }
   }
 
@@ -98,7 +115,7 @@ export function KnowledgePage() {
 
   return (
     <div>
-      <PageHeader title="知识库" description="管理可检索文档与索引处理状态。" action={<><input ref={inputRef} type="file" hidden accept=".pdf,.docx,.md,.txt" onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); event.target.value = ''; }} /><Button type="primary" icon={<UploadOutlined />} onClick={() => inputRef.current?.click()}>上传文档</Button></>} />
+      <PageHeader title="知识库" description="管理可检索文档与索引处理状态。" action={<><input ref={inputRef} type="file" hidden accept=".pdf,.docx,.md,.txt" onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); event.target.value = ''; }} /><Button type="primary" icon={<UploadOutlined />} onClick={() => inputRef.current?.click()} loading={uploading}>上传文档</Button></>} />
       <div className={styles.statStrip}><span><strong className="af-num">{stats.total}</strong> 份文档</span><i /><span><strong className="af-num">{stats.ready}</strong> 已就绪</span><i /><span><strong className="af-num">{stats.processing}</strong> 处理中</span><i /><span><strong className="af-num">{stats.chunks}</strong> 个切片</span></div>
       <Card className={styles.tableCard} styles={{ body: { padding: 0 } }}>
         <div className={styles.tableToolbar}><Input allowClear prefix={<InboxOutlined />} placeholder="搜索文件名" value={query} onChange={(event) => setQuery(event.target.value)} className={styles.searchBox} /><Select value={status} onChange={setStatus} options={[{ value: 'all', label: '全部状态' }, { value: 'ready', label: '已就绪' }, { value: 'processing', label: '处理中' }, { value: 'failed', label: '失败' }]} /></div>

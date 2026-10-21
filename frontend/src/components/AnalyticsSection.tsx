@@ -1,7 +1,7 @@
 import { InfoCircleOutlined } from '@ant-design/icons';
 import { Card, Segmented, Tooltip } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { queryMetric } from '../api/metrics';
+import { queryMetricsOverview, type MetricsOverviewItem } from '../api/metrics';
 import type { MetricRow, MetricsQueryOut } from '../types/api';
 import { ErrorState } from './EmptyState';
 import { InfoTipContent, type InfoTip } from './InfoTip';
@@ -13,7 +13,8 @@ import styles from '../styles/dataPages.module.css';
 /**
  * 分析区（块 4：由独立「分析」页合并进评测页，数据从 mock 换成语义层真数据）
  * =====================================================================
- * 六个组件、六个指标（全部走 `POST /api/metrics/query`，指标名/口径的唯一来源是后端 metrics.yaml）：
+ * 六个组件、六个指标（全部走**一个** `POST /api/metrics/overview`，
+ * 指标名/口径的唯一来源仍是后端 metrics.yaml）：
  *
  *   四卡： 会话数 session_count ┐
  *          消息数 message_count ├─ SQL 源（项目库）
@@ -23,13 +24,19 @@ import styles from '../styles/dataPages.module.css';
  *          工具调用排行 tool_usage（dim: tool_name）→ 前 5 名 + 占比条
  *   全宽： 各阶段延迟 P95 latency_p95（dim: name）→ 条列表 + 样本数（Langfuse 源）
  *
+ * 为什么是**一个**请求而不是六个（D37 补充 / 2026-10-19）：
+ *   原先 `Promise.all` 并发 6 个单查询，其中两个 Langfuse 指标各拉 3 页 = 6 次
+ *   HTTP，而 Langfuse v1 observations 端点只允许 5 次/分钟 —— 每次打开分析页都
+ *   必然触发 429，Token 卡与延迟面板双双「暂不可用」。合并成一个请求后，
+ *   两个 Langfuse 指标在服务端被单飞合并成**一次** 3 页取数。
+ *
  * 两条设计约定（都来自 PRD §9.10.5 的接口契约，不是本组件的自由发挥）：
- *   ① **双源返回结构一致**——所以这里六个查询用同一套渲染管线，不为 langfuse 源写特例；
+ *   ① **双源返回结构一致**——所以这里六个结果用同一套渲染管线，不为 langfuse 源写特例；
  *   ② **langfuse 源会降级**（degraded=true + error，HTTP 仍 200）——降级只影响该指标：
  *      Token 卡与延迟面板显示「暂不可用」占位，其余四个 SQL 指标照常渲染。
  *      这不是错误路径，是正常业务状态（"外部依赖暂时不可用"），所以不弹错、不整区失败。
  *
- * 时间窗：近 7 天（默认）/ 近 30 天，切换后六个查询并行重取。
+ * 时间窗：近 7 天（默认）/ 近 30 天，切换后整批重取。
  * 窗口标注（footnote）与展示数据**绑在同一次响应里**（view 携带起止日期）——
  * 避免"切换后旧数据还挂着、标注却已更新"的口径错位。
  */
@@ -174,6 +181,22 @@ const WINDOW_OPTIONS = [
   { label: '近 30 天', value: 30 },
 ];
 
+/**
+ * 分析页要取的六个指标（metric + 分组维度）。
+ *
+ * 放在组件外：它是常量，每次渲染重建数组没有意义。
+ * 也刻意**不写死在后端**： "这一页显示哪几张卡"是 UI 决策，不是数据口径；
+ * 后端的 `/metrics/overview` 只负责批量执行 + 合并取数，口径仍来自 metrics.yaml。
+ */
+const PANEL_ITEMS: MetricsOverviewItem[] = [
+  { metric: 'session_count' },
+  { metric: 'message_count' },
+  { metric: 'tool_usage', dimension: 'tool_name' },
+  { metric: 'token_cost', dimension: 'model' },
+  { metric: 'message_volume', dimension: 'day' },
+  { metric: 'latency_p95', dimension: 'name' },
+];
+
 export function AnalyticsSection() {
   const [days, setDays] = useState(7);
   const [reloadKey, setReloadKey] = useState(0);
@@ -188,17 +211,33 @@ export function AnalyticsSection() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void Promise.all([
-      queryMetric({ metric: 'session_count', startDate, endDate }),
-      queryMetric({ metric: 'message_count', startDate, endDate }),
-      queryMetric({ metric: 'tool_usage', dimension: 'tool_name', startDate, endDate }),
-      queryMetric({ metric: 'token_cost', dimension: 'model', startDate, endDate }),
-      queryMetric({ metric: 'message_volume', dimension: 'day', startDate, endDate }),
-      queryMetric({ metric: 'latency_p95', dimension: 'name', startDate, endDate }),
-    ])
-      .then(([sessions, messages, tools, tokens, volume, latency]) => {
+    void queryMetricsOverview({ startDate, endDate, items: PANEL_ITEMS })
+      .then((overview) => {
         if (cancelled) return;
-        setView({ startDate, endDate, sessions, messages, tools, tokens, volume, latency });
+
+        // 按指标名取；缺项说明前后端清单脱节。
+        // 这里**不抛错**：抛错会让整个分析区变成 ErrorState，而实际只缺一张卡 ——
+        // 与「只降级该指标」的约定相反。用降级占位把它显式标出来，反而更容易被发现。
+        const pick = (metric: string): MetricsQueryOut =>
+          overview.results[metric] ?? {
+            metric,
+            dimension: null,
+            source: 'sql',
+            rows: [],
+            degraded: true,
+            error: `后端未返回该指标（${metric}），可能前后端清单不一致`,
+          };
+
+        setView({
+          startDate,
+          endDate,
+          sessions: pick('session_count'),
+          messages: pick('message_count'),
+          tools: pick('tool_usage'),
+          tokens: pick('token_cost'),
+          volume: pick('message_volume'),
+          latency: pick('latency_p95'),
+        });
       })
       .catch((reason: unknown) => {
         if (cancelled) return;

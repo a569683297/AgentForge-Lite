@@ -9,8 +9,13 @@
 
     POST /api/documents
       ① check_upload()        便宜的校验：扩展名 / 大小 → 不合格直接 400
-      ② create_document()     写一行 documents(status=processing)，**立刻返回 id**
-      ③ 后台任务 process_upload()
+      ② compute_content_hash()  sha256(原始字节) —— 幂等判定的身份
+      ③ begin_upload()        按指纹裁决：
+                                 新建      → 写 documents(status=processing)
+                                 已就绪    → 409（这份内容已经在库里）
+                                 处理中    → 409（已经在跑，再跑纯属浪费 CPU）
+                                 失败      → CAS 抢锁后原地重试（这就是"失败重传"）
+      ④ 后台任务 process_upload()
              parse_file()            解析（也放后台：坏 PDF 要落成 failed 状态）
              _ingest_segments()      切片 → 向量化 → 写 chunks → 置 ready
                                      任一步失败 → 置 failed + error_message
@@ -31,10 +36,12 @@
     （评测集的依据），全删一次就是不可逆的数据损失。
 """
 
+import hashlib
 import os
 import uuid
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.core.db import async_session_factory
 from app.core.logging import logger
@@ -53,18 +60,191 @@ DELETE_ALL_ENV_VAR = "ALLOW_DELETE_ALL_DOCUMENTS"
 _MAX_ERROR_LEN = 500
 
 
+class UploadOutcome:
+    """
+    一次上传的判定结果 —— 由 service 决定，路由层只负责把它翻译成 HTTP 状态码。
+
+    为什么要单独一个类型而不是返回 bool：
+    "重复"不是一个状态，是三种（已就绪 / 正在处理 / 抢锁失败），
+    它们的用户提示完全不同。用 bool 会逼着路由层再去查一次库做二次判断。
+    """
+
+    CREATED = "created"                        # 全新文档，已建记录
+    RETRIED = "retried"                        # 命中 failed 记录，已抢到锁，原地重试
+    DUPLICATE_READY = "duplicate_ready"        # 同一份内容已入库
+    DUPLICATE_PROCESSING = "duplicate_processing"  # 同一份内容正在处理（含别人刚抢到重试锁）
+
+
+# ============================================================
+# 写路径：上传入口的幂等判定（重复上传 / 失败重传）
+# ============================================================
+def compute_content_hash(data: bytes) -> str:
+    """
+    算内容指纹：sha256(原始文件字节) 的小写十六进制串（64 位）。
+
+    为什么算**原始字节**、不算解析后的文本 —— 三个理由，前两个是硬伤：
+
+    ① 解析会失败。坏 PDF / 加密 PDF / 扫描件在解析这一步就抛异常，
+       那时根本拿不到文本，算不出指纹 → 这条 failed 记录永远无法被"重传"识别出来，
+       每试一次就在库里多留一具尸体。而在解析**之前**算字节指纹，
+       坏文件一样有身份，第二次数得出来是同一份。
+    ② 解析器的输出不稳定。改一次 DOCX 表格解析（块 3 就要改）、
+       升一次 pypdf，同一份文件就会算出不同文本 → 指纹漂移 → 去重莫名失效。
+    ③ 反方向的陷阱：现在 DOCX 表格是丢的，两份"只有表格不同"的文档
+       解析文本完全相同 → 若按文本算指纹，第二份会被**误判为重复而拒收**。
+       漏判只是多存一份，误判是用户文件根本进不来。
+
+    代价：同一内容用 Word 重新导出（字节变、文字没变）会被当成两份。
+    这个代价可以接受 —— 重新导出通常意味着改过内容，本来就该作为新版本入库；
+    而"拖两次 / 双击上传 / 刷新重传"这些真正要防的场景，字节是完全一致的。
+    """
+    return hashlib.sha256(data).hexdigest()
+
+
+async def begin_upload(filename: str, file_type: str, content_hash: str) -> tuple[Document, str]:
+    """
+    上传入口的状态裁决：新建 / 复用重试 / 拒绝重复，三种结果一次定完。
+
+    返回 (文档对象, UploadOutcome.*)。路由层按 outcome 决定 202 还是 409。
+
+    端到端（一次请求）：
+
+        BEGIN
+          SELECT * FROM documents WHERE content_hash = :h
+            ├─ 无 ──→ INSERT (status=processing)
+            │           ├─ 成功 ────────────────→ CREATED
+            │           └─ IntegrityError（并发插入输了）
+            │                 → ROLLBACK → 重新 SELECT → 走下面的"有"分支
+            └─ 有 ──→ 按状态分派
+                        ready      → DUPLICATE_READY（拒收）
+                        processing → DUPLICATE_PROCESSING（拒收）
+                        failed     → CAS 抢锁
+                                       ├─ 影响 1 行 → RETRIED
+                                       └─ 影响 0 行 → 别人先抢了 → DUPLICATE_PROCESSING
+        COMMIT
+
+    为什么最后仍然要捕 IntegrityError：
+    上面那条 SELECT 与 INSERT 之间有一个时间窗，两个并发请求可以同时查到"无"。
+    唯一索引是唯一能在数据库层关掉这个窗口的东西 —— 见 Document.__table_args__。
+    """
+    async with async_session_factory() as session:
+        existing = await _find_by_hash(session, content_hash)
+
+        if existing is None:
+            document = Document(filename=filename, file_type=file_type, content_hash=content_hash)
+            session.add(document)
+            try:
+                await session.commit()
+            except IntegrityError:
+                # 并发插入：另一个请求先提交了同一 hash。回滚后按"已有记录"重新裁决。
+                await session.rollback()
+                existing = await _find_by_hash(session, content_hash)
+                if existing is None:
+                    # 冲突了却查不到 —— 不是并发问题（可能是别的约束冲突），
+                    # 不能假装成功，原样抛出让请求以 500 结束。
+                    raise
+            else:
+                logger.info("新建文档 filename=%s hash=%s", filename, content_hash[:12])
+                return document, UploadOutcome.CREATED
+
+        return await _decide_existing(session, existing, filename)
+
+
+async def _decide_existing(session, document: Document, filename: str) -> tuple[Document, str]:
+    """
+    已有同指纹记录时的裁决（只处理"非新建"这一支）。
+
+    为什么要单独抽出来：新建路径的 IntegrityError 分支也要复用它 ——
+    "并发插入输了"和"一开始就查到"在语义上是同一件事，不该有两份实现。
+    """
+    if document.status == DocumentStatus.READY:
+        return document, UploadOutcome.DUPLICATE_READY
+    if document.status == DocumentStatus.PROCESSING:
+        return document, UploadOutcome.DUPLICATE_PROCESSING
+
+    # failed：这就是"用户重新上传一次" = 原地重试
+    if await _claim_failed_for_retry(session, document, filename):
+        logger.info("复用失败记录并重试 id=%s filename=%s", document.id, filename)
+        return document, UploadOutcome.RETRIED
+
+    # CAS 影响 0 行：另一个请求在毫秒级的时间差里先抢到了这把锁
+    await session.refresh(document)
+    if document.status == DocumentStatus.READY:
+        return document, UploadOutcome.DUPLICATE_READY
+    return document, UploadOutcome.DUPLICATE_PROCESSING
+
+
+async def _claim_failed_for_retry(session, document: Document, filename: str) -> bool:
+    """
+    把一条 failed 记录"抢"成 processing，返回是否抢到（CAS，compare-and-swap）。
+
+        UPDATE documents
+           SET status='processing', error_message=NULL, chunk_count=0, filename=:n
+         WHERE id = :id AND status = 'failed'
+
+    ★ 为什么 WHERE 里必须带 `status='failed'`：
+    这条 SQL 是**单语句**，PostgreSQL 执行时对目标行加行锁。两个并发请求里，
+    第二条会被阻塞到第一条提交，然后在 READ COMMITTED 下**重新检查 WHERE** ——
+    此时状态已是 processing，条件不成立 → 影响 0 行。
+    **影响行数就是这把锁的返回值**：1=抢到，0=别人先抢了。
+
+    若写成 `WHERE id = :id`（不带状态）：两条 UPDATE 都会"成功"（各自影响 1 行），
+    于是两个后台任务并行跑同一份文档 —— 切片各写一套、chunk_index 从 0 开始重叠、
+    embedding 白算一遍，而**全程不报错**，只在检索时表现为重复片段挤掉别的文档。
+
+    顺带清空 error_message / chunk_count：不清的话前端会一直显示上一次的失败原因。
+    旧切片的删除是防御性的 —— 失败时同一个事务已经回滚过，理论上不存在残留。
+    """
+    result = await session.execute(
+        update(Document)
+        .where(Document.id == document.id, Document.status == DocumentStatus.FAILED)
+        .values(
+            status=DocumentStatus.PROCESSING,
+            error_message=None,
+            chunk_count=0,
+            filename=filename,
+            updated_at=func.now(),
+        )
+    )
+    if (result.rowcount or 0) == 0:
+        await session.rollback()
+        return False
+
+    await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document.id))
+    await session.commit()
+    await session.refresh(document)
+    return True
+
+
+async def _find_by_hash(session, content_hash: str) -> Document | None:
+    """按内容指纹查已有文档（走唯一索引，O(log n)）。"""
+    stmt = select(Document).where(Document.content_hash == content_hash)
+    return (await session.scalars(stmt)).first()
+
+
+async def find_by_hash(content_hash: str) -> Document | None:
+    """`_find_by_hash` 的公开版本（测试 / 排障脚本用）。"""
+    async with async_session_factory() as session:
+        return await _find_by_hash(session, content_hash)
+
+
 # ============================================================
 # 写路径：入库
 # ============================================================
-async def create_document(filename: str, file_type: str) -> uuid.UUID:
+async def create_document(filename: str, file_type: str, content_hash: str | None = None) -> uuid.UUID:
+
     """
     建一条 processing 记录并立刻提交，返回文档 ID。
 
     先落库再干活（而不是干完活再落库）的原因：
     文档 ID 要在**响应里就返回**给用户，后续的状态查询都靠它。
+
+    content_hash 可空：种子/验证脚本走 `ingest_texts()` 时手里只有文本、
+    没有"原始文件字节"，算不出合法的字节指纹。它们传 None（= 不参与去重），
+    而不是拿文本临时凑一个 —— 两套口径的指纹混在一列里，比不去重更危险。
     """
     async with async_session_factory() as session:
-        document = Document(filename=filename, file_type=file_type)
+        document = Document(filename=filename, file_type=file_type, content_hash=content_hash)
         session.add(document)
         await session.commit()
         # expire_on_commit=False（见 core/db.py），所以 commit 后 id 依然可读

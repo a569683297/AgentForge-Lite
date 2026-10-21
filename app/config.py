@@ -159,6 +159,40 @@ class Settings(BaseSettings):
     # 与界面上那个数字账号名不是一回事（用错会得到 403 account identifier mismatch）。
     harness_api_key: str = ""
 
+    # ---- 工具沙箱（用户上传 MCP Server）----
+    # 总开关，**默认关**。理由：这是唯一一条"让外部代码在本机执行"的能力，
+    # 不该是装好就有的默认项；而且它依赖 docker socket 与一个单独构建的镜像，
+    # 环境不满足时打开只会得到一堆启动失败。compose 里显式置 true。
+    tool_sandbox_enabled: bool = False
+
+    # 沙箱基础镜像（由 `make sandbox` 构建，见 sandbox/Dockerfile）。
+    # api 启动时会先 inspect 它存不存在，缺了直接报"请先 make sandbox" ——
+    # 否则首次 `docker run` 会去 pull，表现为几分钟没有任何输出。
+    tool_sandbox_image: str = "agentforge-tool-sandbox:local"
+
+    # 资源上限（cgroup 配额）。三个值各挡一类事故，缺一不可：
+    #   memory → 内存耗尽（防把宿主拖进 swap 死循环）
+    #   cpus   → CPU 时间配额（不是"最多半个核"，是每 100ms 周期最多用 50ms）
+    #   pids   → 进程/线程总数（防 fork 炸弹把 PID 表耗尽）
+    # 原理详见 docs/工具沙箱-隔离原理与自测答案-2026-10-20.md。
+    tool_sandbox_memory: str = "256m"
+    tool_sandbox_cpus: str = "0.5"
+    tool_sandbox_pids_limit: int = 64
+
+    # 工具代码存放目录。**两种运行形态下不是同一个路径**，别当成一个值看：
+    #   - api 在容器里（compose）：/app/tool_code，挂的是命名卷 tool_code
+    #   - api 在本机（uvicorn 开发）：data/tool_servers，挂的是宿主机绝对路径
+    # 判断依据是 /.dockerenv 是否存在（见 app/mcp/sandbox.py），不是靠猜。
+    tool_code_dir: str = "data/tool_servers"
+
+    # 命名卷名。只有"api 在容器里"这条分支会用到。
+    # ⚠ 必须与 docker-compose.yml 里 `volumes.tool_code.name` **完全一致**：
+    #   compose 默认会加项目前缀（`agentforge-lite_tool_code`），而 api 容器内
+    #   执行的是 `docker run -v <这个名字>` —— 名字对不上时 docker 会静默新建一个
+    #   **空卷**挂进去，症状是"容器起得来但握手立刻断"，极难联想到卷名。
+    #   所以 compose 里固定了 name，这里也用同一个字面量。
+    tool_code_volume: str = "agentforge_tool_code"
+
     # ---- 密钥屏蔽（D34 安全层）----
     def __repr_args__(self):
         """

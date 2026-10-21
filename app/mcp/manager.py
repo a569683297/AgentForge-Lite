@@ -17,6 +17,7 @@ MCP 连接管理器（D27）
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -45,6 +46,8 @@ class MCPManager:
     def __init__(self) -> None:
         self._clients: dict[str, MCPClient] = {}
         self._status: dict[str, dict] = {}
+        # 用户上传的 server 需要一个「长驻任务」托住它的异步上下文，见 add_server_held。
+        self._holders: dict[str, dict] = {}
 
     # ---------------- 启动 ----------------
     async def start(self, specs: list[MCPServerSpec]) -> dict[str, dict]:
@@ -73,6 +76,13 @@ class MCPManager:
             # Redis 自检"只告警不崩溃"的口径）。但**不能静默** ——
             # 状态里留 reason，`/api/tools` 一眼能看到是哪台、为什么没上来。
             detail = _explain_connect_failure(spec, e)
+            # ★ 把**已经注册了一半**的工具摘掉（用户上传功能新增的兜底）。
+            #   为什么需要：`discover_and_register` 是逐条 register 的 ——
+            #   第 1 个工具注册成功、第 2 个撞名抛 ValueError 时，注册表里
+            #   会留下第 1 个。它在 /api/tools 里看起来完全正常，但调用必然失败
+            #   （连接已经被我们关掉了）。这正是 D27 最想避免的"骗 LLM 的假工具"，
+            #   只不过这次是半截状态，不是整批。
+            removed = unregister_source(spec.name)
             self._status[spec.name] = {
                 "name": spec.name,
                 "connected": False,
@@ -80,6 +90,11 @@ class MCPManager:
                 "error": detail,
                 "stderr_log": str(client.stderr_path) if client.stderr_path else None,
             }
+            if removed:
+                logger.warning(
+                    "MCP server「%s」接入失败，已回滚已注册的 %d 个工具：%s",
+                    spec.name, len(removed), removed,
+                )
             logger.warning("MCP server「%s」接入失败：%s", spec.name, detail)
             await client.close()
             return self._status[spec.name]
@@ -106,7 +121,44 @@ class MCPManager:
 
     # ---------------- 断开 ----------------
     async def remove_server(self, name: str) -> list[str]:
-        """断开一台 server，并**把它的工具从注册表摘掉**。返回被摘掉的名字。"""
+        """
+        断开一台 server，并**把它的工具从注册表摘掉**。返回被摘掉的名字。
+
+        两种形态分开处理：
+          · 静态 server（lifespan 起的，如 inventory）：直接拆，因为它的上下文
+            就建在 lifespan 那个任务里，我们从这里调 close() 会不会踩 cancel scope？
+            不会 —— lifespan 的进入/退出都在同一个任务，close 只是关管道。
+          · 用户上传的 server（`add_server_held` 起的）：**必须让托住它的那个任务
+            自己退出**，否则会撞 anyio 的
+            `RuntimeError: Attempted to exit a cancel scope that isn't the current task's`
+            （2026-10-20 实测踩到）。所以这里只发"停止信号"，然后等它收尾。
+        """
+        holder = self._holders.pop(name, None)
+        if holder is None:
+            return await self._teardown(name)
+
+        holder["stop"].set()
+        try:
+            await asyncio.wait_for(asyncio.shield(holder["task"]), timeout=10)
+        except (TimeoutError, asyncio.TimeoutError):
+            # 10 秒还没收完：强制取消。容器随 stdin 关闭自行退出，
+            # 真留下尸体也有启动时的 sweep_orphans 兜底。
+            holder["task"].cancel()
+            logger.warning("MCP server「%s」停止超时，已强制取消", name)
+        except Exception as e:  # noqa: BLE001 —— 收尾异常不该打断调用方
+            logger.warning("MCP server「%s」停止时出现异常：%s", name, e)
+
+        # 正常情况下 runner 的 finally 已经拆干净；这里再调一次是幂等的兜底。
+        return holder.get("removed") or await self._teardown(name)
+
+    async def _teardown(self, name: str) -> list[str]:
+        """
+        真正拆连接（可重复调用）。
+
+        单独抽出来的理由：它会在**两个不同的任务**里被调到 ——
+        runner 任务的 finally，和 remove_server 的兜底。幂等是硬要求：
+        第二次调用时 client 已经被 pop 掉了，只剩摘工具这一步是空的。
+        """
         client = self._clients.pop(name, None)
         removed = unregister_source(name)
         if client is not None:
@@ -120,6 +172,58 @@ class MCPManager:
         """应用关闭时统一回收（逆序，先接的后断）。"""
         for name in reversed(list(self._clients.keys())):
             await self.remove_server(name)
+
+    # ---------------- 运行期热插拔（用户上传）----------------
+    async def add_server_held(self, spec: MCPServerSpec) -> dict:
+        """
+        在**一个独立的长驻任务**里接入 server，并等它就绪。
+
+        为什么不能直接 `await add_server(spec)`（这是本次最隐蔽的一个坑）：
+          `MCPClient.connect` 会 `enter_async_context(Client(...))`，而 MCP SDK
+          内部用的是 **anyio 的任务组 + 取消作用域**。anyio 有一条硬规则 ——
+          **取消作用域必须由进入它的那个任务退出**。
+          在 HTTP 请求里直接接入时，进入的是"这个请求的任务"：
+          请求一结束，任务被取消 → 传输被拆 → 下一次调用报
+          `MCPError: Connection closed`（容器其实还活着，管道没了）。
+          更糟的是收尾时还会抛
+          `RuntimeError: Attempted to exit a cancel scope that isn't the current task's`。
+
+          D27 的静态 server 没这个问题，因为它们在 **lifespan** 里接入 ——
+          lifespan 是一个活到进程结束的任务。所以这里照抄那个性质：
+          把接入放进一个只为它而存在的任务，让"进入"和"退出"发生在同一个任务里。
+
+        返回状态字典（与 `add_server` 同形状）。
+        """
+        # 已存在就先拆（重连语义）：必须等旧任务真正收完才能复用同一个名字
+        if spec.name in self._clients or spec.name in self._holders:
+            await self.remove_server(spec.name)
+
+        loop = asyncio.get_running_loop()
+        holder: dict = {
+            "ready": loop.create_future(),
+            "stop": asyncio.Event(),
+            "removed": [],
+        }
+
+        async def _runner() -> None:
+            try:
+                status = await self.add_server(spec)
+            except BaseException as e:  # noqa: BLE001 —— 包括 CancelledError，交给等待方
+                if not holder["ready"].done():
+                    holder["ready"].set_exception(e)
+                return
+            if not holder["ready"].done():
+                holder["ready"].set_result(status)
+            try:
+                await holder["stop"].wait()      # ← 挂在这里托住上下文
+            finally:
+                # 与"进入"同一个任务，所以这里退出是合法的
+                holder["removed"] = await self._teardown(spec.name)
+
+        task = asyncio.create_task(_runner(), name=f"mcp-hold-{spec.name}")
+        holder["task"] = task
+        self._holders[spec.name] = holder
+        return await holder["ready"]
 
     # ---------------- 查询 ----------------
     def status(self) -> list[dict]:

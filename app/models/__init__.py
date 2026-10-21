@@ -18,6 +18,9 @@ PRD §10 有 DDL，但实测库里同样**从未存在** —— 与 D21 是同�
 （"文档认为已有、实际从未实现"），这是第二次。少导它，明细就无处落库，
 而验收点"明细表有行"会以"表不存在"的形式直接报错。
 
+工具上传：新增 ToolServer（tool_servers 表，用户上传的 MCP Server）。
+少导它，create_all 不会建表，`/api/tool-servers` 会直接 500。
+
 模型切换 S1：新增 LlmModel（llm_models 表，自定义模型注册表）。
 只存"用户自己添加的"模型；内置模型由 .env 驱动、不入库（见 models/llm_model.py）。
 少导它，create_all 不会建表，`/api/models` 会直接 500。
@@ -39,6 +42,7 @@ from app.models.eval import (
     EvalRun,
 )
 from app.models.llm_model import LlmModel
+from app.models.tool_server import TOOL_SERVER_STATUSES, ToolServer
 from app.models.message import Message
 from app.models.session import Session
 
@@ -52,6 +56,8 @@ __all__ = [
     "EvalRun",
     "EvalCaseResult",
     "LlmModel",
+    "ToolServer",
+    "TOOL_SERVER_STATUSES",
     "EVAL_CATEGORIES",
     "DIFFICULTIES",
     "CATEGORY_DOC_QA",

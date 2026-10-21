@@ -18,9 +18,15 @@ FastAPI 应用入口
    - GET    http://localhost:8000/api/eval/cases/{case_key}         （单条详情，D21）
    - GET    http://localhost:8000/api/eval/dataset                  （评测集指纹，D21）
    - GET    http://localhost:8000/api/tools                         （工具清单+来源，D27）
+   - GET    http://localhost:8000/api/tool-servers                  （用户上传的工具，管理视角）
+   - POST   http://localhost:8000/api/tool-servers                  （上传 MCP Server .py，202）
+   - POST   http://localhost:8000/api/tool-servers/{id}/call        （试跑其一个工具）
+   - POST   http://localhost:8000/api/tool-servers/{id}/reconnect   （重连）
    - GET/POST/PATCH/DELETE http://localhost:8000/api/models         （模型注册表，模型切换 S1）
    - GET    http://localhost:8000/api/metrics                       （指标清单，语义层）
    - POST   http://localhost:8000/api/metrics/query                 （指标查询，语义层）
+   - GET    http://localhost:8000/api/traces                        （真实 trace 列表）
+   - GET    http://localhost:8000/api/traces/{trace_id}             （真实 span 树）
    - 交互式文档 http://localhost:8000/docs
 """
 
@@ -35,8 +41,11 @@ from app.api.eval import router as eval_router
 from app.api.health import router as health_router
 from app.api.metrics import router as metrics_router
 from app.api.models import router as models_router
+from app.api.retriever import router as retriever_router
 from app.api.sessions import router as sessions_router
+from app.api.tool_servers import router as tool_servers_router
 from app.api.tools import router as tools_router
+from app.api.traces import router as traces_router
 from app.config import settings
 from app.core.logging import logger
 
@@ -68,6 +77,28 @@ async def lifespan(app: FastAPI):
         ok = [name for name, s in status.items() if s["connected"]]
         bad = [name for name, s in status.items() if not s["connected"]]
         logger.info("MCP 接入完成 成功=%s 失败=%s", ok or "无", bad or "无")
+
+    # ---- 工具沙箱（用户上传的 MCP Server）----
+    # 三件事，顺序不能换：先清扫尸体 → 再校验镜像 → 最后按库恢复。
+    # 清扫必须在前：上一次崩溃留下的容器占着名字，恢复时会撞名失败。
+    if settings.tool_sandbox_enabled:
+        import asyncio
+
+        from app.mcp import sandbox
+        from app.services import tool_server_service
+
+        try:
+            await asyncio.to_thread(sandbox.sweep_orphans)
+        except Exception as e:  # noqa: BLE001 —— 清扫失败不该阻止启动
+            logger.warning("清理残留沙箱容器失败（忽略）：%s", e)
+
+        # 恢复失败只告警：一台用户工具起不来，不能拖死整个 API。
+        # （与上面 MCP 接入同一条原则，只是换到用户维度。）
+        try:
+            restored = await tool_server_service.restore_active()
+            logger.info("工具 server 恢复结果 %s", restored)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("工具 server 恢复失败（忽略）：%s", e)
 
     yield
 
@@ -131,8 +162,11 @@ app.include_router(documents_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")   # D14 新增
 app.include_router(eval_router, prefix="/api")       # D21 新增
 app.include_router(tools_router, prefix="/api")      # D27 新增（含动态发现的 MCP 工具）
+app.include_router(tool_servers_router, prefix="/api")  # 用户上传的 MCP Server（管理面）
 app.include_router(models_router, prefix="/api")     # 模型切换 S1 新增（模型注册表）
 app.include_router(metrics_router, prefix="/api")    # 语义层新增（指标清单 + 查询）
+app.include_router(traces_router, prefix="/api")     # Trace 页真实数据（Langfuse v2 观测）
+app.include_router(retriever_router, prefix="/api")  # 检索检查器（候选池 + 重排 + gold 判定）
 
 
 if __name__ == "__main__":

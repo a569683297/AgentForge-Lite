@@ -67,10 +67,13 @@
 .traceRow { min-height: 30px; padding: 0 12px; border-bottom: 1px solid var(--af-border-subtle); font-size: 11px; }
 .traceRow:last-child { border-bottom: 0; }
 .traceRowError { border-left: 2px solid var(--af-danger); }
+/* 降级（如重排超时）用黄色，与红色错误分开 —— 前者是"这次没精排"，后者是"这次失败了" */
+.traceRowWarning { border-left: 2px solid var(--af-warning); }
 .spanName { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .spanIndent { width: 2px; height: 18px; margin-right: 3px; background: var(--af-border-default); }
 .spanBar { position: absolute; top: 5px; height: 10px; border-radius: 2px; background: var(--af-accent); cursor: help; }
 .spanBarError { background: var(--af-danger); }
+.spanBarWarning { background: var(--af-warning); }
 .spanDuration { text-align: right; }
 .rankGrid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
 .rankColumn { overflow: hidden; border: 1px solid var(--af-border-default); border-radius: 6px; background: var(--af-surface); }
@@ -135,3 +138,52 @@
 .latencyBar span { display: block; height: 100%; background: var(--af-accent); opacity: .75; }
 .latencyValue { text-align: right; }
 .latencyCount { color: var(--af-text-tertiary); text-align: right; }
+
+/* ── 检索检查器（2026-10-20 接真实数据）────────────────────────
+   行的列数从 4 增到 5：多了"名次变化"那一格。
+   没有它，"被挤到第 12 名"和"没进前 5"在视觉上是同一件事。 */
+.retrieverRow { display: grid; grid-template-columns: 24px minmax(0, 1fr) 58px 46px 12px; align-items: center; gap: 8px; min-height: 32px; padding: 0 10px; border-bottom: 1px solid var(--af-border-subtle); border-left: 2px solid transparent; font-size: 11px; cursor: pointer; }
+.retrieverRow:last-child { border-bottom: 0; }
+.retrieverRow:hover { background: var(--af-sunken); }
+/* gold 命中用左边框，**不用整行染色**：整行一染，行里的分数和名次就看不清了 */
+.retrieverRowGold { border-left-color: var(--af-success); }
+.retrieverRowActive { background: var(--af-sunken); }
+.retrieverRowOut { opacity: .45; }
+.retrieverRank { color: var(--af-text-tertiary); text-align: right; font-variant-numeric: tabular-nums; }
+.retrieverDoc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.retrieverDelta { text-align: right; font-variant-numeric: tabular-nums; }
+.retrieverUp { color: var(--af-success); }
+.retrieverDown { color: var(--af-danger); }
+.retrieverFlat { color: var(--af-text-tertiary); }
+.retrieverSplit { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--af-border-subtle); color: var(--af-text-tertiary); font-size: 11px; }
+.retrieverExcerpt { margin-top: 12px; }
+.retrieverExcerptHead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--af-text-secondary); font-size: 12px; }
+.retrieverExcerptBody { max-height: 200px; overflow: auto; padding: 12px; border: 1px solid var(--af-border-subtle); border-radius: 6px; background: var(--af-sunken); font-family: var(--af-font-mono); font-size: 11px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+.retrieverFormula { margin-top: 8px; color: var(--af-text-tertiary); font-size: 11px; }
+.retrieverRight { margin-left: auto; }
+
+/* ── Trace 页（2026-10-20：从"一个下拉 + 一张图"改为按提问展示）──────
+   左列每次提问一行（提问原文 + 时间 + 耗时），右列是选中那次的瀑布图。
+   为什么不是"点一条替换整页"：在几次提问之间来回比对是调优时的常态，
+   整页替换会让人每次都要重新定位——左列保持不动，右列才换。 */
+.traceLayout { display: grid; grid-template-columns: 336px minmax(0, 1fr); gap: 16px; align-items: start; }
+.traceListPanel { overflow: hidden; border: 1px solid var(--af-border-default); border-radius: 6px; background: var(--af-surface); }
+.traceListHead { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; border-bottom: 1px solid var(--af-border-subtle); color: var(--af-text-tertiary); font-size: 10px; }
+.traceList { max-height: 580px; overflow: auto; }
+/* 用 button 而不是 div：键盘可达与焦点样式都要（这一列是页面的主交互入口） */
+.traceItem { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid var(--af-border-subtle); border-left: 2px solid transparent; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.traceItem:hover { background: var(--af-sunken); }
+.traceItem:focus-visible { outline: 1px solid var(--af-accent); outline-offset: -1px; }
+.traceItemActive { border-left-color: var(--af-accent); background: var(--af-sunken); }
+.traceItemTop { display: flex; align-items: center; gap: 8px; color: var(--af-text-tertiary); font-size: 10px; }
+.traceItemClock { font-family: var(--af-font-mono); }
+.traceItemMeta { margin-left: auto; font-variant-numeric: tabular-nums; }
+.traceItemQuestion { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 12px; line-height: 17px; }
+/* 「未记录提问」用斜体灰字：它不是错误，是"这条 trace 早于关联记录"的如实状态 */
+.traceItemQuestionMissing { color: var(--af-text-tertiary); font-style: italic; }
+.traceDetailPanel { min-width: 0; }
+.traceQuestion { margin: 0 0 10px; padding: 9px 12px; border-left: 2px solid var(--af-accent); background: var(--af-sunken); font-size: 13px; line-height: 20px; white-space: pre-wrap; word-break: break-word; }
+.traceDetailMeta { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; color: var(--af-text-tertiary); font-size: 11px; }
+/* 右栏变窄后 220px 的名字列会把时间轴压到 ~200px，读不出段与段的关系 */
+.traceLayout .traceAxis, .traceLayout .traceRow { grid-template-columns: 168px 1fr 62px; }
+

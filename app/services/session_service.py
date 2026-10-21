@@ -88,6 +88,7 @@ async def append_messages(
     messages: list[dict],
     *,
     title_hint: str | None = None,
+    trace_id: str | None = None,
 ) -> int:
     """
     把本轮产生的消息全量落库，并刷新会话的 updated_at。
@@ -104,6 +105,11 @@ async def append_messages(
         messages: [{"role": "user"|"assistant"|"tool", "content": str,
                     "tool_calls": list|None}, ...]
                   content 允许为空串（带 tool_calls 的 assistant 消息就没有正文）
+        trace_id: 本轮运行的 Langfuse trace id。**只写到 user 消息上** ——
+                  一次提问 = 一条 trace = 一条 user 消息；assistant/tool 是同一轮的
+                  后续消息，重复挂会让 "按 trace_id 查提问" 一次查出三四行，
+                  上层还得再按 role 去重一次（见 Message.trace_id 的注释）。
+                  评测模式（persist=False）不会调到这里，所以评测 trace 永远没有提问原文。
     Returns:
         实际写入的消息条数
     """
@@ -118,6 +124,8 @@ async def append_messages(
             # 所以这里用空串兜底，而不是让它变成 None 撞约束
             content=(m.get("content") or ""),
             tool_calls=m.get("tool_calls"),
+            # 只有 user 行带 trace_id（见上）
+            trace_id=trace_id if (m.get("role") == "user") else None,
         )
         for m in messages
     ]

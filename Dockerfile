@@ -28,17 +28,31 @@ WORKDIR /app
 # uv 从官方镜像里**只拷二进制**（比 pip install uv 快、且不引入 pip 的依赖树）
 COPY --from=ghcr.io/astral-sh/uv:0.12.4 /uv /uvx /usr/local/bin/
 
+# ---------- docker CLI（工具沙箱，增量 0）----------
+# 用户上传的 MCP Server 要跑在**同级兄弟容器**里，所以 api 需要能执行 `docker run`。
+# ★ 只拷**客户端二进制**，不装 dockerd：真正干活的是宿主机上的 daemon，
+#   我们通过 /var/run/docker.sock 连它（compose 里挂进来）。
+#   这个二进制是静态编译的 Go 程序，在 slim 镜像里直接能跑，不拉依赖树。
+# ⚠ 不拷它的症状：`docker run` 以 FileNotFoundError 失败，而这条报错出现在
+#   "用户上传工具"的链路上，极难联想到是基础镜像缺了个可执行文件。
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+
 # ---------- 2. 先装依赖（★ 顺序是刻意的）----------
 # Docker 的层缓存规则：某一层的**输入没变**，就直接复用上次结果。
 # 所以这里**只拷依赖清单**先装依赖 ——
 #   之后改多少 .py 文件都不会触发重装依赖（否则每次 build 都要等 3 分钟）。
 COPY pyproject.toml uv.lock ./
-# ★ PyPI 走清华镜像（UV_DEFAULT_INDEX）—— 2026-10-15 部署上线补：
-#   国内服务器直连 pypi.org 慢（构建依赖阶段可能卡十分钟以上），
-#   换清华源后该阶段通常 1~3 分钟（实测源可达、onnxruntime/langgraph 等关键包齐全）。
-#   该变量只作用于这一条 RUN（不进镜像运行时环境）；本机构建同样受益。
-#   如需回退官方源：删掉 `UV_DEFAULT_INDEX=... ` 前缀即可。
-RUN UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --frozen
+# ★ PyPI 加速（2026-10-16 部署实测修订版）：
+#   血泪实测：uv.lock 里 1846 处 wheel 下载 URL 是**绝对地址**（files.pythonhosted.org），
+#   `uv sync --frozen` 会忠实按这些 URL 下载 —— 只设 UV_DEFAULT_INDEX 没用
+#   （实测 12 秒内 100 个请求全打 pythonhosted、零个到清华源；国内直连 pythonhosted
+#   仅 ~50-90KB/s，装依赖要 40 分钟+）。
+#   解法：先把锁文件里的包 URL 前缀替换为**清华镜像同路径地址**再 sync
+#   （两站路径结构一致、文件字节相同，sha256 校验与哈希完全兼容；清华侧 HTTP 206 实测通过）。
+#   该改动只作用于这一条 RUN（不进镜像运行时环境）；本机与服务器构建同样受益。
+#   如需回退官方源：删掉 sed 前缀与 `UV_DEFAULT_INDEX=... ` 即可。
+RUN sed -i 's|https://files.pythonhosted.org/packages/|https://pypi.tuna.tsinghua.edu.cn/packages/|g' uv.lock && \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --frozen
 
 # ---------- 3. 再拷代码 ----------
 # 这三份都是运行时真的用到的：

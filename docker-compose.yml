@@ -86,6 +86,13 @@ services:
       #   Harness 相关（scripts/warmup_mcp.py、@pytest.mark.external 用例）在**宿主机**跑。
       MCP_HARNESS_ENABLED: "false"
 
+      # ---- 工具沙箱（用户上传 MCP Server）----
+      # 打开后 api 会用 docker CLI 起同级兄弟容器来跑用户上传的工具。
+      # 依赖两样东西：镜像是 `make sandbox` 构建的，socket 在下面 volumes 里挂着。
+      TOOL_SANDBOX_ENABLED: "true"
+      # 容器内代码目录 = 下面命名卷挂进来的位置（dev 形态默认是 data/tool_servers）
+      TOOL_CODE_DIR: /app/tool_code
+
     ports:
       - "18000:8000"          # 宿主 18000 → 容器 8000（避本机 uvicorn dev 占用的 8000）
 
@@ -97,6 +104,29 @@ services:
       #   （app/services/embedding_service.py:37）。
       #   ⚠ 别和 `app/models/`（ORM 包，容器内是 /app/app/models）搞混 —— 是两回事。
       - ./models:/app/models
+
+      # ★ 示例素材挂进容器（2026-10-15 部署上线补）：
+      #   scripts/seed_demo_data.py 读的是**相对路径** data/sample_docs，
+      #   容器 WORKDIR=/app → 实际找 /app/data/sample_docs。
+      #   不挂的话容器内跑 seed 会直接报「素材缺失」（已实测复现）。
+      #   挂上之后，播种可在容器内完成（服务器宿主机无需装 uv）：
+      #     docker compose exec api uv run --no-sync python -m scripts.seed_demo_data --api http://localhost:8000
+      - ./data:/app/data
+
+      # ---- 工具沙箱 ----
+      # ① docker 控制接口：api 容器内要能 `docker run`，于是"用户上传的工具"
+      #    跑在同级兄弟容器里，而不是 api 进程内。
+      #    ⚠ 安全取舍（已登记，不是疏漏）：能跟这个 socket 说话的进程 = 宿主 root 权限。
+      #      它隔离的是"用户上传的工具代码"，隔离不了"api 自身被攻破"。
+      #      要彻底解耦需要拆独立 runner 服务（P2-b），当前版本不做。
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # ② 工具代码卷：**必须用命名卷，不能用 ./data 那种 bind mount**。
+      #    原因：`docker run -v` 的左边由**宿主 daemon** 解析，不是 api 容器里的路径。
+      #    api 在容器里时，`/app/data/tool_servers` 这个路径在宿主上并不存在 →
+      #    沙箱起来看到的是空目录，报错却是 "ModuleNotFoundError: No module named …"，
+      #    看起来像用户代码写错了。命名卷由 docker 管理、两边按名字挂，绕开这段路径映射。
+      - tool_code:/app/tool_code
 
     depends_on:
       db:
@@ -143,3 +173,16 @@ services:
 
 volumes:
   pgdata:
+  # 用户上传的工具代码（api 写、沙箱只读挂）。走命名卷而不是 bind mount 的理由
+  # 见上面 api 服务的 volumes 注释 —— 这是本项目最容易踩的一处路径映射。
+  #
+  # ★ `name:` 是**必须写**的（2026-10-20 实测踩到）：
+  #   compose 默认会给卷加项目前缀（本项目 name=agentforge-lite），
+  #   于是宿主上真实卷名是 `agentforge-lite_tool_code`。
+  #   而 api 容器内执行的是 `docker run -v tool_code:/tool` —— 这个名字在宿主上
+  #   不存在，docker 会**静默新建一个空卷**挂进去。
+  #   症状：容器起得来、握手立刻断（"MCPError: Connection closed"），
+  #   因为 /tool/<uuid>/server.py 根本不在那个卷里。
+  #   固定 name 之后，容器内写的卷名与宿主卷名是同一个。
+  tool_code:
+    name: agentforge_tool_code

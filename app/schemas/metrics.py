@@ -60,3 +60,47 @@ class MetricsQueryOut(BaseModel):
     rows: list[dict[str, Any]]
     degraded: bool = False
     error: str | None = None
+
+
+class MetricsOverviewItem(BaseModel):
+    """批量查询里的一项：一个指标 + 它的分组维度（与单指标查询同参数）。"""
+
+    metric: str = Field(min_length=1, max_length=64, description="指标名（见 GET /api/metrics）")
+    dimension: str | None = Field(
+        default=None, max_length=64, description="分组维度（须命中该指标白名单）；聚合指标不传"
+    )
+
+
+class MetricsOverviewIn(BaseModel):
+    """
+    批量查询请求（D37 补充 / 2026-10-19）。
+
+    为什么要有这个端点：分析页原来并发发 6 个 `/metrics/query`，其中两个
+    Langfuse 指标各拉 3 页 = 6 次 HTTP，而 Langfuse v1 observations 端点
+    只给 5 次/分钟 —— 必然 429，两个指标双双降级成「暂不可用」。
+    合成一个请求后，两个 Langfuse 指标能在**服务端**靠单飞合并成一次取数（3 页）。
+
+    `items` 为什么由调用方给、而不是后端写死六项：
+    "分析页要显示哪几张卡"是 UI 决策，不是数据口径；写死在后端会让改版必须动后端。
+    后端只负责"批量执行 + 合并取数"，口径仍然全部来自 metrics.yaml。
+    """
+
+    start_date: str = Field(description="起始日期 YYYY-MM-DD（北京时间自然日，含当日）")
+    end_date: str = Field(description="结束日期 YYYY-MM-DD（北京时间自然日，含当日）")
+    items: list[MetricsOverviewItem] = Field(
+        min_length=1, max_length=20, description="要查询的指标列表（metric 不可重复）"
+    )
+
+
+class MetricsOverviewOut(BaseModel):
+    """
+    批量查询结果：`results` 按**指标名**索引，前端直接 `results['token_cost']` 取。
+
+    为什么用 dict 而不是 list：list 会让每个消费者自己按 metric 字段匹配一遍
+    （写错名字就是静默 undefined）；dict 取不到就是 undefined，同样的问题但更早暴露，
+    而且调用方代码短得多。metric 名因此必须唯一 —— API 层会拒绝重复项。
+    """
+
+    start_date: str
+    end_date: str
+    results: dict[str, MetricsQueryOut]

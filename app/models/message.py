@@ -56,6 +56,23 @@ class Message(Base):
         nullable=True,
         comment="工具调用记录（JSONB 数组），非工具消息为 SQL NULL",
     )
+    trace_id: Mapped[str | None] = mapped_column(
+        # 32 = Langfuse/OTEL 的 trace id 宽度（十六进制，实测 738cbe936fb6de9afa6404654f251289）。
+        #
+        # 为什么业务表要存一个观测系统的 id —— 因为这是「Trace 页按提问展示」的唯一凭证：
+        #   · Langfuse v2 observations **不返回 input**（实测键集里根本没有这个字段），
+        #     所以"这次提问问了什么"只能从自己库里取；
+        #   · v1 的 /api/public/traces 带 input，但 2026-11-16 下线，且一次只能查一条。
+        # 把 id 落在 user 消息上，Trace 页一次 SQL 就能批量补出提问原文，零额外配额。
+        #
+        # ⚠ **只有 role=user 的行有值**：一次提问 = 一条 trace = 一条 user 消息。
+        #   assistant/tool 是同一轮的后续消息，重复挂同一个 id 会让 JOIN 出多行，
+        #   把"一次提问"变成"三条记录"，去重逻辑又要多一层。
+        String(32),
+        nullable=True,
+        index=True,
+        comment="产生这条消息的那次运行的 Langfuse trace id（仅 role=user 有）",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

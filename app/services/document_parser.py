@@ -3,6 +3,10 @@
 =========================================
 支持 4 种格式：pdf / docx / md / txt
 
+docx 取的是**正文顺序上的全部块**（段落 + 表格），表格每行渲染成 `单元格 | 单元格`。
+不用 `document.paragraphs` 的原因：它只返回正文直接段落，表格在另一棵树上，
+用它等于把"以表格为主的文档"解析成空文档 —— 状态还是 ready，检索却永远查不到。
+
 为什么中间要有「段落」（ParsedSegment）这一层，而不是直接返回一整段字符串：
   切片时需要知道「这段文字来自原文件的哪里」，检索命中后才能告诉用户出处。
   PDF 有天然的页边界 → 每页一个段落，带 page_ref="p.3"
@@ -21,6 +25,9 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from docx import Document as DocxDocument
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from pypdf import PdfReader
 
 # ---- 上传限制（在路由层做便宜校验，不解析内容）----
@@ -92,11 +99,95 @@ def _parse_pdf(data: bytes) -> list[ParsedSegment]:
     return segments
 
 
+def _iter_docx_blocks(container, parent):
+    """
+    按**文档顺序**逐块产出 Paragraph / Table。
+
+    为什么要自己走 XML，而不是 `document.paragraphs`：
+    后者只返回**正文直接段落**。表格里的段落在
+    `table.rows[].cells[].paragraphs` 这棵完全不同的树上，
+    于是"以表格为主的文档"（报销标准、权限矩阵、价格表）会被解析成
+    一段没有表格内容的文本 —— 文档照样 ready、切片数照样正常，
+    但**检索永远查不到表格里的字**，而且全程没有任何报错。
+
+    三种子节点要认：
+      w:p    普通段落
+      w:tbl  表格
+      w:sdt  内容控件（一层壳，正文包在 w:sdtContent 里）。
+             企业模板的"填写区域"常用它，不钻进去又是一处静默丢内容。
+    """
+    for child in container.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, parent)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, parent)
+        elif child.tag == qn("w:sdt"):
+            content = child.find(qn("w:sdtContent"))
+            if content is not None:
+                yield from _iter_docx_blocks(content, parent)
+
+
+def _table_lines(table: Table) -> list[str]:
+    """
+    表格 → 每行一条 `单元格 | 单元格` 的文本。
+
+    三个必须处理的细节：
+    ① **合并单元格**：`row.cells` 会把同一个格子重复返回 N 次（横向合并了几列就几次），
+       不去重就会入库成「住宿 | 住宿 | 每晚 600 元」这种重复噪声。
+       按底层 `tc` 元素的身份去重（python-docx 对合并格子返回的是同一个 tc）。
+    ② **空行**：整行都没文字就跳过，否则切片里会堆出一排 ` | `。
+    ③ **单元格里还有段落 / 嵌套表格**：段落用空格连，嵌套表格递归展开成行、用分号连。
+       单元格不是"一个字符串"，它自己也是一棵块级树。
+    """
+    lines: list[str] = []
+    for row in table.rows:
+        cells: list[str] = []
+        seen: set[int] = set()
+        for cell in row.cells:
+            key = id(cell._tc)
+            if key in seen:                       # 合并单元格：同一个 tc 被重复返回
+                continue
+            seen.add(key)
+            cells.append(_cell_text(cell))
+        if any(cells):
+            lines.append(" | ".join(cells))
+    return lines
+
+
+def _cell_text(cell) -> str:
+    """单元格内的文字：段落用空格连，嵌套表格递归成行再用分号连。"""
+    parts: list[str] = []
+    for block in _iter_docx_blocks(cell._tc, cell):
+        if isinstance(block, Paragraph):
+            text = block.text.strip()
+            if text:
+                parts.append(text)
+        else:
+            nested = _table_lines(block)
+            if nested:
+                parts.append("；".join(nested))
+    return " ".join(parts)
+
+
 def _parse_docx(data: bytes) -> list[ParsedSegment]:
-    """DOCX 取所有非空段落，拼成一段文本（docx 没有页的概念）。"""
+    """
+    DOCX 按文档顺序取正文段落 + 表格，拼成一段文本（docx 没有页的概念）。
+
+    顺序很重要：「一、标准如下表」→ 表格 → 「以上自 2026 年 1 月起执行」
+    拼错顺序，模型会把结论和它对应的表格对不上号。
+    """
     document = DocxDocument(io.BytesIO(data))
-    lines = [p.text.strip() for p in document.paragraphs]
-    text = "\n".join(line for line in lines if line)     # 过滤空行，避免切片里全是换行
+    lines: list[str] = []
+
+    for block in _iter_docx_blocks(document.element.body, document):
+        if isinstance(block, Paragraph):
+            text = block.text.strip()
+            if text:
+                lines.append(text)
+        else:
+            lines.extend(_table_lines(block))
+
+    text = "\n".join(lines)          # 过滤空行，避免切片里全是换行
     return [ParsedSegment(text=text)] if text else []
 
 

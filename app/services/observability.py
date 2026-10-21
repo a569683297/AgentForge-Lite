@@ -67,6 +67,14 @@ SPAN_EMBEDDING = "embedding"     # 问题 → 向量
 SPAN_VECTOR = "vector_search"    # pgvector 相似度检索
 SPAN_BM25 = "bm25"               # 关键词（倒排 + BM25 自算）
 SPAN_RERANK = "rerank"           # cross-encoder 精排
+# 检索检查器（RetrieverPage）手工发起的那次检索。
+#
+# 为什么需要一个**新的**父 span 而不是复用 SPAN_RETRIEVAL：
+#   · 复用会让手工检索和真实对话的检索在 Langfuse 上同名，统计 P95 时混在一起 ——
+#     而这个页面天然会被"点很多次调参"，会把真实链路的分位数搅乱；
+#   · 更需要它是父 span 的理由：没有它，`embedding` / `vector_search` / `bm25` / `rerank`
+#     四个子 span 会**各自成为根**，一次手工检索在 Trace 页上裂成 4 条互不相干的记录。
+SPAN_INSPECT = "retriever_inspect"
 
 
 def tool_span_name(tool_name: str) -> str:

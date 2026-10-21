@@ -40,7 +40,13 @@ from app.schemas.chat import ChatResult, MetricResultItem, SourceItem
 from app.services.llm_gateway import chat_with_tools, chat_with_tools_stream
 
 # D28：观测层唯一出口（span 命名规范、根 span、trace 级属性都从这里取）
-from app.services.observability import SPAN_ROOT, span, tool_span_name, trace_attrs
+from app.services.observability import (
+    SPAN_ROOT,
+    current_trace_id,
+    span,
+    tool_span_name,
+    trace_attrs,
+)
 from app.tools import execute_tool, get_tools_schema  # 注册表：工具能力集中管理
 from app.tools.registry import get_tool_source
 
@@ -397,6 +403,12 @@ async def run_agent(
     #     will NOT be retroactively updated"。实测把根 span 建在它之前时，
     #     根 span 的 session/user 是 None 而子 span 有值 ——
     #     那种"看起来设了、其实只设了一半"的状态最难查。
+    # 本轮 trace id：**只能在 span 内部取** —— `current_trace_id()` 读的是当前
+    # 上下文里的活动 span，出了 with 就没了。但落库排在 span 之后（写回是副作用，
+    # 不占"用户等待"的延迟），所以先存到局部变量带出去。
+    # 埋点 SDK 未配置（no-op）时这里是 None → messages.trace_id 写 NULL →
+    # Trace 页如实显示"该次提问早于 trace 记录"，不报错、也不编造。
+    trace_id: str | None = None
     with trace_attrs(session_id=session_id, trace_name=SPAN_ROOT):
         with span(
             SPAN_ROOT,
@@ -404,6 +416,8 @@ async def run_agent(
             input={"user_input": user_input},
             metadata={"persist": persist},
         ) as root_span:
+            trace_id = current_trace_id()
+
             # ③ 跑图（recursion_limit 见文件顶部常量说明）
             result = await get_agent().ainvoke(
                 state, config={"recursion_limit": RECURSION_LIMIT}
@@ -475,7 +489,10 @@ async def run_agent(
 
         # ⑧ 写回 PG 全量（D14 新增）：含中间的 assistant(tool_calls) 与 tool 消息。
         try:
-            await append_messages(session_id, new_messages, title_hint=user_input)
+            # trace_id 只落到本轮那条 user 消息上 —— Trace 页靠它反查"这次提问问了什么"
+            await append_messages(
+                session_id, new_messages, title_hint=user_input, trace_id=trace_id
+            )
         except Exception:
             # 落库失败不阻断对话：用户已经等到回答了，此时抛 500 只会让这一轮白跑，
             # 而且历史仍在 Redis 里（下一轮上下文不丢）。但必须留下 ERROR 日志 ——
@@ -578,6 +595,8 @@ async def run_agent_stream(
     }
 
     stream_token = _STREAMING.set(True)
+    # 同 run_agent：trace id 只能在 span 内取，落库在 span 之后用（见那里的说明）
+    trace_id: str | None = None
     try:
         # ③~⑥.5 与 run_agent 同一段：用户等待的全部，包进一条 trace（写回不在此范围内）
         with trace_attrs(session_id=session_id, trace_name=SPAN_ROOT):
@@ -587,6 +606,8 @@ async def run_agent_stream(
                 input={"user_input": user_input},
                 metadata={"persist": persist, "stream": True},
             ) as root_span:
+                trace_id = current_trace_id()
+
                 # ③ 流式跑图：custom 事件逐条产出；values 快照保留最后一个（= 最终状态）
                 #    （双模式实测形状：`(mode, chunk)` 元组；values 覆盖全图每个超步）
                 final_state: AgentState | None = None
@@ -652,7 +673,9 @@ async def run_agent_stream(
         await append_turn(session_id, user_input, final_answer)
 
         try:
-            await append_messages(session_id, new_messages, title_hint=user_input)
+            await append_messages(
+                session_id, new_messages, title_hint=user_input, trace_id=trace_id
+            )
         except Exception:
             logger.exception("PG 落库失败（流式结果仍已返回）session=%s", session_id)
 
