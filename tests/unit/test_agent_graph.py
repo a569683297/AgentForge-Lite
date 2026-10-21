@@ -64,3 +64,31 @@ def test_system_prompt_with_summary_is_longer_and_contains_it():
 def test_empty_summary_is_treated_as_no_summary():
     """空串不该产生一个"有摘要但摘要为空"的段落（那个段落对 LLM 只是噪声）。"""
     assert build_system_prompt("") == build_system_prompt(None)
+
+
+# ---- 用户画像注入（2026-10-21）----
+# 这三条守的是"画像到底有没有进 prompt、进在什么位置"。
+# 位置是有讲究的：人设 → 画像 → 摘要（稳定背景在临时上下文之前）。
+
+
+def test_profile_block_is_injected():
+    prompt = build_system_prompt(None, "【用户档案】\n- 称呼：老郭")
+    assert "称呼：老郭" in prompt
+
+
+def test_profile_comes_before_summary():
+    """
+    画像必须排在摘要**之前**。
+
+    画像是"你是谁"（跨会话稳定），摘要是"刚才聊了什么"（本会话临时）。
+    顺序反了，模型更容易用一段临时上下文盖掉长期设定 ——
+    这种漂移不会报错，只会让画像时灵时不灵。
+    """
+    prompt = build_system_prompt("更早的对话摘要", "【用户档案】\n- 称呼：老郭")
+    assert prompt.index("称呼：老郭") < prompt.index("更早的对话摘要")
+
+
+def test_empty_profile_adds_nothing():
+    """没有画像时，prompt 与"只有摘要"的形状完全一致（不能多出一个空段）。"""
+    assert build_system_prompt("摘要", "") == build_system_prompt("摘要")
+    assert build_system_prompt("摘要", None) == build_system_prompt("摘要")

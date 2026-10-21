@@ -205,6 +205,16 @@ class EvalRun(Base):
     __tablename__ = "eval_runs"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment=(
+            "触发这次运行的账号（审计用）。"
+            "评测是**平台级**能力，接口层只对 admin 开放，所以这一列不参与查询过滤 ——"
+            "它的作用是「这份报告是谁跑的」，而不是「谁能看」。"
+        ),
+    )
     config_name: Mapped[str] = mapped_column(
         String(32),
         index=True,

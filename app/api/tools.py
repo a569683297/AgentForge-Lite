@@ -18,6 +18,7 @@ GET /api/tools —— 列出**全部**已注册工具，标明各自来自哪里
 
 from fastapi import APIRouter
 
+from app.deps import CurrentUser
 from app.mcp.manager import get_manager
 from app.tools.registry import describe_tools
 
@@ -25,7 +26,7 @@ router = APIRouter(tags=["tools"])
 
 
 @router.get("/tools")
-async def list_tools() -> dict:
+async def list_tools(user: CurrentUser) -> dict:
     """
     返回：
     {

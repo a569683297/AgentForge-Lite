@@ -53,15 +53,17 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.core.logging import logger
+from app.deps import CurrentUser
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.agent_service import run_agent, run_agent_stream
 from app.services.llm_gateway import ModelResolutionError
+from app.services.session_service import SessionOwnershipError, ensure_session
 
 router = APIRouter(tags=["chat"])
 
 
 @router.post("/chat", response_model=ChatResponse, summary="与 Agent 对话（非流式）")
-async def chat(req: ChatRequest) -> ChatResponse:
+async def chat(req: ChatRequest, user: CurrentUser) -> ChatResponse:
     """
     跑一次完整的 Agent 循环：读记忆 → ReAct（必要时检索知识库）→ 写记忆 → 返回。
 
@@ -76,6 +78,16 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # 只在响应边界转成字符串，保证「一个会话 = 一个 Redis key = 一行 sessions 记录」。
     session_id = req.session_id or uuid.uuid4()
 
+    # ⓪ 会话归属校验（多租户的第一道闸）。
+    #    必须在跑图**之前**：跑图会写记忆、写 messages、调用检索（带 owner 过滤），
+    #    一旦让它跑起来，"这次请求属于谁"就已经被写进别人的会话了。
+    #    session 不存在 → 顺手建一条（归属当前用户）；存在但属于别人 → 404。
+    try:
+        await ensure_session(session_id, title_hint=req.message, owner_id=user.id)
+    except SessionOwnershipError as exc:
+        # 404 而不是 403：不告诉调用者"这个 id 确实存在"（见 SessionOwnershipError）
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
     logger.info(
         "对话请求 session=%s 输入长度=%d 模型=%s",
         session_id,
@@ -84,7 +96,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
     )
 
     try:
-        result = await run_agent(session_id, req.message, model_id=req.model_id)
+        result = await run_agent(
+            session_id, req.message, model_id=req.model_id, owner_id=user.id
+        )
     except ModelResolutionError as e:
         # 模型解析失败 = 用户输入问题（选了不存在 / 被禁用的模型）→ 422（需求 §5 约定），
         # 让前端能像处理"message 为空"一样统一处理；服务端不背 500 的锅。
@@ -134,7 +148,7 @@ def _sse_frame(event: dict) -> str:
 
 
 @router.post("/chat/stream", summary="与 Agent 对话（SSE 流式）")
-async def chat_stream(req: ChatRequest) -> StreamingResponse:
+async def chat_stream(req: ChatRequest, user: CurrentUser) -> StreamingResponse:
     """
     流式版对话接口：与 /api/chat 同一条服务链路，差别只在"边跑边发"。
 
@@ -158,6 +172,15 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
          fetch + ReadableStream 手写帧解析——协议层仍是标准 SSE。
     """
     session_id = req.session_id or uuid.uuid4()
+
+    # ⓪ 归属校验必须在**开流之前**（这里），不能在生成器里 ——
+    #    开流之后 HTTP 状态码已经是 200，越权只能表现为 error 帧，
+    #    而"会话不存在"本该是一个干净的 404。
+    try:
+        await ensure_session(session_id, title_hint=req.message, owner_id=user.id)
+    except SessionOwnershipError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
     logger.info(
         "流式对话请求 session=%s 输入长度=%d 模型=%s",
         session_id,
@@ -170,7 +193,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         yield _sse_frame({"type": "meta", "session_id": str(session_id)})
         try:
             async for event in run_agent_stream(
-                session_id, req.message, model_id=req.model_id
+                session_id,
+                req.message,
+                model_id=req.model_id,
+                owner_id=user.id,
             ):
                 yield _sse_frame(event)
         except ModelResolutionError as e:

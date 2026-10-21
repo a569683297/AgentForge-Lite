@@ -198,7 +198,7 @@ async def test_chat_forwards_every_chatresult_field_to_http(api_client, monkeypa
     )
 
     # 签名对齐路由里的调用（S2 新增关键字参数 model_id）
-    async def _fake_run_agent(session_id, message, *, model_id=None):
+    async def _fake_run_agent(session_id, message, *, model_id=None, **kwargs):
         return fake
 
     monkeypatch.setattr(chat_module, "run_agent", _fake_run_agent)
@@ -277,7 +277,7 @@ async def test_chat_stream_forwards_service_events_as_sse_frames(api_client, mon
     from app.schemas.chat import SourceItem
 
     # 签名对齐路由里的调用（S2 新增关键字参数 model_id）
-    async def _fake_stream(session_id, message, *, model_id=None):
+    async def _fake_stream(session_id, message, *, model_id=None, **kwargs):
         yield {"type": "token", "text": "哨兵"}
         yield {"type": "reset"}
         yield {"type": "tool", "name": "SENTINEL_TOOL", "phase": "start"}
@@ -388,7 +388,7 @@ async def test_chat_maps_model_resolution_error_to_422(api_client, monkeypatch):
     from app.api import chat as chat_module
     from app.services.llm_gateway import ModelResolutionError
 
-    async def _fake_run_agent(session_id, message, *, model_id=None):
+    async def _fake_run_agent(session_id, message, *, model_id=None, **kwargs):
         raise ModelResolutionError("所选模型不存在（可能已被删除）：deadbeef")
 
     monkeypatch.setattr(chat_module, "run_agent", _fake_run_agent)
@@ -410,7 +410,7 @@ async def test_chat_stream_maps_model_resolution_error_to_error_frame(api_client
     from app.api import chat as chat_module
     from app.services.llm_gateway import ModelResolutionError
 
-    async def _fake_stream(session_id, message, *, model_id=None):
+    async def _fake_stream(session_id, message, *, model_id=None, **kwargs):
         raise ModelResolutionError("所选模型已被禁用：测试模型")
         yield  # pragma: no cover —— 语法上保住生成器身份；此行永不可达
 
@@ -437,7 +437,7 @@ async def test_chat_passes_model_id_through_to_service(api_client, monkeypatch):
 
     seen: dict = {}
 
-    async def _fake_run_agent(session_id, message, *, model_id=None):
+    async def _fake_run_agent(session_id, message, *, model_id=None, **kwargs):
         seen["model_id"] = model_id
         return ChatResult(answer="ok")
 

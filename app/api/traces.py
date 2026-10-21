@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.logging import logger
+from app.deps import AdminUser
 from app.schemas.trace import TraceDetailResponse, TraceListResponse
 from app.services import trace_service
 from app.services.langfuse_client import LangfuseUnavailableError
@@ -33,6 +34,7 @@ router = APIRouter(tags=["trace"])
     summary="最近的 trace 列表（每行 = 一次提问）",
 )
 async def list_traces_api(
+    admin: AdminUser,
     hours: int = Query(24, ge=1, le=168, description="回看窗口（小时），最大 7 天"),
     limit: int = Query(20, ge=1, le=100, description="最多返回多少条"),
     kind: str | None = Query(
@@ -59,7 +61,7 @@ async def list_traces_api(
     response_model=TraceDetailResponse,
     summary="一条 trace 的 span 树（真实数据）",
 )
-async def get_trace_api(trace_id: str) -> dict:
+async def get_trace_api(trace_id: str, admin: AdminUser) -> dict:
     try:
         return await trace_service.get_trace(trace_id)
     except TraceNotFound as exc:

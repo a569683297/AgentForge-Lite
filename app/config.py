@@ -51,6 +51,11 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset(
         "langfuse_secret_key",
         "harness_api_key",
         "postgres_password",
+        # 账号体系：JWT 签名密钥漏出去 = 任何人都能签一个"我是 admin"的 token；
+        # SMTP 密码漏出去 = 邮箱被拿去发垃圾邮件。两者都属于"看起来只是一行配置"的泄露。
+        "auth_secret_key",
+        "auth_bootstrap_password",
+        "smtp_password",
     }
 )
 
@@ -110,6 +115,39 @@ class Settings(BaseSettings):
     judge_runs_per_case: int = 3       # 每条题重复打分次数（D20 数据支撑的 3 次多数投票）
     judge_max_concurrency: int = 4     # 并发上限：中转站不宜压满，也避免本机 load 失控
     judge_timeout_s: float = 90.0
+
+    # ---- 账号体系（2026-10-21）----
+    # JWT 签名密钥。**生产必须显式配置**；留空时启动生成一个进程内随机值 ——
+    # 那种状态下服务重启即全部 token 失效（开发够用，但绝不能带到部署）。
+    # 为什么不用 RS256 非对称：单体服务、只有一个签发方，HS256 少一套密钥管理，
+    # 而"验签方与签发方是同一个进程"这个前提是成立的。
+    auth_secret_key: str = ""
+    auth_access_ttl_min: int = 120          # access token 2 小时
+    auth_refresh_ttl_days: int = 7          # refresh token 7 天
+    auth_reset_ttl_min: int = 30            # 找回密码令牌 30 分钟
+    # 密码强度下限（长度）。不做复杂度硬规则：强制大小写符号只会逼出 "Passw0rd!" 这类，
+    # 长度才是真正有效的维度（且校验规则越简单越不会挡住合法用户）。
+    auth_min_password_len: int = 8
+
+    # 引导管理员：迁移脚本用它创建第一个账号，并把所有存量数据划到它名下。
+    # 密码留空时脚本会**生成随机密码并只打印一次**（而不是设一个默认弱密码）。
+    auth_bootstrap_email: str = "admin@agentforge.local"
+    auth_bootstrap_password: str = ""
+
+    # 找回密码的邮件通道。**默认什么都不配** = 不发邮件，把重置链接写进日志
+    # 并在接口响应里返回 dev_link（仅 app_env=dev 时）。这样本地能走通全流程，
+    # 又不会让人误以为"邮件已经发出去了"。
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "noreply@agentforge.local"
+    smtp_starttls: bool = True
+
+    # 前端地址（拼找回密码邮件里的绝对链接用）。
+    # 为什么必须可配而不是写死 localhost：邮件是在**收件人的浏览器**里点开的，
+    # 写死 localhost 在他的机器上指向的是他自己的电脑 —— 链接必然打不开。
+    frontend_base_url: str = "http://localhost:8080"
 
     # ---- 基础设施 ----
     postgres_host: str = "localhost"

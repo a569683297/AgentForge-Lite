@@ -15,12 +15,17 @@ D12 拆表背景：
 
   级联交给**数据库**做（ON DELETE CASCADE），不在 ORM 里配 relationship：
   删文档 = 一条 DELETE，PostgreSQL 自己把切片带走，不会留孤儿数据。
+
+账号体系（2026-10-21）：新增 `owner_id`，并且**去重指纹的唯一性范围收窄到人**。
+  原来 `uq_documents_content_hash` 是**全库唯一** —— 那意味着 B 用户上传一份
+  A 已经传过的文件，会被判为"重复文档"直接复用 A 的行：B 拿到 A 的文档 id、
+  A 的切片、A 的引用。多租户下这条约束必须变成 `(owner_id, content_hash)`。
 """
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, String, Text, Uuid, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -51,10 +56,14 @@ class Document(Base):
     # 双击 / 双标签页 / 网关重试 / 多 worker 都会从那个窗口钻进来。
     # 唯一索引让数据库来判：第二个 INSERT 抛 IntegrityError，物理上不可能重复。
     #
+    # ⚠ 范围是 **(owner_id, content_hash)**，不是 content_hash 单列 ——
+    #   两个人各传一份同样的员工手册，是两份互不相干的文档。
+    #   迁移脚本负责把旧的全局唯一索引删掉（`uq_documents_content_hash`）。
+    #
     # ⚠ PostgreSQL 的唯一索引允许多个 NULL，所以历史数据（没有 hash）之间不会互相冲突。
     #   代价是它们不参与去重 —— 原始文件从没存过，hash 补不出来，这一点绕不过去。
     __table_args__ = (
-        Index("uq_documents_content_hash", "content_hash", unique=True),
+        Index("uq_documents_owner_hash", "owner_id", "content_hash", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -62,6 +71,15 @@ class Document(Base):
         primary_key=True,
         default=uuid.uuid4,
         comment="文档ID（UUID，不可枚举——自增ID会泄露文档总数、也方便被遍历猜测）",
+    )
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        # 用 SQLAlchemy 2.0 的通用 `Uuid`（本文件 id 列也是它），不引 PG 方言类型：
+        # 两者在 PostgreSQL 上都落成 uuid，而 `Uuid` 不绑方言，测试换库时不用改模型。
+        Uuid,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+        comment="归属用户；检索时按它过滤，缺了它别人能命中你的文档",
     )
     filename: Mapped[str] = mapped_column(
         String(255),

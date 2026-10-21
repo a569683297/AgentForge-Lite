@@ -1,4 +1,4 @@
-import { client } from './client';
+import { authedFetch, client } from './client';
 import { drainSseFrames } from '../lib/sse';
 import type { ChatResponse, ChatStreamEvent } from '../types/api';
 
@@ -24,6 +24,11 @@ export async function sendMessage(message: string, sessionId?: string, modelId?:
  *   - **开流前**的错误走 HTTP 状态码（如 422 校验失败）→ 这里 throw；
  *   - **开流后**后端已发 200，错误只能以 `error` 事件送达 → 由 onEvent 回调转交
  *     （调用方必须监听，不能只看 HTTP 状态码）。
+ *
+ * ⚠ 必须用 `authedFetch` 而不是裸 `fetch`（修过的 bug，2026-10-21 实测暴露）：
+ *   fetch **不经过 axios 拦截器** —— Authorization 头不会自动加、401 也不会自动刷新。
+ *   裸 fetch 的后果是"登录后页面全都正常，唯独发消息 401"，
+ *   而报错文案是"登录状态无效，看起来像登录坏了"，排查方向会被带偏。
  */
 export async function sendMessageStream(
   message: string,
@@ -31,7 +36,7 @@ export async function sendMessageStream(
   onEvent: (event: ChatStreamEvent) => void,
   modelId?: string | null,
 ): Promise<void> {
-  const response = await fetch('/api/chat/stream', {
+  const response = await authedFetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

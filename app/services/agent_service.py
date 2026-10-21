@@ -35,6 +35,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.core.citation import check_citations, get_sources, reset_sources
 from app.core.logging import logger
+from app.core.tenant import owner_scope
 from app.core.metric_results import get_metric_results, reset_metric_results
 from app.schemas.chat import ChatResult, MetricResultItem, SourceItem
 from app.services.llm_gateway import chat_with_tools, chat_with_tools_stream
@@ -83,6 +84,11 @@ class AgentState(TypedDict):
     # NotRequired：其它调用方（历史验证脚本）构造 state 时不传它也不会报错 ——
     # plan_node 用 state.get("summary") 取值，缺了就是"没有更早的记忆"。
     summary: NotRequired[str | None]
+    # 用户画像（2026-10-21）：**跨会话**稳定的事实与偏好，由 run_agent 读好后渲染成文本。
+    # 与 summary 的区别就一句话：summary 是"这个会话刚才聊了什么"，
+    # profile 是"这个人是谁"。前者换会话就没了，后者换会话仍然成立。
+    # NotRequired：评测/验证脚本构造 state 时不传 → 缺省 = 不带画像（零影响）。
+    profile: NotRequired[str | None]
     # S2（模型切换）：本轮选中的模型 id（内置通道名 / 自定义 UUID），由 run_agent 注入。
     # NotRequired：评测/验证脚本构造 state 时不传 → 缺省 = 现有默认链路（零影响）。
     model_id: NotRequired[str | None]
@@ -111,26 +117,34 @@ PLAN_SYSTEM_PROMPT = (
 )
 
 
-def build_system_prompt(summary: str | None = None) -> str:
+def build_system_prompt(summary: str | None = None, profile: str | None = None) -> str:
     """
     拼 plan 节点的 system prompt（D15：PRD §9.4 的「组装顺序」）。
 
-    顺序：人设（PLAN_SYSTEM_PROMPT）在前、**摘要**在后。
+    顺序：**人设 → 用户画像 → 会话摘要**（三段，任一段为空就跳过）。
 
-    摘要为什么放 system，而不是往 messages 里插一条：
+    为什么摘要放 system，而不是往 messages 里插一条：
       ① 插进 messages 会**伪装成一条真实对话轮次** —— LLM 会以为"我说过这句话"，
          干扰它对轮次和引用编号的判断
       ② 会产生**多条 system 消息**，而各家厂商对多 system 的兼容性参差
 
-    摘要为什么放在人设**之后**（而不是最前面）：它是"更早的记忆"，
-    越靠近当前对话的上下文越容易被用上；人设是指令，排最前更稳。
+    为什么三段的相对位置是这个顺序（2026-10-21 加画像时定的）：
+      · 人设排最前：它是指令，在最前面最稳。
+      · **画像排在摘要之前**：画像是"跨会话稳定的背景"（你是谁），
+        摘要是"本会话临时发生过什么"（刚才聊了什么）。先稳定后临时 ——
+        模型按这个顺序读，不会把"我上周说过我是前端"和"刚才聊到一半的话题"混在一起。
+        反过来（摘要在前）实测更容易出现"用一段临时上下文盖掉长期设定"的漂移。
+      · 摘要在最后：它最长，且越靠近当前对话越容易被用上。
+
+    画像为什么**也**放 system 而不是插 messages：与摘要同理，而且画像里没有"轮次"语义，
+    插进去会变成一句莫名其妙的 user 消息，模型可能把它当成本轮的新输入来回答。
     """
-    if not summary:
-        return PLAN_SYSTEM_PROMPT
-    return (
-        f"{PLAN_SYSTEM_PROMPT}\n\n"
-        f"【更早对话的摘要】（本次会话更早期的内容，供参考）\n{summary}"
-    )
+    blocks = [PLAN_SYSTEM_PROMPT]
+    if profile:
+        blocks.append(profile)
+    if summary:
+        blocks.append(f"【更早对话的摘要】（本次会话更早期的内容，供参考）\n{summary}")
+    return "\n\n".join(blocks)
 
 
 async def plan_node(state: AgentState) -> AgentState:
@@ -148,7 +162,14 @@ async def plan_node(state: AgentState) -> AgentState:
         else "agent-plan"
     )
     prompt_messages = (
-        [{"role": "system", "content": build_system_prompt(state.get("summary"))}]
+        [
+            {
+                "role": "system",
+                "content": build_system_prompt(
+                    state.get("summary"), state.get("profile")
+                ),
+            }
+        ]
         + messages
     )
     # S2：本轮选中的模型（None = 默认链路）。锁定/解析逻辑都在网关 ——
@@ -331,6 +352,37 @@ async def run_agent(
     *,
     persist: bool = True,
     model_id: str | None = None,
+    owner_id: uuid.UUID | None = None,
+) -> ChatResult:
+    """
+    带记忆对话的入口（薄包装）。
+
+    多租户（2026-10-21）：**只做一件事** —— 在整段执行期间把"当前用户"
+    放进上下文，让检索链路（由 LLM 触发的工具调用）能读到它。
+    真正的工作在 `_run_agent_impl`，参数逐一透传。
+
+    为什么包装而不是在每个函数上加 owner 参数：
+      检索发生在 `execute_tool → search_documents` 里，而那一跳的调用者是
+      **LLM**（它只会填 query）。用户身份必须是环境信息，不能是参数 ——
+      详见 `app/core/tenant.py` 文件头。
+    """
+    with owner_scope(owner_id):
+        return await _run_agent_impl(
+            session_id,
+            user_input,
+            persist=persist,
+            model_id=model_id,
+            owner_id=owner_id,
+        )
+
+
+async def _run_agent_impl(
+    session_id: uuid.UUID,
+    user_input: str,
+    *,
+    persist: bool = True,
+    model_id: str | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> ChatResult:
     """
     带记忆对话的完整入口：读历史 → 跑 Agent → 双层写回 → 返回回答 + 来源。
@@ -370,6 +422,7 @@ async def run_agent(
         ChatResult：回答文本 + 来源映射表 + 越界引用编号 + 工具调用序列
     """
     from app.services.memory_service import append_turn, get_window, maybe_summarize
+    from app.services.profile_service import render_for_prompt
     from app.services.session_service import append_messages, get_summary
 
     # ⓪ 引用收集器必须在跑图之前重新绑定。
@@ -385,11 +438,19 @@ async def run_agent(
     #     build_system_prompt 会据此跳过这一段，不会多出一条空的"摘要"。
     summary = await get_summary(session_id)
 
-    # ② 组装状态（历史 + 本轮提问；摘要单独走 state.summary 进 system）
+    # ①.6 读用户画像（2026-10-21）。**读在跑图之前、与摘要同一位置** ——
+    #     它要进本轮 system prompt，晚一步就没机会了。
+    #     ⚠ 内部是 fail-open 的（读不到 → None → 不拼这一段），见 profile_service 文件头。
+    #     为什么传 owner_id 而不是 user 对象：画像归属就是 users.id，
+    #     传整个 User 会让"用哪个字段做归属"出现第二个说法。
+    profile_block = await render_for_prompt(owner_id, user_input)
+
+    # ② 组装状态（历史 + 本轮提问；摘要与画像单独走 state 进 system）
     state: AgentState = {
         "messages": history + [{"role": "user", "content": user_input}],
         "step_count": 0,
         "summary": summary,
+        "profile": profile_block,   # None = 这个人没有画像 / 画像读不到
         "model_id": model_id,   # S2：None = 默认链路
     }
 
@@ -491,7 +552,11 @@ async def run_agent(
         try:
             # trace_id 只落到本轮那条 user 消息上 —— Trace 页靠它反查"这次提问问了什么"
             await append_messages(
-                session_id, new_messages, title_hint=user_input, trace_id=trace_id
+                session_id,
+                new_messages,
+                title_hint=user_input,
+                trace_id=trace_id,
+                owner_id=owner_id,
             )
         except Exception:
             # 落库失败不阻断对话：用户已经等到回答了，此时抛 500 只会让这一轮白跑，
@@ -511,6 +576,19 @@ async def run_agent(
             # maybe_summarize 内部已经把 LLM 失败/空输出都收敛成返回值了，
             # 这里兜的是"它自己崩了"（比如 PG 查询异常）—— 一样不该让对话 500。
             logger.exception("摘要压缩检查失败（对话不受影响）session=%s", session_id)
+
+        # ⑧.6 画像抽取（2026-10-21）：与 ⑧.5 并列，但**不 await** —— 它是后台任务。
+        #      为什么摘要同步、画像异步：
+        #        摘要的结果**下一轮立刻要读**（读不到就断记忆），所以本轮必须等它写完；
+        #        画像的结果晚 30 秒生效，用户完全感知不到 —— 没有理由让他等。
+        #      触发条件与冷却都在 maybe_extract 内部判断，这里只管"提交"。
+        try:
+            from app.services.profile_extractor import schedule_extract
+
+            schedule_extract(owner_id, session_id)
+        except Exception:
+            # 连"提交后台任务"都失败（极罕见，如事件循环已关闭）也不该影响对话
+            logger.exception("画像抽取调度失败（对话不受影响）session=%s", session_id)
 
     # ⑨ 返回结构化结果
     logger.info(
@@ -545,6 +623,36 @@ async def run_agent_stream(
     *,
     persist: bool = True,
     model_id: str | None = None,
+    owner_id: uuid.UUID | None = None,
+) -> AsyncIterator[dict]:
+    """
+    流式对话入口（薄包装）。
+
+    ⚠ 租户上下文为什么必须设**在生成器内部**（而不是接口层调它之前）：
+      接口层 `chat_stream` 是"创建生成器 → 立刻 return StreamingResponse"，
+      真正的迭代发生在**函数返回之后**。而 `owner_scope` 用的是 `with`，
+      出了 with 就还原 —— 在接口层设，等于在流开始前就已经失效了，
+      于是流式对话里的检索会以"无归属"跑（= 搜全库，且完全不报错）。
+      写在这里，`with` 覆盖整个 `async for` 的迭代期，上下文才是有效的。
+    """
+    with owner_scope(owner_id):
+        async for event in _run_agent_stream_impl(
+            session_id,
+            user_input,
+            persist=persist,
+            model_id=model_id,
+            owner_id=owner_id,
+        ):
+            yield event
+
+
+async def _run_agent_stream_impl(
+    session_id: uuid.UUID,
+    user_input: str,
+    *,
+    persist: bool = True,
+    model_id: str | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> AsyncIterator[dict]:
     """
     流式版 run_agent：产出**结构化事件流**（服务层只产事件，SSE 编码是接口层的事）。
@@ -573,6 +681,7 @@ async def run_agent_stream(
     一个"屏幕上有答案、历史里读不到"的窗口。
     """
     from app.services.memory_service import append_turn, get_window, maybe_summarize
+    from app.services.profile_service import render_for_prompt
     from app.services.session_service import append_messages, get_summary
 
     # ⓪ 引用收集器重绑（同 run_agent：ContextVar 复制的是绑定不是对象，必须每请求重绑）
@@ -586,11 +695,15 @@ async def run_agent_stream(
     # ①.5 读长期摘要（首次对话时 sessions 行还没建 → None，system 里不拼这一段）
     summary = await get_summary(session_id)
 
-    # ② 组装状态（与 run_agent 相同：历史 + 本轮提问；摘要单独走 state.summary）
+    # ①.6 读用户画像（镜像 run_agent；逐段对应，改一边要回来对照另一边）
+    profile_block = await render_for_prompt(owner_id, user_input)
+
+    # ② 组装状态（与 run_agent 相同：历史 + 本轮提问；摘要与画像单独走 state）
     state: AgentState = {
         "messages": history + [{"role": "user", "content": user_input}],
         "step_count": 0,
         "summary": summary,
+        "profile": profile_block,
         "model_id": model_id,   # S2：None = 默认链路
     }
 
@@ -674,7 +787,11 @@ async def run_agent_stream(
 
         try:
             await append_messages(
-                session_id, new_messages, title_hint=user_input, trace_id=trace_id
+                session_id,
+                new_messages,
+                title_hint=user_input,
+                trace_id=trace_id,
+                owner_id=owner_id,
             )
         except Exception:
             logger.exception("PG 落库失败（流式结果仍已返回）session=%s", session_id)
@@ -683,6 +800,17 @@ async def run_agent_stream(
             await maybe_summarize(session_id)
         except Exception:
             logger.exception("摘要压缩检查失败（对话不受影响）session=%s", session_id)
+
+        # ⑧.6 画像抽取（镜像 run_agent，同样不 await）
+        #      ⚠ 流式出口特别注意：这个调用发生在 done 事件**发出之前**，
+        #      但它只是 `create_task`（微秒级），不会推迟 done 帧 ——
+        #      如果哪天它被改成 await，流式对话的"答完即结束"就会被拖成"答完再等 1~2 秒"。
+        try:
+            from app.services.profile_extractor import schedule_extract
+
+            schedule_extract(owner_id, session_id)
+        except Exception:
+            logger.exception("画像抽取调度失败（对话不受影响）session=%s", session_id)
 
     # ⑨ done 事件（字段与 ChatResponse 对齐；sources 先 model_dump 成可 JSON 的 dict ——
     #    接口层只做 SSE 编帧，不做数据转换）

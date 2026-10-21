@@ -23,6 +23,13 @@ dependencies = [
     "jieba>=0.42.1",
     "mcp>=2.2.0",
     "pyyaml>=6.0",
+    # 账号体系（2026-10-21）
+    # pyjwt 而不是 python-jose：前者纯 Python、无 cryptography 依赖、API 更小；
+    # 我们要的只是 HS256 的签发/校验，不需要 JWE / 多算法协商。
+    "pyjwt>=2.9",
+    # bcrypt 而不是 passlib：passlib 已多年不维护（且 1.7.4 与 bcrypt 4.x 有兼容告警），
+    # 直接用 bcrypt 官方库，API 小到一眼能看懂，也没有"算法选择器"这层多余抽象。
+    "bcrypt>=4.2",
 ]
 
 [dependency-groups]

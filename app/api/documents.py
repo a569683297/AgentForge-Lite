@@ -18,8 +18,10 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Response, UploadFile, status
 
 from app.core.logging import logger
+from app.deps import CurrentUser
 from app.schemas.document import DocumentOut, DocumentPreviewOut
-from app.services import document_service
+from app.models.audit_log import ACTION_DOCUMENT_DELETED
+from app.services import audit_service, document_service
 from app.services.document_parser import check_upload
 
 router = APIRouter(tags=["documents"])
@@ -52,6 +54,7 @@ def _duplicate_detail(outcome: str, document) -> str:
 )
 async def upload_document(
     background: BackgroundTasks,
+    user: CurrentUser,
     file: UploadFile = File(..., description="要入库的文件：pdf / docx / md / txt"),
 ) -> DocumentOut:
     """
@@ -81,7 +84,11 @@ async def upload_document(
 
     content_hash = document_service.compute_content_hash(data)
     document, outcome = await document_service.begin_upload(
-        filename=filename, file_type=file_type, content_hash=content_hash
+        filename=filename,
+        file_type=file_type,
+        content_hash=content_hash,
+        # 归属必须是**当前登录用户**：这份文档以后只有他能检索到、能删
+        owner_id=user.id,
     )
 
     if outcome not in _ACCEPTED_OUTCOMES:
@@ -104,7 +111,9 @@ async def upload_document(
         "收到上传 filename=%s 大小=%dB 文档ID=%s 判定=%s",
         filename, len(data), document.id, outcome,
     )
-    document = await document_service.get_document(document.id)  # 取回 server_default 字段
+    document = await document_service.get_document(
+        document.id, owner_id=user.id
+    )  # 取回 server_default 字段
     if document is None:                                    # 理论上不可能，防御性处理
         raise HTTPException(status_code=500, detail="文档创建失败")
     return DocumentOut.model_validate(document)
@@ -112,18 +121,29 @@ async def upload_document(
 
 @router.get("/documents", response_model=list[DocumentOut], summary="文档列表")
 async def list_documents(
+    user: CurrentUser,
     limit: int = Query(default=50, ge=1, le=200, description="每页条数"),
     offset: int = Query(default=0, ge=0, description="偏移量（分页）"),
 ) -> list[DocumentOut]:
-    """按上传时间倒序列出文档；前端靠它轮询 processing → ready/failed 的变化。"""
-    documents = await document_service.list_documents(limit=limit, offset=offset)
+    """按上传时间倒序列出文档；前端靠它轮询 processing → ready/failed 的变化。
+
+    只返回**自己的**文档（`owner_id=user.id`）—— 这是一个知识库产品最基本的边界。
+    """
+    documents = await document_service.list_documents(
+        limit=limit, offset=offset, owner_id=user.id
+    )
     return [DocumentOut.model_validate(doc) for doc in documents]
 
 
 @router.get("/documents/{document_id}/preview", response_model=DocumentPreviewOut, summary="文档详情与文本预览")
-async def preview_document(document_id: UUID) -> DocumentPreviewOut:
-    """返回文档元数据和已解析切片；不暴露原始文件或任何凭据。"""
-    document, chunks = await document_service.get_document_preview(document_id)
+async def preview_document(document_id: UUID, user: CurrentUser) -> DocumentPreviewOut:
+    """返回文档元数据和已解析切片；不暴露原始文件或任何凭据。
+
+    别人的文档一律按 404 处理（不区分"不存在"与"不是你的"）。
+    """
+    document, chunks = await document_service.get_document_preview(
+        document_id, owner_id=user.id
+    )
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
     return DocumentPreviewOut(
@@ -145,14 +165,22 @@ async def preview_document(document_id: UUID) -> DocumentPreviewOut:
     response_class=Response,
     summary="删除文档（级联删除切片）",
 )
-async def delete_document(document_id: UUID) -> Response:
+async def delete_document(document_id: UUID, user: CurrentUser) -> Response:
     """
     删除一份文档及其全部切片。
 
     路径参数声明成 UUID 而不是 str：格式不对时 FastAPI 直接返回 422，
     不用手写解析和校验，也避免非法字符串被当成主键去查库。
     """
-    deleted = await document_service.delete_document(document_id)
+    deleted = await document_service.delete_document(document_id, owner_id=user.id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+    # 删除是不可逆动作（切片级联没了，原文也没留存），必须留痕
+    await audit_service.record(
+        action=ACTION_DOCUMENT_DELETED,
+        actor_id=user.id,
+        actor_email=user.email,
+        target_type="document",
+        target_id=document_id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

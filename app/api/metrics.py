@@ -27,6 +27,7 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, status
 
+from app.deps import AdminUser
 from app.schemas.metrics import (
     MetricInfo,
     MetricsOverviewIn,
@@ -40,7 +41,7 @@ router = APIRouter(tags=["metrics"])
 
 
 @router.get("/metrics", response_model=list[MetricInfo], summary="可用指标清单（口径目录）")
-async def list_metrics() -> list[MetricInfo]:
+async def list_metrics(admin: AdminUser) -> list[MetricInfo]:
     """
     列出语义层全部指标的口径信息。
 
@@ -56,7 +57,7 @@ async def list_metrics() -> list[MetricInfo]:
     response_model=MetricsQueryOut,
     summary="按指标名 + 维度 + 时间窗查询",
 )
-async def query_metric(body: MetricsQueryIn) -> MetricsQueryOut:
+async def query_metric(body: MetricsQueryIn, admin: AdminUser) -> MetricsQueryOut:
     """
     执行一次指标查询。
 
@@ -80,7 +81,7 @@ async def query_metric(body: MetricsQueryIn) -> MetricsQueryOut:
     response_model=MetricsOverviewOut,
     summary="批量查询（分析页一次取全部指标）",
 )
-async def query_metrics_overview(body: MetricsOverviewIn) -> MetricsOverviewOut:
+async def query_metrics_overview(body: MetricsOverviewIn, admin: AdminUser) -> MetricsOverviewOut:
     """
     批量执行多个指标查询，结果按指标名索引返回。
 

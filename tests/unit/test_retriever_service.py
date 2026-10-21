@@ -71,7 +71,7 @@ def _patch(
 ) -> None:
     """把三条外部依赖全换成假实现：检索、重排、文档映射 + gold。"""
 
-    async def fake_hybrid(query: str, top_k: int) -> list[dict]:
+    async def fake_hybrid(query: str, top_k: int, **kwargs) -> list[dict]:
         return hits[:top_k]
 
     async def fake_rerank(

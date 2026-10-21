@@ -17,16 +17,20 @@
 //   - 链接可分享（把 /eval 发给别人，对方打开就是评测页）
 //   - 刷新子路径不 404 —— nginx 的 SPA 兜底（try_files ... /index.html）已就位
 
-export type PageKey = 'chat' | 'knowledge' | 'eval' | 'tools' | 'trace' | 'retriever';
+export type PageKey = 'chat' | 'knowledge' | 'profile' | 'eval' | 'tools' | 'trace' | 'retriever' | 'admin';
 
 /** 页面 → URL 路径（侧栏导航用它跳转） */
 export const PAGE_PATHS: Record<PageKey, string> = {
   chat: '/chat',
   knowledge: '/knowledge',
+  // 我的画像（2026-10-21）：所有登录用户可见，紧挨着对话台 ——
+  // 它直接影响对话效果，放在"设置类"页面附近会让人找不到
+  profile: '/profile',
   eval: '/eval',
   tools: '/tools',
   trace: '/trace',
   retriever: '/retriever',
+  admin: '/admin',
 };
 
 /**

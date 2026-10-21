@@ -27,6 +27,20 @@ FastAPI 应用入口
    - POST   http://localhost:8000/api/metrics/query                 （指标查询，语义层）
    - GET    http://localhost:8000/api/traces                        （真实 trace 列表）
    - GET    http://localhost:8000/api/traces/{trace_id}             （真实 span 树）
+   - POST   http://localhost:8000/api/auth/register                 （注册，2026-10-21）
+   - POST   http://localhost:8000/api/auth/login                    （登录）
+   - POST   http://localhost:8000/api/auth/refresh                  （刷新令牌，轮换）
+   - POST   http://localhost:8000/api/auth/logout                   （登出）
+   - GET    http://localhost:8000/api/auth/me                       （当前用户）
+   - POST   http://localhost:8000/api/auth/change-password          （改密）
+   - POST   http://localhost:8000/api/auth/forgot-password           （申请重置链接）
+   - POST   http://localhost:8000/api/auth/reset-password           （用令牌重置）
+   - GET    http://localhost:8000/api/admin/users                   （用户列表，管理员）
+   - PATCH  http://localhost:8000/api/admin/users/{id}              （禁用/改角色，管理员）
+   - GET    http://localhost:8000/api/admin/audit                   （审计日志，管理员）
+   - GET    http://localhost:8000/api/profile                       （我的画像，2026-10-21）
+   - PATCH  http://localhost:8000/api/profile                       （改显式字段：没传=保持，空串=删除）
+   - DELETE http://localhost:8000/api/profile/facts/{id}            （删一条自动提取的事实）
    - 交互式文档 http://localhost:8000/docs
 """
 
@@ -35,12 +49,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.admin import router as admin_router
+from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.eval import router as eval_router
 from app.api.health import router as health_router
 from app.api.metrics import router as metrics_router
 from app.api.models import router as models_router
+from app.api.profile import router as profile_router
 from app.api.retriever import router as retriever_router
 from app.api.sessions import router as sessions_router
 from app.api.tool_servers import router as tool_servers_router
@@ -54,6 +71,13 @@ from app.core.logging import logger
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时执行一次，关闭时清理。"""
     logger.info("AgentForge 启动中 env=%s", settings.app_env)
+
+    # 账号体系自检：签名密钥没配就明确警告一次。
+    # 它不会让服务起不来（开发期要能跑），但"重启后全员掉登录"这种事
+    # 必须在启动日志里就看得见 —— 否则它会在部署后变成一个离奇的故障。
+    from app.core.security import warn_if_insecure
+
+    warn_if_insecure()
 
     # Redis 启动自检：连不上只告警不崩溃（开发期容忍，D24 部署期可改为硬失败）
     from app.core.redis import ping as redis_ping
@@ -157,6 +181,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 # ---- 路由注册 ----
 app.include_router(health_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")     # 账号体系（注册/登录/刷新/找回）
+app.include_router(admin_router, prefix="/api")    # 管理员（用户管理 + 审计日志）
 app.include_router(chat_router, prefix="/api")
 app.include_router(documents_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")   # D14 新增
@@ -167,6 +193,7 @@ app.include_router(models_router, prefix="/api")     # 模型切换 S1 新增（
 app.include_router(metrics_router, prefix="/api")    # 语义层新增（指标清单 + 查询）
 app.include_router(traces_router, prefix="/api")     # Trace 页真实数据（Langfuse v2 观测）
 app.include_router(retriever_router, prefix="/api")  # 检索检查器（候选池 + 重排 + gold 判定）
+app.include_router(profile_router, prefix="/api")    # 用户画像（跨会话记忆，2026-10-21）
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, String, func, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,6 +40,16 @@ class LlmModel(Base):
         primary_key=True,
         default=_uuid,
         comment="模型 ID（对话请求 model_id 的取值之一）",
+    )
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+        comment=(
+            "归属用户。**必须过滤**：这一行里有 api_key 的明文，"
+            "列表不过滤等于把别人配的 key 拿去用（虽然打了码，但『能用』就是越权）"
+        ),
     )
     name: Mapped[str] = mapped_column(
         String(255),

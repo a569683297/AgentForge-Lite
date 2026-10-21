@@ -307,6 +307,7 @@ async def create(
     description: str,
     filename: str,
     content: bytes,
+    owner_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """
     上传一台工具 server：校验 → 落盘 → 入库 → 拉起。
@@ -353,6 +354,9 @@ async def create(
     row = ToolServer(
         id=tool_id,
         name=normalized,
+        # 只作审计：见 ToolServer.owner_id 的注释 —— 工具是管理员能力，
+        # 因为 ToolRegistry 是**进程级**的，LLM 看到的是全局工具表
+        owner_id=owner_id,
         display_name=(display_name or "").strip() or normalized,
         description=(description or "").strip(),
         entry_file=entry_file,

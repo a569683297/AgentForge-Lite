@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import time
 
 from sqlalchemy import select
@@ -126,6 +128,8 @@ async def search_debug(
     top_k: int = DEFAULT_TOP_K,
     config: str | None = None,
     case_key: str | None = None,
+    *,
+    owner_id: uuid.UUID | None = None,
 ) -> dict:
     """
     跑一次完整检索，并返回"过程 + 结果 + 判定"三部分。
@@ -170,7 +174,7 @@ async def search_debug(
 
         # ---------- ① 候选池 ----------
         if name == "pure_vector":
-            candidates = await search(query, top_k=CANDIDATE_K)
+            candidates = await search(query, top_k=CANDIDATE_K, owner_id=owner_id)
             effective = "pure_vector"
             score_kind = "similarity"
             # 没有融合、也没有重排：最终名次就是相似度名次
@@ -182,7 +186,9 @@ async def search_debug(
 
         else:
             t0 = time.perf_counter()
-            candidates = await hybrid_search(query, top_k=CANDIDATE_K)
+            candidates = await hybrid_search(
+                query, top_k=CANDIDATE_K, owner_id=owner_id
+            )
             retrieve_ms = (time.perf_counter() - t0) * 1000
             effective = "hybrid"
             score_kind = "rrf_score"

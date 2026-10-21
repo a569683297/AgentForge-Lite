@@ -24,6 +24,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Response, status
 
+from app.deps import CurrentUser
 from app.schemas.model import (
     LlmModelCreate,
     LlmModelOut,
@@ -38,9 +39,12 @@ router = APIRouter(tags=["models"])
 
 
 @router.get("/models", response_model=ModelListResponse, summary="模型列表（内置 + 自定义）")
-async def list_models_api() -> dict:
-    """返回 `{"models": [...]}`；每项含 kind（builtin/local/custom）与打码后的 key。"""
-    return {"models": await model_service.list_models()}
+async def list_models_api(user: CurrentUser) -> dict:
+    """返回 `{"models": [...]}`；每项含 kind（builtin/local/custom）与打码后的 key。
+
+    只含**自己的**自定义模型 —— 别人的端点（及其 key）不该出现在你的下拉框里。
+    """
+    return {"models": await model_service.list_models(owner_id=user.id)}
 
 
 @router.post(
@@ -49,17 +53,19 @@ async def list_models_api() -> dict:
     status_code=status.HTTP_201_CREATED,
     summary="新建自定义模型",
 )
-async def create_model_api(payload: LlmModelCreate) -> dict:
-    return await model_service.create_model(payload)
+async def create_model_api(payload: LlmModelCreate, user: CurrentUser) -> dict:
+    return await model_service.create_model(payload, owner_id=user.id)
 
 
 @router.patch("/models/{model_id}", response_model=LlmModelOut, summary="编辑自定义模型")
-async def update_model_api(model_id: uuid.UUID, payload: LlmModelUpdate) -> dict:
+async def update_model_api(
+    model_id: uuid.UUID, payload: LlmModelUpdate, user: CurrentUser
+) -> dict:
     """
     `model_id` 声明为 UUID：非法值（如 "not-a-uuid"）由 FastAPI 直接 422 ——
     与 ChatRequest.session_id 同一手法（D14 的结论：类型交给 pydantic，不自己写正则）。
     """
-    result = await model_service.update_model(model_id, payload)
+    result = await model_service.update_model(model_id, payload, owner_id=user.id)
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模型不存在")
     return result
@@ -70,18 +76,20 @@ async def update_model_api(model_id: uuid.UUID, payload: LlmModelUpdate) -> dict
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除自定义模型",
 )
-async def delete_model_api(model_id: uuid.UUID) -> Response:
+async def delete_model_api(model_id: uuid.UUID, user: CurrentUser) -> Response:
     """
     只有"删除成功"和"没这条"两种结局 → 204 / 404。
     （"被会话选中却被删"的连带处理在前端：它发现选中项没了就回退默认 —— 见需求稿 §5.2。）
     """
-    if not await model_service.delete_model(model_id):
+    if not await model_service.delete_model(model_id, owner_id=user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模型不存在")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/models/test", response_model=ModelTestResult, summary="连通性测试（表单未保存值）")
-async def test_unsaved_model_api(payload: ModelTestRequest) -> dict:
+async def test_unsaved_model_api(
+    payload: ModelTestRequest, user: CurrentUser
+) -> dict:
     """
     对表单里当前的填写值测一次 —— 配错时当场知道，而不是保存后发一条正式消息试错。
     失败返回 `ok=false + error`（200 响应，见 ModelTestResult 的说明）。
@@ -90,9 +98,9 @@ async def test_unsaved_model_api(payload: ModelTestRequest) -> dict:
 
 
 @router.post("/models/{model_id}/test", response_model=ModelTestResult, summary="连通性测试（已保存模型）")
-async def test_saved_model_api(model_id: uuid.UUID) -> dict:
+async def test_saved_model_api(model_id: uuid.UUID, user: CurrentUser) -> dict:
     """对库里已保存的模型测一次（前端配置弹窗列表里的"测试"按钮）。"""
-    row = await model_service.get_model(model_id)
+    row = await model_service.get_model(model_id, owner_id=user.id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模型不存在")
     return await model_service.test_connection(row.base_url, row.api_key, row.model)

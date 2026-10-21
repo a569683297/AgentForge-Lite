@@ -21,7 +21,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, func, text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -51,6 +51,18 @@ class ToolServer(Base):
         primary_key=True,
         default=_uuid,
         comment="主键。同时是磁盘上的子目录名（data/tool_servers/<id>/）",
+    )
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+        comment=(
+            "上传者（审计用）。⚠ 上传工具是**管理员能力**，不是每个用户的能力："
+            "工具会进进程级 ToolRegistry，而 LLM 看到的是全局工具表 —— "
+            "两个用户的同名工具会在注册表里撞名。要真正按人隔离工具，"
+            "得给每个请求一份『可见工具视图』，那是另一件事（见 auth 知识点文档）。"
+        ),
     )
     name: Mapped[str] = mapped_column(
         String(32),

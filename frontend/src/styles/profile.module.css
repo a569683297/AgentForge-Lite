@@ -1,0 +1,106 @@
+.grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+}
+
+@media (max-width: 1180px) {
+  .grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.cardBody { padding: 14px 16px; }
+
+.twoCol {
+  display: grid;
+  gap: 0 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.fieldHint {
+  display: block;
+  margin-top: 2px;
+  color: var(--af-text-tertiary);
+  font-size: 11px;
+}
+
+.factList { display: grid; }
+
+.factRow {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  align-items: start;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--af-border-subtle);
+}
+
+.factRow:last-child { border-bottom: none; }
+
+.factKind {
+  margin-top: 1px;
+  color: var(--af-text-secondary);
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+
+.factText { line-height: 1.65; word-break: break-word; }
+
+.factMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  color: var(--af-text-tertiary);
+  font-size: 11px;
+}
+
+.factMeta a { color: var(--af-info); }
+
+.confidenceBar {
+  display: inline-block;
+  width: 28px;
+  height: 3px;
+  margin-right: 5px;
+  overflow: hidden;
+  vertical-align: middle;
+  background: var(--af-sunken);
+  border-radius: 2px;
+}
+
+.confidenceBar span {
+  display: block;
+  height: 100%;
+  background: var(--af-accent);
+}
+
+.intro {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--af-border-subtle);
+  border-radius: 6px;
+  background: var(--af-surface);
+  color: var(--af-text-secondary);
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.intro strong { color: var(--af-text-primary); font-weight: 500; }
+
+.intro code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--af-sunken);
+  font-size: 11px;
+}
+
+.saveBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--af-border-subtle);
+}
+
+.saveHint { color: var(--af-text-tertiary); font-size: 11px; }

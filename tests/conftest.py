@@ -51,9 +51,77 @@ def pytest_collection_modifyitems(config, items):
 # 二、API 客户端
 # ============================================================
 
+# 测试账号的固定邮箱。用固定值而不是随机值，是为了让"上一次跑崩了留下的数据"
+# 能在下一次直接复用，而不是每跑一次多一个孤儿账号。
+TEST_ADMIN_EMAIL = "pytest-admin@agentforge.local"
+TEST_USER_EMAIL = "pytest-user@agentforge.local"
+TEST_PASSWORD = "PytestPass123"
+
+
+async def _ensure_test_user(email: str, role: str):
+    """
+    保证库里有一个测试账号（不存在就建，角色不对就改），返回 ORM 行。
+
+    为什么直接写库而不是调 `auth_service.register`：
+      register 用**生产成本因子 12**（166ms）。测试里每建一次账号就慢一次，
+      而且我们根本不校验密码复杂度这条路径。这里用 rounds=4（0.7ms）建，
+      `verify_password` 会自动从哈希串里读出成本因子，校验照样正确。
+    """
+    from sqlalchemy import select
+
+    from app.core.db import async_session_factory
+    from app.core.security import hash_password
+    from app.models.user import User
+
+    async with async_session_factory() as session:
+        row = (
+            await session.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if row is None:
+            row = User(
+                email=email,
+                password_hash=hash_password(TEST_PASSWORD, rounds=4),
+                display_name="pytest",
+                role=role,
+                is_active=True,
+            )
+            session.add(row)
+        else:
+            row.role = role
+            row.is_active = True
+        await session.commit()
+        await session.refresh(row)
+        return row
+
+
+def _access_token(user) -> str:
+    """给测试用户签一个真 access token（走与线上同一个 create_token）。"""
+    from app.core.security import TOKEN_TYPE_ACCESS, create_token
+
+    token, _, _ = create_token(user.id, token_type=TOKEN_TYPE_ACCESS, role=user.role)
+    return token
+
 
 @pytest.fixture
-async def api_client():
+async def admin_user():
+    """**管理员**测试账号 —— 默认 `api_client` 用它。
+
+    为什么默认是 admin：账号体系上线前，所有接口都是"谁都能调"。
+    上线后 eval / traces / metrics / tool-servers 都收成了管理员能力，
+    若默认账号是普通用户，那些用例会集体 403 —— 而它们测的是业务逻辑，
+    不是权限（权限有专门的角色用例）。用 admin 打底，等于保持原有覆盖面。
+    """
+    return await _ensure_test_user(TEST_ADMIN_EMAIL, "admin")
+
+
+@pytest.fixture
+async def normal_user():
+    """**普通用户**测试账号 —— 跨用户隔离用例用它（A 看不到 B 的数据）。"""
+    return await _ensure_test_user(TEST_USER_EMAIL, "user")
+
+
+@pytest.fixture
+async def api_client(admin_user):
     """
     直接打 FastAPI 应用的 HTTP 客户端：**不开真端口、不起 uvicorn**。
 
@@ -63,11 +131,46 @@ async def api_client():
 
     ⚠ 它**不会触发 lifespan**（这正是我们要的）：lifespan 会去起 MCP 子进程、
       连外部 server，测试不该把"启动外部依赖"变成跑用例的前提。
+
+    账号体系之后（2026-10-21）：**默认带 Bearer 头**（管理员）。
+      这是刻意的 —— 60 多个既有集成用例测的是业务行为，让它们每条都自己拼
+      Authorization 既啰嗦又会把"忘了带 token"变成一种新的假失败。
+      要测"没登录会怎样"，用下面的 `anon_client`；要测越权，用 `user_client`。
     """
     from app.main import app
 
     transport = ASGITransport(app=app)
+    token = _access_token(admin_user)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+async def anon_client():
+    """**不带任何凭证**的客户端 —— 专测 401 / 注册登录这些入口。"""
+    from app.main import app
+
+    transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
+
+@pytest.fixture
+async def user_client(normal_user):
+    """带**普通用户**凭证的客户端 —— 跨用户隔离（越权）用例用它。"""
+    from app.main import app
+
+    transport = ASGITransport(app=app)
+    token = _access_token(normal_user)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as client:
         yield client
 
 
@@ -83,6 +186,23 @@ class FakeLangfuse:
     网关每次调用都会 `with langfuse.start_as_current_observation(...)` ——
     换成真的就会朝 Langfuse Cloud 发请求，测试会被网络拖慢甚至红。
     """
+
+    # 固定的假 trace id（32 位十六进制，与 Langfuse 的真实格式同宽）。
+    # 为什么给一个**真值**而不是 None：`agent_service` 会把它写进 messages.trace_id，
+    # 返回 None 就等于让"写入 trace_id"这段代码在测试里永远走不到 ——
+    # 而它正是 Trace 页「按提问展示」的支点。
+    FAKE_TRACE_ID = "0" * 8 + "abcdef" + "0" * 8 + "fedcba" + "0" * 2
+
+    def get_current_trace_id(self) -> str:
+        """
+        当前 trace id。**这个方法是补上的，不是一开始就有的**：
+        加了 messages.trace_id 之后，`agent_service.current_trace_id()` 会调它，
+        而 FakeLangfuse 没有 → `AttributeError: 'FakeLangfuse' object has no attribute
+        'get_current_trace_id'`，一整片 agent 集成测试直接红。
+        教训：给产品代码新增一个**外部依赖的方法调用**时，替身类要同步补齐；
+        mock 不是"随便糊一个"就完事的东西。
+        """
+        return self.FAKE_TRACE_ID
 
     @contextmanager
     def start_as_current_observation(self, **kwargs):

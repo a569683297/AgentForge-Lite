@@ -1,15 +1,22 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { Navigate, Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom';
+import { logout as logoutApi } from './api/auth';
 import { getHealth } from './api/health';
 import { listModels } from './api/models';
 import { listSessions } from './api/sessions';
 import { AppShell } from './components/AppShell';
+import { ChangePasswordModal } from './components/ChangePasswordModal';
+import { AdminPage } from './pages/AdminPage';
 import { ChatPage } from './pages/ChatPage';
 import { EvalPage } from './pages/EvalPage';
 import { KnowledgePage } from './pages/KnowledgePage';
+import { LoginPage } from './pages/LoginPage';
+import { ProfilePage } from './pages/ProfilePage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { RetrieverPage } from './pages/RetrieverPage';
 import { ToolsPage } from './pages/ToolsPage';
 import { TracePage } from './pages/TracePage';
+import { clearSession, getRefreshToken, getSession, subscribeSession } from './lib/auth';
 import { rememberModel, resolveModelForSession, type ModelSelection } from './lib/modelMemory';
 import { pageFromPath } from './lib/routes';
 import type { HealthResponse, ModelItem, SessionItem } from './types/api';
@@ -17,6 +24,34 @@ import type { HealthResponse, ModelItem, SessionItem } from './types/api';
 export default function App() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
+
+  // ---- 登录态：直接订阅 lib/auth 的存储，**不再自己拿 useState 镜像** ----
+  // 修过的 bug（2026-10-21 实测暴露）：原来是
+  //   `useState(() => getSession())` —— 只在**首次挂载**读一次。
+  //   登录页里 saveSession() 写的是 lib/auth 的模块变量 + localStorage，
+  //   App 这边毫不知情 → 仍判"未登录" → 路由守卫把 /chat 又推回 /login。
+  //   表现为「点登录没反应，F5 才进去」。
+  //
+  // 为什么用 useSyncExternalStore 而不是用 Context 包一层：
+  //   登录态的写入点有 5 处，其中「刷新 token」和「强制下线」发生在 axios 拦截器里，
+  //   不在组件树内 —— 那些地方无法调用 setState。订阅模型对它们同样有效。
+  // 不需要提前抽象。
+  const authSession = useSyncExternalStore(subscribeSession, getSession, getSession);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const authenticated = authSession !== null;
+
+  // 公开路由：登录页、重置密码页（后者是从邮件里点进来的，**不该**要求先登录）
+  const isPublicRoute = pathname === '/login' || pathname.startsWith('/reset-password');
+
+  function handleLogout() {
+    // 先调接口吊销 refresh（失败也无所谓：本地一定会清，见 api/auth.logout）
+    const refreshToken = getRefreshToken();
+    if (refreshToken) void logoutApi(refreshToken).catch(() => undefined);
+    // clearSession 会 emit → 上面那个 useSyncExternalStore 自动重渲染，
+    // 不需要（也没有）setState 可以调
+    clearSession();
+    navigate('/login', { replace: true });
+  }
 
   // ---- 下面两行是本次改造的核心：页面 & 会话都从 URL 派生 ----
   // 改造前它们是 useState（纯内存态），刷新即丢 —— 一律回到对话台。
@@ -64,11 +99,15 @@ export default function App() {
     }
   }, [models, selectedModelId, selectedSessionId]);
 
+  // ⚠ 依赖 authenticated：未登录时不发这三条请求。
+  //   发了也会 401，然后被拦截器踢到登录页 —— 看似"结果一样"，实际会多出一轮
+  //   无意义的请求 + 一次强制跳转，登录页会闪一下再跳，观感很差。
   useEffect(() => {
+    if (!authenticated) return;
     void getHealth().then(setHealth).catch(() => setHealth(null));
     void listSessions().then(setSessions).catch(() => setSessions([]));
     refreshModels();
-  }, [refreshModels]);
+  }, [authenticated, refreshModels]);
 
   // 新会话产生后刷新侧栏「最近会话」列表（ChatPage 拿到首个 session_id 时调用）
   const refreshSessions = useCallback(() => {
@@ -80,8 +119,30 @@ export default function App() {
     navigate(`/chat/${id}`);
   }
 
+  // ---- 未登录（或正在登录页/重置页）：只挂公开路由，外壳整个不渲染 ----
+  // 注意这里是**早返回**而不是"渲染外壳但把内容换成登录页"：
+  //   外壳会渲染侧栏的会话列表、顶栏的模型下拉 —— 那些数据都是登录后才该有的。
+  if (!authenticated || isPublicRoute) {
+    // 已登录的用户访问 /login：直接送回对话台（避免"登录了还停在登录页"）
+    if (authenticated && pathname === '/login') return <Navigate to="/chat" replace />;
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        {/* 未登录访问任何其它地址 → 登录页（next 让登录后能回到原处） */}
+        <Route
+          path="*"
+          element={<Navigate to={`/login?next=${encodeURIComponent(pathname)}`} replace />}
+        />
+      </Routes>
+    );
+  }
+
   return (
     <AppShell
+      user={authSession.user}
+      onLogout={handleLogout}
+      onChangePassword={() => setPasswordOpen(true)}
       page={page}
       sessions={sessions}
       health={health}
@@ -102,15 +163,30 @@ export default function App() {
         <Route path="/chat" element={<ChatPage onSessionsRefresh={refreshSessions} selectedModelId={selectedModelId} onModelUsed={handleModelUsed} />} />
         <Route path="/chat/:sessionId" element={<ChatPage onSessionsRefresh={refreshSessions} selectedModelId={selectedModelId} onModelUsed={handleModelUsed} />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
+        {/* 我的画像：所有登录用户可见（后端只认自己的画像，没有"看别人"的接口） */}
+        <Route path="/profile" element={<ProfilePage />} />
         <Route path="/eval" element={<EvalPage />} />
         {/* 块 4：分析页已并入 /eval —— 旧链接重定向（replace：不在历史里留一条死路径） */}
         <Route path="/analytics" element={<Navigate to="/eval" replace />} />
         <Route path="/tools" element={<ToolsPage />} />
         <Route path="/trace" element={<TracePage />} />
         <Route path="/retriever" element={<RetrieverPage />} />
+        <Route path="/admin" element={<AdminPage />} />
+        {/* 未登录的路由在登录后直接命中这里（例如 /login 已被上面处理） */}
+        <Route path="/login" element={<Navigate to="/chat" replace />} />
         {/* 未知路径统一回对话台 */}
         <Route path="*" element={<Navigate to="/chat" replace />} />
       </Routes>
+      <ChangePasswordModal
+        open={passwordOpen}
+        onClose={() => setPasswordOpen(false)}
+        onChanged={() => {
+          // 改密成功后旧的 refresh 已作废 → 清本地并回登录页（后端也这么建议）
+          setPasswordOpen(false);
+          clearSession();
+          navigate('/login', { replace: true });
+        }}
+      />
     </AppShell>
   );
 }

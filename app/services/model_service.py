@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from app.config import LLM_CHANNELS, settings
 from app.core.db import async_session_factory
+from app.core.tenant import current_owner, owner_filter
 from app.core.logging import logger
 from app.models.llm_model import LlmModel
 
@@ -163,11 +164,25 @@ def _to_out(row: LlmModel) -> dict:
     }
 
 
-async def list_models() -> list[dict]:
-    """内置（.env）+ 自定义（DB）合流。顺序：内置在前，自定义按创建时间。"""
+async def list_models(*, owner_id: uuid.UUID | None = None) -> list[dict]:
+    """
+    内置（.env）+ **自己的**自定义模型（DB）合流。顺序：内置在前，自定义按创建时间。
+
+    多租户：自定义模型必须按人过滤。这一行里有 `api_key` ——
+    不过滤的话，B 能在下拉框里看到 A 建的所有端点（名字、base_url、打码 key），
+    并且**可以直接选用**：网关解析 model_id 时不校验归属的话，
+    B 发一条消息就会用掉 A 的额度。列表过滤只是第一层，`get_model` 也要过滤。
+    """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
         rows = (
-            (await session.execute(select(LlmModel).order_by(LlmModel.created_at)))
+            (
+                await session.execute(
+                    select(LlmModel)
+                    .where(owner_filter(LlmModel.owner_id, scoped))
+                    .order_by(LlmModel.created_at)
+                )
+            )
             .scalars()
             .all()
         )
@@ -177,14 +192,16 @@ async def list_models() -> list[dict]:
 # ============================================================
 # 三、自定义模型 CRUD
 # ============================================================
-async def create_model(payload) -> dict:
+async def create_model(payload, *, owner_id: uuid.UUID | None = None) -> dict:
     """新建自定义模型。`payload` 是 LlmModelCreate（base_url 已由校验器规范化）。"""
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
         row = LlmModel(
             name=payload.name,
             base_url=payload.base_url,
             api_key=payload.api_key or None,   # 空字符串统一存 NULL（语义一致）
             model=payload.model,
+            owner_id=scoped,
         )
         session.add(row)
         await session.commit()
@@ -192,19 +209,40 @@ async def create_model(payload) -> dict:
         return _to_out(row)
 
 
-async def get_model(model_id: uuid.UUID) -> LlmModel | None:
-    """按 id 取一行（S2 的网关解析与 test/{id} 接口都会用）。"""
+async def get_model(
+    model_id: uuid.UUID, *, owner_id: uuid.UUID | None = None
+) -> LlmModel | None:
+    """
+    按 id 取一行（S2 的网关解析与 test/{id} 接口都会用）。
+
+    ⚠ 这里是**真正**的越权关口，不只是列表：对话请求里的 `model_id` 是
+      客户端传上来的。只要不过滤归属，B 就能把 A 的 model_id 填进请求体，
+      用自己的对话消耗 A 的 key —— 而且日志里看起来是"A 的模型被正常使用"。
+      对话运行在 `owner_scope` 内（见 agent_service.run_agent），
+      所以默认值 `current_owner()` 在网关那条路径上是有效的。
+    """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
-        return await session.get(LlmModel, model_id)
+        stmt = (
+            select(LlmModel)
+            .where(LlmModel.id == model_id)
+            .where(owner_filter(LlmModel.owner_id, scoped))
+        )
+        return (await session.scalars(stmt)).first()
 
 
-async def update_model(model_id: uuid.UUID, payload) -> dict | None:
+async def update_model(
+    model_id: uuid.UUID, payload, *, owner_id: uuid.UUID | None = None
+) -> dict | None:
     """
     编辑。只改"传了的字段"；`api_key` 传 None / "" 都表示**不修改**
     （前端编辑时不回显明文 key，必须留空 = 保留，否则一编辑就清 key —— 见 schemas 模块注释）。
     """
+    current = await get_model(model_id, owner_id=owner_id)
+    if current is None:
+        return None
     async with async_session_factory() as session:
-        row = await session.get(LlmModel, model_id)
+        row = await session.get(LlmModel, current.id)
         if row is None:
             return None
         if payload.name is not None:
@@ -221,10 +259,15 @@ async def update_model(model_id: uuid.UUID, payload) -> dict | None:
         return _to_out(row)
 
 
-async def delete_model(model_id: uuid.UUID) -> bool:
-    """删除。返回是否删到了东西（False → 路由层回 404）。"""
+async def delete_model(
+    model_id: uuid.UUID, *, owner_id: uuid.UUID | None = None
+) -> bool:
+    """删除。返回是否删到了东西（False → 路由层回 404）。别人的模型同样删不到。"""
+    current = await get_model(model_id, owner_id=owner_id)
+    if current is None:
+        return False
     async with async_session_factory() as session:
-        row = await session.get(LlmModel, model_id)
+        row = await session.get(LlmModel, current.id)
         if row is None:
             return False
         await session.delete(row)

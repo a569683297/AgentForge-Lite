@@ -5,12 +5,17 @@
 id（UUID 主键）、title、summary（长期摘要）、created_at、updated_at
 
 说明：Python 3.12 写法 Mapped[...] + mapped_column() 是 SQLAlchemy 2.0 新风格。
+
+账号体系（2026-10-21）：新增 `owner_id`。
+  一个会话必须**属于某个人** —— 否则 `/api/sessions` 一列就会把别人的聊天标题
+  摆到眼前。归属列放在主表（sessions）而不是消息表（messages）：
+  消息的归属**继承自会话**，重复存一份只会在"会话转手"时产生两个真相。
 """
 
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +37,16 @@ class Session(Base):
         primary_key=True,
         default=_uuid,
         comment="会话唯一标识",
+    )
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+        comment=(
+            "归属用户。nullable 只为兼容迁移前的历史行（迁移脚本会把它们划给引导管理员）；"
+            "应用层每一次写入都必须带上它 —— 没有归属的会话等于人人可见"
+        ),
     )
     title: Mapped[str] = mapped_column(
         String(255),

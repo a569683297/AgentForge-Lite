@@ -11,6 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.config import RETRIEVER_CONFIGS, settings
+from app.deps import CurrentUser
 from app.schemas.retriever import (
     MAX_TOP_K,
     RetrieverOptionsOut,
@@ -27,7 +28,7 @@ router = APIRouter(tags=["retriever"])
     response_model=RetrieverOptionsOut,
     summary="检索检查器的可选项（配置清单 / 默认值 / k 上限）",
 )
-async def get_options() -> RetrieverOptionsOut:
+async def get_options(user: CurrentUser) -> RetrieverOptionsOut:
     """
     把"有哪些配置可选"和"k 能填多大"由后端说出来，而不是前端写死。
 
@@ -49,7 +50,7 @@ async def get_options() -> RetrieverOptionsOut:
     response_model=RetrieverSearchResponse,
     summary="跑一次检索并返回取舍过程（候选池 → 融合 → 重排 → gold 判定）",
 )
-async def search(req: RetrieverSearchRequest) -> RetrieverSearchResponse:
+async def search(req: RetrieverSearchRequest, user: CurrentUser) -> RetrieverSearchResponse:
     """
     这个接口**不是** Agent 用的检索入口（那是 `query_metric` / `search_documents` 工具
     背后的 `retrieve()`），它只服务页面：给候选池、给两阶段名次、给 gold 比对。
@@ -69,6 +70,9 @@ async def search(req: RetrieverSearchRequest) -> RetrieverSearchResponse:
             top_k=req.top_k,
             config=req.config,
             case_key=req.case_key,
+            # 只在自己的知识库里检索：否则这个页面会变成"窥探别人语料"的工具，
+            # 而且 gold 判定（评测题的 doc_ids）对别人的语料根本没有意义
+            owner_id=user.id,
         )
     except ValueError as exc:
         # 只有 config 非法会走到这里（pydantic 的 Literal 已拦住其余取值）

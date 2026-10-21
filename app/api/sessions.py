@@ -17,6 +17,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 
+from app.deps import CurrentUser
 from app.schemas.session import MessageItem, SessionItem
 from app.services.session_service import get_messages, get_session, list_sessions
 
@@ -25,6 +26,7 @@ router = APIRouter(tags=["sessions"])
 
 @router.get("/sessions", response_model=list[SessionItem], summary="会话列表")
 async def list_sessions_api(
+    user: CurrentUser,
     limit: int = Query(50, ge=1, le=200, description="最多返回多少条"),
     offset: int = Query(0, ge=0, description="跳过前多少条（分页用）"),
 ) -> list[SessionItem]:
@@ -35,7 +37,7 @@ async def list_sessions_api(
     updated_at 由 append_messages 在每轮对话后刷新，所以它等于"最后说话时间"——
     注意它不会因为"只是查看"而变化，只有真的写入了消息才会动。
     """
-    rows = await list_sessions(limit=limit, offset=offset)
+    rows = await list_sessions(limit=limit, offset=offset, owner_id=user.id)
     return [SessionItem(**row) for row in rows]
 
 
@@ -46,6 +48,7 @@ async def list_sessions_api(
 )
 async def get_session_messages_api(
     session_id: uuid.UUID,
+    user: CurrentUser,
     limit: int = Query(500, ge=1, le=2000, description="最多返回多少条"),
 ) -> list[MessageItem]:
     """
@@ -58,8 +61,8 @@ async def get_session_messages_api(
     会话不存在时返回 404 而不是空数组：空数组的含义是"会话在，但没说过话"，
     与"会话不存在"是两件完全不同的事，糊在一起前端没法处理。
     """
-    session = await get_session(session_id)
+    session = await get_session(session_id, owner_id=user.id)
     if session is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    rows = await get_messages(session_id, limit=limit)
+    rows = await get_messages(session_id, limit=limit, owner_id=user.id)
     return [MessageItem(**row) for row in rows]

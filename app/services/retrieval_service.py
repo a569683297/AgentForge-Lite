@@ -61,12 +61,14 @@ D19：把三条腿收进**一个可切入口** `retrieve()`，并接上重排。
 """
 
 import asyncio
+import uuid
 
 from sqlalchemy import select, text
 
 from app.config import RETRIEVER_CONFIGS, settings
 from app.core.db import async_session_factory
 from app.core.logging import logger
+from app.core.tenant import current_owner, owner_filter
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.services.embedding_service import embed_query
@@ -125,7 +127,9 @@ def split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
-async def search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
+async def search(
+    query: str, top_k: int = DEFAULT_TOP_K, *, owner_id: uuid.UUID | None = None
+) -> list[dict]:
     """
     向量检索：找与问题语义最相近的 top-k 片段。
 
@@ -138,12 +142,20 @@ async def search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
       顺带解决了「只检索已就绪文档」这件事 —— processing / failed 的文档
       切片要么残缺、要么本就不该存在，不过滤就可能命中半截内容。
 
+    多租户（2026-10-21）：**同一张 documents 表上多加一条 owner 过滤**。
+      为什么放在这里而不是让调用方先查"我能看哪些文档 id"再传进来：
+      那等于把所有切片的主键先拉一遍（N 千行）再去过滤，既慢又会随语料增长而恶化。
+      在 SQL 里加一个 `d.owner_id = $1` 就只是一次普通的索引过滤。
+      owner_id 为 None 时退回 `current_owner()`（由请求入口设置，见 core/tenant.py）。
+
     Args:
         query: 用户问题
         top_k: 返回条数
+        owner_id: 归属用户；不传则取请求上下文里的当前用户
     Returns:
         [{"content":..., "source":..., "page_ref":..., "similarity":...}, ...]（按相似度降序）
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     # D28：向量检索这一格。它的子节点是 `embedding`（下面 embed_query 建的）——
     # 因此在 Langfuse 上"向量这一段花了多久"能拆成"算向量"+"查库排序"两块。
     with span(
@@ -166,6 +178,8 @@ async def search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
             )
             .join(Document, Document.id == DocumentChunk.document_id)
             .where(Document.status == DocumentStatus.READY)
+            # ★ 隔离点：没有这一行，A 的问题会命中 B 的文档
+            .where(owner_filter(Document.owner_id, scoped))
             .order_by(distance)          # 距离升序 = 相似度降序
             .limit(top_k)
         )
@@ -230,6 +244,12 @@ BM25_B = 0.75     # 长度归一化：控制"长文档天然占优"要被压掉�
 #      BM25 中不含任何查询词的文档分数恒为 0，所以"至少命中一个词"与
 #      "分数可能非 0"等价 —— OR 的结果与扫全表完全一致；换成 AND 会踢掉
 #      "只命中部分词"的文档（分数非 0），静默篡改排序。（见 tokenizer.build_or_tsquery）
+#   ④ 多租户（2026-10-21）：**三个** CTE 都要加 owner 条件，缺一不可 ——
+#      corpus（N / avgdl）、candidates（谁被召回）、df（每个词的文档频率）。
+#      只加在 candidates 上是最典型的错法：召回范围对了，但 IDF 仍按**全库**算，
+#      于是"别人文档里这个词很常见"会把你的候选分压低 —— 结果不算错到报错，
+#      只是排序被别人的语料悄悄影响（数据隔离上叫"统计量侧信道"）。
+#      `CAST(:owner AS uuid) IS NULL` 那个分支是给系统内部调用留的（评测/脚本）。
 _BM25_SQL = text("""
 WITH corpus AS (
     SELECT count(*)::float AS n,
@@ -237,6 +257,7 @@ WITH corpus AS (
     FROM document_chunks c
     JOIN documents d ON d.id = c.document_id
     WHERE d.status = 'ready'
+      AND (CAST(:owner AS uuid) IS NULL OR d.owner_id = CAST(:owner AS uuid))
       AND c.content_tokens IS NOT NULL
       AND c.content_tokens <> ''
 ),
@@ -246,6 +267,7 @@ candidates AS (
     FROM document_chunks c
     JOIN documents d ON d.id = c.document_id
     WHERE d.status = 'ready'
+      AND (CAST(:owner AS uuid) IS NULL OR d.owner_id = CAST(:owner AS uuid))
       AND c.content_tsv @@ to_tsquery('simple', :tsq)
 ),
 q AS (
@@ -264,6 +286,7 @@ df AS (
     CROSS JOIN document_chunks c
     JOIN documents d ON d.id = c.document_id
     WHERE d.status = 'ready'
+      AND (CAST(:owner AS uuid) IS NULL OR d.owner_id = CAST(:owner AS uuid))
       AND c.content_tokens IS NOT NULL
       AND c.content_tokens <> ''
       AND q.term = ANY(string_to_array(c.content_tokens, ' '))
@@ -294,7 +317,9 @@ LIMIT :top_k
 """)
 
 
-async def search_keywords(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
+async def search_keywords(
+    query: str, top_k: int = DEFAULT_TOP_K, *, owner_id: uuid.UUID | None = None
+) -> list[dict]:
     """
     关键词检索（BM25）：按"查询词的稀有度 + 词频饱和 + 长度归一化"排序。
 
@@ -318,6 +343,7 @@ async def search_keywords(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
           [0,1] 不是一个量纲，混用同一个键名会在 D17 做 RRF 时埋雷
         - `retriever="bm25"`：标明这一路是谁产的，便于调试与消融实验归因
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     with span(
         SPAN_BM25,
         as_type="retriever",
@@ -343,6 +369,11 @@ async def search_keywords(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
                     "k1": BM25_K1,
                     "b": BM25_B,
                     "top_k": top_k,
+                    # 传 str 而不是 uuid 对象：SQL 里已 CAST(:owner AS uuid)，
+                    # 传字符串时类型推导两边一致。⚠ 注意不能写成 `str(x or "")`——
+                    # `str(None)` 得到的是字符串 "None"（真值），会被 PG 当成
+                    # 一个非法 uuid 直接报错。空值必须显式落成 None。
+                    "owner": str(scoped) if scoped is not None else None,
                 },
             )).all()
 
@@ -504,7 +535,9 @@ def fuse_rrf(
     return ordered[:top_k]
 
 
-async def hybrid_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
+async def hybrid_search(
+    query: str, top_k: int = DEFAULT_TOP_K, *, owner_id: uuid.UUID | None = None
+) -> list[dict]:
     """
     混合检索：向量 + BM25 → RRF 融合。
 
@@ -525,9 +558,12 @@ async def hybrid_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
         融合结果列表；两路都空时返回 []。
     """
     # 两路各自 top20 进融合（见 HYBRID_CANDIDATE_K 的注释）
+    # 两路必须拿**同一个** scoped 值：一路按 A 过滤、另一路按"无所谓"过滤，
+    # 融合出来的结果就是两份不同人语料的混合体 —— 而它看起来完全正常。
+    scoped = owner_id if owner_id is not None else current_owner()
     vector_hits, keyword_hits = await asyncio.gather(
-        search(query, top_k=HYBRID_CANDIDATE_K),
-        search_keywords(query, top_k=HYBRID_CANDIDATE_K),
+        search(query, top_k=HYBRID_CANDIDATE_K, owner_id=scoped),
+        search_keywords(query, top_k=HYBRID_CANDIDATE_K, owner_id=scoped),
     )
 
     fused = fuse_rrf(vector_hits, keyword_hits, top_k=top_k)
@@ -560,6 +596,8 @@ async def retrieve(
     query: str,
     top_k: int = DEFAULT_TOP_K,
     config: str | None = None,
+    *,
+    owner_id: uuid.UUID | None = None,
 ) -> list[dict]:
     """
     检索统一入口：按配置走三条链路之一（D19 的验收点）。
@@ -605,6 +643,10 @@ async def retrieve(
     if name not in RETRIEVER_CONFIGS:
         raise ValueError(f"未知检索配置：{name!r}，可选 {RETRIEVER_CONFIGS}")
 
+    # 三条链路共用同一个归属 —— 在入口算一次，往下传，
+    # 避免每条链路各自去读上下文（读的地方越多，"某条链忘了传"的概率越大）
+    scoped = owner_id if owner_id is not None else current_owner()
+
     # D28：检索父 span。它包住下面所有的子段（向量 / BM25 / 重排），
     # 于是它的 latency **就是这一次检索的总耗时** —— 不用在面板上手工把几条拼起来。
     # ⚠ 它是**嵌套计时**（包含子 span 的耗时），算"各段占比"时不能与子段相加。
@@ -616,14 +658,16 @@ async def retrieve(
         reranked = False
 
         if name == "pure_vector":
-            results = await search(query, top_k=top_k)
+            results = await search(query, top_k=top_k, owner_id=scoped)
 
         elif name == "hybrid":
-            results = await hybrid_search(query, top_k=top_k)
+            results = await hybrid_search(query, top_k=top_k, owner_id=scoped)
 
         else:  # hybrid_rerank
             # 窗口是 RERANK_CANDIDATE_K（20），不是 top_k（5）—— 见常量处的说明
-            fused = await hybrid_search(query, top_k=RERANK_CANDIDATE_K)
+            fused = await hybrid_search(
+                query, top_k=RERANK_CANDIDATE_K, owner_id=scoped
+            )
             results, reranked = await rerank(query, fused, top_n=top_k)
 
             # 按**实际走通的路径**打标：降级时是 "hybrid"，不是 "hybrid_rerank"。

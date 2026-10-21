@@ -25,6 +25,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.deps import AdminUser
 from app.schemas.eval import (
     EvalCaseDetailOut,
     EvalCaseOut,
@@ -46,6 +47,7 @@ CategoryParam = Literal["doc_qa", "cross_doc", "tool_call"]
 
 @router.get("/eval/cases", response_model=list[EvalCaseOut], summary="评测集列表")
 async def list_eval_cases(
+    admin: AdminUser,
     category: CategoryParam | None = Query(default=None, description="按类别过滤"),
     limit: int = Query(default=200, ge=1, le=500, description="每页条数"),
     offset: int = Query(default=0, ge=0, description="偏移量（分页）"),
@@ -64,7 +66,7 @@ async def list_eval_cases(
     response_model=EvalCaseDetailOut,
     summary="单条评测用例详情（含参考答案）",
 )
-async def get_eval_case(case_key: str) -> EvalCaseDetailOut:
+async def get_eval_case(case_key: str, admin: AdminUser) -> EvalCaseDetailOut:
     """
     按业务键取单条用例，含参考答案与判定依据。
 
@@ -79,7 +81,7 @@ async def get_eval_case(case_key: str) -> EvalCaseDetailOut:
 
 
 @router.get("/eval/dataset", response_model=EvalDatasetOut, summary="评测集指纹与分布")
-async def get_eval_dataset() -> EvalDatasetOut:
+async def get_eval_dataset(admin: AdminUser) -> EvalDatasetOut:
     """
     返回评测集的内容指纹与分布统计。
 
@@ -96,6 +98,7 @@ async def get_eval_dataset() -> EvalDatasetOut:
 # ============================================================
 @router.get("/eval/runs", response_model=list[EvalRunOut], summary="评测运行列表")
 async def list_eval_runs(
+    admin: AdminUser,
     limit: int = Query(default=50, ge=1, le=200, description="每页条数"),
     offset: int = Query(default=0, ge=0, description="偏移量（分页）"),
 ) -> list[EvalRunOut]:
@@ -110,7 +113,7 @@ async def list_eval_runs(
 
 
 @router.get("/eval/runs/{run_id}", response_model=EvalRunDetailOut, summary="运行详情（含按类别聚合）")
-async def get_eval_run(run_id: int) -> EvalRunDetailOut:
+async def get_eval_run(run_id: int, admin: AdminUser) -> EvalRunDetailOut:
     """
     运行详情：汇总分 + **按类别聚合** + 失败模式分布 + 生成侧不一致题数。
 
@@ -151,6 +154,7 @@ async def get_eval_run(run_id: int) -> EvalRunDetailOut:
 )
 async def list_eval_run_cases(
     run_id: int,
+    admin: AdminUser,
     category: CategoryParam | None = Query(default=None, description="按类别过滤"),
     passed: bool | None = Query(default=None, description="只看通过 / 只看失败"),
     limit: int = Query(default=500, ge=1, le=2000, description="每页条数"),
@@ -178,7 +182,9 @@ async def list_eval_run_cases(
     response_model=list[EvalCaseResultDetailOut],
     summary="某题在本次运行里的全部生成（含检索片段与原始分数）",
 )
-async def get_eval_run_result(run_id: int, case_key: str) -> list[EvalCaseResultDetailOut]:
+async def get_eval_run_result(
+    run_id: int, case_key: str, admin: AdminUser
+) -> list[EvalCaseResultDetailOut]:
     """
     取某一道题在本次运行里的**全部生成**（不是只取一条）。
 

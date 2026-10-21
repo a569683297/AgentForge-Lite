@@ -41,12 +41,28 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.db import async_session_factory
 from app.core.logging import logger
+from app.core.tenant import current_owner, owner_filter
 from app.models.message import Message
 from app.models.session import Session
 
 TITLE_MAX_LEN = 30          # 会话标题取首条用户消息的前 N 字
 DEFAULT_TITLE = "新会话"
 MESSAGES_PAGE_LIMIT = 500   # 单次最多返回多少条历史消息（防一次拉爆）
+
+
+class SessionOwnershipError(Exception):
+    """
+    会话存在，但不属于调用者。
+
+    为什么用**异常**而不是返回 None：
+      `ensure_session` 的语义是"保证这个会话可用"。当它不可用（别人的会话）时，
+      继续往下跑就意味着**把消息写进别人的会话**。返回 False 只会被当成
+      "已存在"，调用方看不出区别 —— 那是静默越权。抛出来，调用方必须处理。
+
+    ⚠ 接口层要把它翻译成 **404**，不是 403：
+      403 等于告诉对方"这个 id 确实存在，只是不给你" —— 这本身是一条信息
+      （可以拿来枚举别人有哪些会话）。404 让"不存在"和"不属于你"无法区分。
+    """
 
 
 def _make_title(title_hint: str | None) -> str:
@@ -57,28 +73,58 @@ def _make_title(title_hint: str | None) -> str:
     return text[:TITLE_MAX_LEN]
 
 
-async def ensure_session(session_id: uuid.UUID, *, title_hint: str | None = None) -> bool:
+async def ensure_session(
+    session_id: uuid.UUID,
+    *,
+    title_hint: str | None = None,
+    owner_id: uuid.UUID | None = None,
+) -> bool:
     """
-    会话不存在则创建（存在则什么都不改）。
+    会话不存在则创建（存在则校验归属，不改任何字段）。
 
     为什么用 INSERT ... ON CONFLICT DO NOTHING 而不是「先查再插」：
     先查再插在并发下有空窗 —— 两个请求同时发现「不存在」，于是都去插，
     后一个撞主键报错。交给数据库做原子判断，就没有这个空窗。
 
+    多租户（2026-10-21）：`ON CONFLICT DO NOTHING` 有两个来源 ——
+      「我新建的」和「别人早就建好的」。两者返回的都是 None/无行，
+      所以冲突之后必须**再查一次归属**，否则"别人的会话"会被当成"我的会话"
+      直接复用（那是最危险的一种越权：写）。多这一次 SELECT 是必要的。
+
+    Args:
+        owner_id: 归属用户。None = 系统内部调用（不校验）。
     Returns:
         True = 本次新建；False = 早已存在（此时 title 保持不变）
+    Raises:
+        SessionOwnershipError: 会话已存在且属于别人（或属于"无主"历史数据）
     """
     # RETURNING 在这里是「探针」：只有真的插进去了才会返回一行，
     # 被 ON CONFLICT 拦下时返回 None —— 于是我们免费知道了"是否新建"。
     stmt = (
         pg_insert(Session)
-        .values(id=session_id, title=_make_title(title_hint))
+        .values(id=session_id, title=_make_title(title_hint), owner_id=owner_id)
         .on_conflict_do_nothing(index_elements=["id"])
         .returning(Session.id)
     )
     async with async_session_factory() as db:
         created = (await db.execute(stmt)).scalar() is not None
         await db.commit()          # 不 commit 就等于没写（D12 的教训）
+
+        if not created and owner_id is not None:
+            existing_owner = (
+                await db.execute(
+                    select(Session.owner_id).where(Session.id == session_id)
+                )
+            ).scalar_one_or_none()
+            # 注意：`existing_owner is None` 也算不通过 —— 无主会话（迁移前遗留）
+            # 不该被任何人"顺手接管"。这是 fail-closed 的选择。
+            if existing_owner != owner_id:
+                logger.warning(
+                    "拒绝访问他人会话 session=%s 请求者=%s 归属=%s",
+                    session_id, owner_id, existing_owner,
+                )
+                raise SessionOwnershipError("会话不存在")
+
     logger.info("会话已确保存在 session=%s 本次新建=%s", session_id, created)
     return created
 
@@ -89,6 +135,7 @@ async def append_messages(
     *,
     title_hint: str | None = None,
     trace_id: str | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> int:
     """
     把本轮产生的消息全量落库，并刷新会话的 updated_at。
@@ -132,10 +179,12 @@ async def append_messages(
 
     async with async_session_factory() as db:
         try:
-            # ① 建会话（幂等，已存在则跳过）
+            # ① 建会话（幂等，已存在则跳过）。owner_id 只对"新建"这一支有意义 ——
+            #    已存在的会话归属不会被改写（ON CONFLICT DO NOTHING 的语义），
+            #    所以谁想往别人的会话里塞消息，必须先过 ensure_session 的归属校验。
             await db.execute(
                 pg_insert(Session)
-                .values(id=session_id, title=_make_title(title_hint))
+                .values(id=session_id, title=_make_title(title_hint), owner_id=owner_id)
                 .on_conflict_do_nothing(index_elements=["id"])
             )
             # ② 消息入队（此时只在内存，还没落库）
@@ -154,16 +203,23 @@ async def append_messages(
     return len(rows)
 
 
-async def list_sessions(limit: int = 50, offset: int = 0) -> list[dict]:
+async def list_sessions(
+    limit: int = 50, offset: int = 0, *, owner_id: uuid.UUID | None = None
+) -> list[dict]:
     """
     会话列表，按最近活跃倒序（最新在前的）。
 
     返回 dict 而不是 ORM 对象：Session 实例带着对数据库连接的引用，
     session 关闭后访问它的属性会触发懒加载并报错；在这里一次性转成
     纯数据结构，调用方（API 层）拿到的就是"已死"的安全数据。
+
+    `owner_id` 为 None 时取请求上下文里的当前用户（见 core/tenant.py）：
+    接口层不需要显式传 —— 但**必须**有上下文，否则就是"不过滤"（系统视角）。
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     stmt = (
         select(Session)
+        .where(owner_filter(Session.owner_id, scoped))
         .order_by(Session.updated_at.desc())
         .limit(limit)
         .offset(offset)
@@ -176,17 +232,27 @@ async def list_sessions(limit: int = 50, offset: int = 0) -> list[dict]:
     ]
 
 
-async def get_session(session_id: uuid.UUID) -> dict | None:
+async def get_session(
+    session_id: uuid.UUID, *, owner_id: uuid.UUID | None = None
+) -> dict | None:
     """
-    按 id 取单个会话；不存在返回 None（供 API 层判 404）。
+    按 id 取单个会话；不存在（**或不属于调用者**）返回 None（供 API 层判 404）。
 
     为什么要专门有它：GET /api/sessions/{id}/messages 得区分两种情况 ——
     「会话不存在」（应该 404）与「会话存在但还没有消息」（应该 200 + 空数组）。
     只查 messages 表的话，两者都表现为空数组，前端根本分不出来。
+
+    归属不匹配时与"不存在"返回同一个值，是刻意的：调用方拿不到任何
+    "这个 id 存在但你没权限"的信号（见 SessionOwnershipError 的说明）。
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as db:
         row = (
-            await db.execute(select(Session).where(Session.id == session_id))
+            await db.execute(
+                select(Session)
+                .where(Session.id == session_id)
+                .where(owner_filter(Session.owner_id, scoped))
+            )
         ).scalar_one_or_none()
     if row is None:
         return None
@@ -196,6 +262,8 @@ async def get_session(session_id: uuid.UUID) -> dict | None:
 async def get_messages(
     session_id: uuid.UUID,
     limit: int = MESSAGES_PAGE_LIMIT,
+    *,
+    owner_id: uuid.UUID | None = None,
 ) -> list[dict]:
     """
     取某会话的历史消息（按时间正序）。
@@ -203,10 +271,17 @@ async def get_messages(
     排序为什么带 id：created_at 是数据库 now()，同一事务里写入的多条消息
     时间戳可能完全相同，只按它排序结果不稳定；id 是自增主键，天然有序，
     拿它做第二排序键才能保证「问在前、答在后」。
+
+    多租户：用 JOIN sessions 做归属过滤，而不是先查一次会话再查消息 ——
+    同样是一次往返，但**没有"先查后查之间会话被转手"的空窗**，
+    而且不需要调用方记得先校验（漏一次就泄露整段对话）。
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     stmt = (
         select(Message)
+        .join(Session, Session.id == Message.session_id)
         .where(Message.session_id == session_id)
+        .where(owner_filter(Session.owner_id, scoped))
         .order_by(Message.created_at.asc(), Message.id.asc())
         .limit(limit)
     )

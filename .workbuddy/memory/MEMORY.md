@@ -1,5 +1,62 @@
 # AgentForge-Lite 项目长期记忆
 
+## 账号体系（2026-10-21 上线，不可回退的一条分界线）
+
+- 此后**所有新接口都必须显式声明依赖**：`CurrentUser`（登录即可）或 `AdminUser`（管理员）。
+  忘了写不会报错——FastAPI 只会认为这个接口不需要鉴权，于是它就真的对匿名开放。
+  上线时就是这样抓到 `GET /api/tools`（D27 时的诊断接口）漏了凭证依赖。
+  自检方式：逐个看 `app/api/*.py` 的函数签名，没有 `user:` / `admin:` 参数的就是漏了。
+- 数据归属靠 `app/core/tenant.py` 的 `owner_scope()`（ContextVar）+ `owner_filter()`。
+  **不要在调用处写 `if owner is not None:`** —— 那正是漏过滤的来源。
+  检索链路必须用 ContextVar：那一跳的调用者是 LLM，它只会填 query。
+- 新增任何带 `owner_id` 的表，除了主查询，还要检查**统计量类 SQL**（BM25 的 corpus/df）。
+  只给 candidates 加 owner 不报错，但排序会被别人的语料悄悄影响。
+- 越权一律 **404**（不承认 id 存在）；平台级资源才用 403。没凭证是 401 + `WWW-Authenticate: Bearer`。
+- `admin` 的三条自锁规则在 `app/api/admin.py`：不能禁用自己、不能降级最后一个 admin、改自己角色也走规则 2。
+- bcrypt `rounds=12`（本机实测 166ms/次）。测试建账号用 `rounds=4`（0.7ms）。
+
+## 前端登录态的两条铁律（2026-10-21 用户实测暴露，各修过一次）
+
+- **登录态是订阅源，不是一次性快照**：`lib/auth.ts` 的 5 个写入点统一调 `emit()`，
+  `App.tsx` 用 `useSyncExternalStore(subscribeSession, getSession, getSession)`。
+  ⚠ 不要写回 `useState(() => getSession())` —— 初始值函数只跑一次，
+  表现为「点登录不跳转、F5 才进得去」。`getSnapshot` 必须返回稳定引用（`current` 只在写入时换）。
+- **所有出站请求都必须带凭证**：axios 走拦截器，`fetch` 必须走 `authedFetch`（`api/client.ts`）。
+  ⚠ 裸 `fetch(...)` 会绕过鉴权 —— 头不加、401 不刷新，
+  表现为「页面全正常、唯独流式对话 401」。代码里出现裸 fetch 一律视为 bug。
+  `authedFetch` 里的刷新**复用同一个 `refreshOnce()`**，不能另写一份（refresh 是轮换的）。
+
+## 四层记忆（2026-10-21 补齐第 4 层）
+
+| 层 | 作用域 | 载体 |
+|---|---|---|
+| 单轮上下文 | 一次请求 | 内存 |
+| 会话热窗口（8 轮） | 一个 session | Redis `session:{id}:window` |
+| 会话摘要 | 一个 session | `sessions.summary` |
+| **用户画像** | **一个 user** | `user_profiles` + `user_profile_facts` |
+
+- **判据**：换一个新会话还成立 → 才是画像。"帮我改这段代码"不是画像。
+  画像**不能**塞 `sessions.summary`（那是会话级作用域，作用域错配）。
+- **注入顺序**（`build_system_prompt`）：人设 → 画像 → 摘要。先稳定后临时。
+  反过来会让临时上下文盖掉长期设定，不报错但画像时灵时不灵。
+- **显式字段全量 / 隐式事实 top-4**：隐式会越积越长（token 线性增长）且无关事实干扰当前问题。
+  一条都不匹配时兜底**按 confidence 取满 top-4**，不是 0 条（画像会在泛泛提问时消失），
+  **也不是 1 条**（2026-10-21 故障：2 条事实只带 1 条 → 名字被丢 → 答"没有你的名字信息"）。
+  零相关只说明「匹配没给信号」，不等于「每条都同样无关」；没信号时按 confidence 填满预算。
+- **读画像 fail-open，认证 fail-closed**。判据：这层是不是业务前置条件。
+  `get_profile` 捕 `Exception` 返回空 Profile —— 表不存在也不该让对话 500。
+- **抽取异步、摘要同步**。判据：结果会不会被下一步立刻读到。
+  `asyncio.create_task` 必须**保存强引用**（`profile_extractor._BACKGROUND`），否则可能被 GC 回收，
+  症状是"有时抽有时不抽"、日志无异常。LLM 失败**必须写冷却时间**，否则一次故障变每轮重试。
+- 去重三层：prompt 喂回已有事实 → 规范化（NFKC + 去空白 + 去句末标点）后 sha256 →
+  `UNIQUE(owner_id, text_hash)`。前两层是效率，第三层是正确性（后台任务可能并发）。
+- 匹配用布尔余弦 + **包含关系兜底**（jieba 把"前端开发"切一个词，查询"前端"匹配不上），
+  但兜底**限制 token 长度 ≥ 2**（单字是任何词的子串，会退化成全部命中且无异常）。
+- **两个"看着像没召回"的正常时刻**：① 本轮刚说"叫我阿梦"、同一轮问"我叫什么"→ 答不出
+  （抽取排在回答之后）；② 刚在 `/profile` 改完字段、立刻在同一轮追问 → 用旧值。
+  排查口径固定：**先换新会话再问**，还不行才去跑 `render_for_prompt(owner_id, query)` 探针。
+- 前端 `/profile` 页不是"设置项"，是**正确性前提**：删不掉 = 纠不了错 = 功能有害。
+
 ## 部署约定（2026-10-19 踩坑记录）
 
 - 前后端都以 Docker 容器运行：`agentforge-api` / `agentforge-web`（另加 `agentforge-db` / `agentforge-redis`）。
@@ -12,6 +69,17 @@
 - 用户访问入口是 `http://localhost:8080`（web 的 nginx 把 `/api/` 反代到 `api` 容器）。
 - 本机 `.venv` 只用于跑 `pytest` 与 `scripts/`，**不能替代容器内验证**：
   本机 uvicorn 跑通 ≠ 用户看到的页面已更新。
+- **"是否已上线"的判定法（三处对时 + 一处探针）**，别只凭印象：
+  ① `docker images --format '{{.CreatedAt}}'` 的镜像时间 **晚于**关键源文件 mtime；
+  ② 容器启动时间 **晚于**镜像构建时间（`docker compose ps`）；
+  ③ 容器内探针：`docker compose exec api grep <新符号>` 或
+     `docker run --rm agentforge-web:local grep <新文案> /usr/share/nginx/html/assets/*.js`；
+  ④ 库结构单独查（迁移不随镜像走）。
+- ⚠ **`APP_ENV=dev` + 未配 SMTP 时，`/api/auth/forgot-password` 直接返回可用的 `dev_link`**
+  （`_dev_link_allowed()` 的双条件）。实测能拿到 `reset-password?token=...`，
+  **任何人知道邮箱就能改别人密码**。对外暴露前必须同时关掉这两个条件。
+- ⚠ 截至 2026-10-21 15:25：账号体系 + 画像的全部改动**仍未 git 提交**
+  （HEAD = 96fa97b），只在工作区。镜像里有、仓库里没有 —— 换机器就没了。
 
 ## 已知限制
 

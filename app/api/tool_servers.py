@@ -25,13 +25,15 @@ import uuid
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 
 from app.config import settings
+from app.deps import AdminUser
 from app.schemas.tool_server import (
     ToolCallRequest,
     ToolServerListResponse,
     ToolServerOut,
     ToolServerUpdate,
 )
-from app.services import tool_server_service
+from app.models.audit_log import ACTION_TOOL_SERVER_DELETED, ACTION_TOOL_SERVER_UPLOADED
+from app.services import audit_service, tool_server_service
 from app.services.tool_server_service import MAX_CODE_BYTES, ToolServerError
 
 router = APIRouter(tags=["tool-servers"])
@@ -52,7 +54,7 @@ def _http(exc: ToolServerError) -> HTTPException:
     response_model=ToolServerListResponse,
     summary="用户上传的工具 server 列表",
 )
-async def list_tool_servers_api() -> dict:
+async def list_tool_servers_api(admin: AdminUser) -> dict:
     servers = await tool_server_service.list_all()
     return {"total": len(servers), "servers": servers}
 
@@ -64,6 +66,7 @@ async def list_tool_servers_api() -> dict:
     summary="上传一个 MCP Server 程序（.py）",
 )
 async def upload_tool_server_api(
+    admin: AdminUser,
     file: UploadFile = File(..., description="MCP Server 源码，只接受 .py"),
     name: str = Form(..., description="机器名（3-32 位小写字母/数字/下划线，作工具名前缀）"),
     display_name: str = Form("", description="显示名（留空 = 用 name）"),
@@ -91,15 +94,29 @@ async def upload_tool_server_api(
         )
 
     try:
-        return await tool_server_service.create(
+        created = await tool_server_service.create(
             name=name,
             display_name=display_name,
             description=description,
             filename=file.filename or "",
             content=content,
+            # 记上传者（审计用）。注意：**这不是**准入控制 ——
+            # 能走到这里的都已经是管理员（依赖 AdminUser 在函数签名里）
+            owner_id=admin.id,
         )
     except ToolServerError as e:
         raise _http(e) from e
+
+    # 上传 = 往进程里塞一段会被 LLM 调用的代码，是权限最高的一类操作，必须留痕
+    await audit_service.record(
+        action=ACTION_TOOL_SERVER_UPLOADED,
+        actor_id=admin.id,
+        actor_email=admin.email,
+        target_type="tool_server",
+        target_id=created.get("id", ""),
+        detail={"name": created.get("name"), "filename": file.filename or ""},
+    )
+    return created
 
 
 @router.post(
@@ -107,7 +124,7 @@ async def upload_tool_server_api(
     response_model=ToolServerOut,
     summary="重新拉起一台工具 server",
 )
-async def reconnect_tool_server_api(tool_id: uuid.UUID) -> dict:
+async def reconnect_tool_server_api(tool_id: uuid.UUID, admin: AdminUser) -> dict:
     try:
         return await tool_server_service.reconnect(tool_id)
     except ToolServerError as e:
@@ -119,7 +136,9 @@ async def reconnect_tool_server_api(tool_id: uuid.UUID) -> dict:
     response_model=ToolServerOut,
     summary="启用 / 停用一台工具 server",
 )
-async def update_tool_server_api(tool_id: uuid.UUID, payload: ToolServerUpdate) -> dict:
+async def update_tool_server_api(
+    tool_id: uuid.UUID, payload: ToolServerUpdate, admin: AdminUser
+) -> dict:
     """
     停用的语义是"断开并摘掉工具"，不是"删除"：
     代码还在、记录还在，LLM 看不到这些工具。重新启用时不需重传。
@@ -134,7 +153,9 @@ async def update_tool_server_api(tool_id: uuid.UUID, payload: ToolServerUpdate) 
     "/tool-servers/{tool_id}/call",
     summary="试跑这台 server 的一个工具",
 )
-async def call_tool_api(tool_id: uuid.UUID, payload: ToolCallRequest) -> dict:
+async def call_tool_api(
+    tool_id: uuid.UUID, payload: ToolCallRequest, admin: AdminUser
+) -> dict:
     """
     与 Agent 调用走**同一条**路径（`execute_tool` → stub → 沙箱）。
 
@@ -153,7 +174,7 @@ async def call_tool_api(tool_id: uuid.UUID, payload: ToolCallRequest) -> dict:
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除一台工具 server",
 )
-async def delete_tool_server_api(tool_id: uuid.UUID) -> Response:
+async def delete_tool_server_api(tool_id: uuid.UUID, admin: AdminUser) -> Response:
     try:
         await tool_server_service.delete(tool_id)
     except ToolServerError as e:

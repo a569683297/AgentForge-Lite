@@ -47,3 +47,6 @@
 .tableSkeleton { display: grid; gap: 6px; padding: 16px; border: 1px solid var(--af-border-subtle); border-radius: 6px; background: var(--af-surface); }
 .skeletonRow { display: grid; grid-template-columns: 1.4fr 1fr .7fr .7fr 1fr; gap: 12px; height: 24px; }
 .skeletonRow .ant-skeleton-input { width: 100%; min-width: 0; }
+.userButton { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; color: var(--af-text-secondary); }
+.userButton:hover { color: var(--af-text-primary); }
+.userEmail { color: var(--af-text-tertiary); font-family: var(--af-font-mono); font-size: 11px; }

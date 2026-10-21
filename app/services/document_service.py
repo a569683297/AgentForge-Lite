@@ -45,6 +45,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.db import async_session_factory
 from app.core.logging import logger
+from app.core.tenant import current_owner, owner_filter
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.services.document_parser import ParsedSegment, parse_file
@@ -101,7 +102,13 @@ def compute_content_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-async def begin_upload(filename: str, file_type: str, content_hash: str) -> tuple[Document, str]:
+async def begin_upload(
+    filename: str,
+    file_type: str,
+    content_hash: str,
+    *,
+    owner_id: uuid.UUID | None = None,
+) -> tuple[Document, str]:
     """
     上传入口的状态裁决：新建 / 复用重试 / 拒绝重复，三种结果一次定完。
 
@@ -127,18 +134,24 @@ async def begin_upload(filename: str, file_type: str, content_hash: str) -> tupl
     上面那条 SELECT 与 INSERT 之间有一个时间窗，两个并发请求可以同时查到"无"。
     唯一索引是唯一能在数据库层关掉这个窗口的东西 —— 见 Document.__table_args__。
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
-        existing = await _find_by_hash(session, content_hash)
+        existing = await _find_by_hash(session, content_hash, owner_id=scoped)
 
         if existing is None:
-            document = Document(filename=filename, file_type=file_type, content_hash=content_hash)
+            document = Document(
+                filename=filename,
+                file_type=file_type,
+                content_hash=content_hash,
+                owner_id=scoped,
+            )
             session.add(document)
             try:
                 await session.commit()
             except IntegrityError:
                 # 并发插入：另一个请求先提交了同一 hash。回滚后按"已有记录"重新裁决。
                 await session.rollback()
-                existing = await _find_by_hash(session, content_hash)
+                existing = await _find_by_hash(session, content_hash, owner_id=scoped)
                 if existing is None:
                     # 冲突了却查不到 —— 不是并发问题（可能是别的约束冲突），
                     # 不能假装成功，原样抛出让请求以 500 结束。
@@ -216,22 +229,46 @@ async def _claim_failed_for_retry(session, document: Document, filename: str) ->
     return True
 
 
-async def _find_by_hash(session, content_hash: str) -> Document | None:
-    """按内容指纹查已有文档（走唯一索引，O(log n)）。"""
-    stmt = select(Document).where(Document.content_hash == content_hash)
+async def _find_by_hash(
+    session, content_hash: str, *, owner_id: uuid.UUID | None = None
+) -> Document | None:
+    """
+    按内容指纹查**当前用户已上传过的**文档（走 (owner_id, content_hash) 唯一索引）。
+
+    多租户（2026-10-21）：这个查询**必须**带 owner 条件。
+      不带的话会出现一种很隐蔽的错：B 上传一份 A 传过的文件 → 命中 A 的那一行
+      → 判定为"重复文档"直接返回 A 的 id。于是 B 在界面上看到"上传成功（已存在）"，
+      点开却是 A 的切片；而 A 那边什么都没发生。
+      更糟的是后续 `_decide_existing` 会按 A 的文档状态做裁决 ——
+      B 既不能重试也不能删，只能看着一份不属于自己的文档。
+    """
+    scoped = owner_id if owner_id is not None else current_owner()
+    stmt = (
+        select(Document)
+        .where(Document.content_hash == content_hash)
+        .where(owner_filter(Document.owner_id, scoped))
+    )
     return (await session.scalars(stmt)).first()
 
 
-async def find_by_hash(content_hash: str) -> Document | None:
+async def find_by_hash(
+    content_hash: str, *, owner_id: uuid.UUID | None = None
+) -> Document | None:
     """`_find_by_hash` 的公开版本（测试 / 排障脚本用）。"""
     async with async_session_factory() as session:
-        return await _find_by_hash(session, content_hash)
+        return await _find_by_hash(session, content_hash, owner_id=owner_id)
 
 
 # ============================================================
 # 写路径：入库
 # ============================================================
-async def create_document(filename: str, file_type: str, content_hash: str | None = None) -> uuid.UUID:
+async def create_document(
+    filename: str,
+    file_type: str,
+    content_hash: str | None = None,
+    *,
+    owner_id: uuid.UUID | None = None,
+) -> uuid.UUID:
 
     """
     建一条 processing 记录并立刻提交，返回文档 ID。
@@ -243,8 +280,14 @@ async def create_document(filename: str, file_type: str, content_hash: str | Non
     没有"原始文件字节"，算不出合法的字节指纹。它们传 None（= 不参与去重），
     而不是拿文本临时凑一个 —— 两套口径的指纹混在一列里，比不去重更危险。
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
-        document = Document(filename=filename, file_type=file_type, content_hash=content_hash)
+        document = Document(
+            filename=filename,
+            file_type=file_type,
+            content_hash=content_hash,
+            owner_id=scoped,
+        )
         session.add(document)
         await session.commit()
         # expire_on_commit=False（见 core/db.py），所以 commit 后 id 依然可读
@@ -370,11 +413,20 @@ async def _mark_failed(document_id: uuid.UUID, reason: str) -> None:
 # ============================================================
 # 读路径：列表 / 详情
 # ============================================================
-async def list_documents(limit: int = 50, offset: int = 0) -> list[Document]:
-    """按上传时间倒序列出文档（前端靠它轮询状态）。"""
+async def list_documents(
+    limit: int = 50, offset: int = 0, *, owner_id: uuid.UUID | None = None
+) -> list[Document]:
+    """
+    按上传时间倒序列出文档（前端靠它轮询状态）。
+
+    多租户：不过滤就等于把所有人的文件清单（含文件名）摆在一个列表里。
+    文件名本身就是信息 —— "某某的离职申请.pdf"这种标题不需要点开就已经泄露了。
+    """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
         stmt = (
             select(Document)
+            .where(owner_filter(Document.owner_id, scoped))
             .order_by(Document.created_at.desc())
             .limit(limit)
             .offset(offset)
@@ -382,16 +434,38 @@ async def list_documents(limit: int = 50, offset: int = 0) -> list[Document]:
         return list((await session.scalars(stmt)).all())
 
 
-async def get_document(document_id: uuid.UUID) -> Document | None:
-    """按 ID 取单份文档（上传接口返回时用它把状态带出去）。"""
+async def get_document(
+    document_id: uuid.UUID, *, owner_id: uuid.UUID | None = None
+) -> Document | None:
+    """
+    按 ID 取单份文档（上传接口返回时用它把状态带出去）。
+
+    归属不匹配时返回 None（与"不存在"同解）—— 调用方统一判 404，
+    不泄露"这个 id 确实存在"。
+    """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
-        return await session.get(Document, document_id)
+        stmt = (
+            select(Document)
+            .where(Document.id == document_id)
+            .where(owner_filter(Document.owner_id, scoped))
+        )
+        return (await session.scalars(stmt)).first()
 
 
-async def get_document_preview(document_id: uuid.UUID) -> tuple[Document | None, list[DocumentChunk]]:
-    """读取文档元数据与按原始顺序排列的已解析切片。"""
+async def get_document_preview(
+    document_id: uuid.UUID, *, owner_id: uuid.UUID | None = None
+) -> tuple[Document | None, list[DocumentChunk]]:
+    """读取文档元数据与按原始顺序排列的已解析切片（含归属校验）。"""
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
-        document = await session.get(Document, document_id)
+        document = (
+            await session.scalars(
+                select(Document)
+                .where(Document.id == document_id)
+                .where(owner_filter(Document.owner_id, scoped))
+            )
+        ).first()
         if document is None:
             return None, []
         stmt = (
@@ -403,25 +477,42 @@ async def get_document_preview(document_id: uuid.UUID) -> tuple[Document | None,
         return document, chunks
 
 
-async def count_documents() -> int:
-    """文档总数（health / 列表分页用）。"""
+async def count_documents(*, owner_id: uuid.UUID | None = None) -> int:
+    """文档总数（health / 列表分页用）。不传 owner 时按当前上下文统计。"""
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
-        return await session.scalar(select(func.count()).select_from(Document)) or 0
+        stmt = (
+            select(func.count())
+            .select_from(Document)
+            .where(owner_filter(Document.owner_id, scoped))
+        )
+        return await session.scalar(stmt) or 0
 
 
 # ============================================================
 # 删除
 # ============================================================
-async def delete_document(document_id: uuid.UUID) -> bool:
+async def delete_document(
+    document_id: uuid.UUID, *, owner_id: uuid.UUID | None = None
+) -> bool:
     """
     删除文档，切片由数据库外键级联删除。
 
     注意这里**不需要**手写「先删切片再删文档」：
     外键上的 ON DELETE CASCADE 已经声明了这件事，
     数据库保证两个动作在同一个事务里完成，不会出现中间态。
+
+    多租户：删除必须带归属条件。**不是**"先查再删"—— 那中间有空窗，
+    而且多一次往返；直接把 owner 条件写进 DELETE 的 WHERE 里，
+    影响行数就同时回答了"删到了吗"和"是不是你的"。
     """
+    scoped = owner_id if owner_id is not None else current_owner()
     async with async_session_factory() as session:
-        result = await session.execute(delete(Document).where(Document.id == document_id))
+        result = await session.execute(
+            delete(Document)
+            .where(Document.id == document_id)
+            .where(owner_filter(Document.owner_id, scoped))
+        )
         await session.commit()
         deleted = (result.rowcount or 0) > 0
 
