@@ -48,12 +48,15 @@ D14 变化：session_id 在进程内是 uuid.UUID 对象（请求侧由 pydantic
 
 import json
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.core.logging import logger
-from app.deps import CurrentUser
+from app.core.permissions import PERM_CHAT_USE
+from app.deps import require_permission
+from app.models.user import User
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.agent_service import run_agent, run_agent_stream
 from app.services.llm_gateway import ModelResolutionError
@@ -63,7 +66,10 @@ router = APIRouter(tags=["chat"])
 
 
 @router.post("/chat", response_model=ChatResponse, summary="与 Agent 对话（非流式）")
-async def chat(req: ChatRequest, user: CurrentUser) -> ChatResponse:
+async def chat(
+    req: ChatRequest,
+    user: Annotated[User, Depends(require_permission(PERM_CHAT_USE))],
+) -> ChatResponse:
     """
     跑一次完整的 Agent 循环：读记忆 → ReAct（必要时检索知识库）→ 写记忆 → 返回。
 
@@ -148,7 +154,10 @@ def _sse_frame(event: dict) -> str:
 
 
 @router.post("/chat/stream", summary="与 Agent 对话（SSE 流式）")
-async def chat_stream(req: ChatRequest, user: CurrentUser) -> StreamingResponse:
+async def chat_stream(
+    req: ChatRequest,
+    user: Annotated[User, Depends(require_permission(PERM_CHAT_USE))],
+) -> StreamingResponse:
     """
     流式版对话接口：与 /api/chat 同一条服务链路，差别只在"边跑边发"。
 

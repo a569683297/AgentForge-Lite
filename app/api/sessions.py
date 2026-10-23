@@ -14,10 +14,13 @@ SQL 全在 app/services/session_service.py，那里才是会话数据的唯一�
 """
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.deps import CurrentUser
+from app.core.permissions import PERM_CHAT_USE
+from app.deps import require_permission
+from app.models.user import User
 from app.schemas.session import MessageItem, SessionItem
 from app.services.session_service import get_messages, get_session, list_sessions
 
@@ -26,7 +29,7 @@ router = APIRouter(tags=["sessions"])
 
 @router.get("/sessions", response_model=list[SessionItem], summary="会话列表")
 async def list_sessions_api(
-    user: CurrentUser,
+    user: Annotated[User, Depends(require_permission(PERM_CHAT_USE))],
     limit: int = Query(50, ge=1, le=200, description="最多返回多少条"),
     offset: int = Query(0, ge=0, description="跳过前多少条（分页用）"),
 ) -> list[SessionItem]:
@@ -48,7 +51,7 @@ async def list_sessions_api(
 )
 async def get_session_messages_api(
     session_id: uuid.UUID,
-    user: CurrentUser,
+    user: Annotated[User, Depends(require_permission(PERM_CHAT_USE))],
     limit: int = Query(500, ge=1, le=2000, description="最多返回多少条"),
 ) -> list[MessageItem]:
     """

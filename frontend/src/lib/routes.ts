@@ -34,6 +34,31 @@ export const PAGE_PATHS: Record<PageKey, string> = {
 };
 
 /**
+ * 页面 → 所需权限点。
+ *
+ * **这是"哪个页面要什么权限"的唯一出处**：侧栏过滤（AppShell）与路由守卫（App）
+ * 都读这张表。分成两份写的后果是"菜单藏了但地址栏能进"或反过来 ——
+ * 而这两种不一致都不会报错，只会让人以为权限没生效。
+ *
+ * 权限点本身来自后端（登录 / `/auth/me` 下发），前端不推导、不维护第二份
+ * role → 权限的映射：那张表一旦与后端漂移，表现就是"入口显示了、点进去 403"。
+ */
+export const PAGE_PERMISSIONS: Record<PageKey, string> = {
+  chat: 'chat.use',
+  knowledge: 'doc.read',
+  profile: 'profile.read',
+  // 评测跑的是平台级语料，普通用户既没有语料管理权也不该看到全量分数
+  eval: 'eval.read',
+  // ⚠ 这里用 tools.manage（注册表管理），不是 tools.list：
+  //   `tools.list` 是"对话时能拿到工具清单"，普通用户必须有，否则对话直接废掉；
+  //   把两者合成一个权限点，就会逼出"要么普通用户能改全局工具配置，要么他不能对话"。
+  tools: 'tools.manage',
+  trace: 'trace.read',
+  retriever: 'retriever.use',
+  admin: 'admin.users',
+};
+
+/**
  * 历史路径别名（块 4：评测看板与分析页合并）。
  *
  * 合并前的 /analytics 已并入 /eval —— 旧书签 / 外部链接仍可能指向它。

@@ -35,12 +35,14 @@ FastAPI 的 `Depends` 是"在路由函数执行**之前**跑的一段代码"，�
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from functools import lru_cache
+from typing import Annotated, Awaitable, Callable
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.logging import logger
+from app.core.permissions import has_permission
 from app.core.security import TOKEN_TYPE_ACCESS, TokenError, decode_token, token_user_id
 from app.models.user import ROLE_ADMIN, User
 from app.services import auth_service
@@ -96,7 +98,15 @@ async def get_current_user(
 async def require_admin(
     user: Annotated[User, Depends(get_current_user)],
 ) -> User:
-    """管理员专用接口的依赖。非 admin 一律 403（**不是** 401 —— 他登录是有效的）。"""
+    """
+    管理员专用接口的依赖。非 admin 一律 403（**不是** 401 —— 他登录是有效的）。
+
+    ⚠ 新接口不要再直接用它，改用 `require_permission("<资源>.<动作>")`：
+      `require_admin` 只回答"是不是管理员"，无法表达"这个接口需要哪项能力"。
+      两者在只有两个角色时等价，但一旦出现第三种角色，`require_admin` 会把
+      "只读运营"一并挡在外面，而正确的答案可能是"他能看，但不能改"。
+      保留它只为兼容存量调用点，新代码请按功能声明权限。
+    """
     if user.role != ROLE_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -105,7 +115,62 @@ async def require_admin(
     return user
 
 
-# ---- 类型别名：路由签名里写 `user: CurrentUser` 即可 ----
+@lru_cache(maxsize=None)
+def _permission_check(permission: str) -> Callable[..., Awaitable[User]]:
+    """
+    按权限点生成一个依赖函数。**按权限点缓存**（理由见 `require_permission`）。
+    """
+
+    async def _dep(user: Annotated[User, Depends(get_current_user)]) -> User:
+        # 角色来自**刚从库里读出来的那一行**（get_current_user 每请求回查），
+        # 所以管理员被降级后，他手上未过期的 token 也立刻失去权限 —— 见文件头第 3 条。
+        if not has_permission(user.role, permission):
+            logger.warning(
+                "越权访问被拒 user=%s role=%s need=%s",
+                user.email,
+                user.role,
+                permission,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"权限不足（需要 {permission}）",
+            )
+        return user
+
+    # 设置可读名字：否则 OpenAPI / 调试器里一堆同名闭包，看不出哪个是哪个权限
+    _dep.__name__ = f"require_permission[{permission}]"
+    return _dep
+
+
+def require_permission(permission: str) -> Callable[..., Awaitable[User]]:
+    """
+    权限点依赖工厂。用法：
+
+        async def get_eval_case(case_key: str, user: Annotated[User, Depends(require_permission(PERM_EVAL_READ))]):
+            ...
+
+    为什么返回的是"函数"而不是直接用 `Depends`：
+      `Depends` 只能包一个 callable，而权限点是运行时才知道的字符串 ——
+      必须先生成闭包再交给 `Depends`。
+
+    为什么按权限点缓存闭包：
+      FastAPI 在**每次请求**都会解析一遍依赖声明。若每次都新建闭包，
+      功能上能跑，但 `Depends` 对象也随之重建 —— 依赖缓存（`use_cache`）失效，
+      同一个权限点在一个请求里被检查多次，日志里也会出现一堆不同的函数对象，
+      排查时无法确认"这两处是不是同一条规则"。
+
+    为什么 detail 里带上权限点名：
+      这是内部平台，权限点命名不含敏感信息；而"权限不足"这句话如果不说是哪一项，
+      前端只能弹一个无法定位的 toast，用户也说不清自己缺什么。可排障优先于
+      少暴露一个字符串。
+    """
+    return _permission_check(permission)
+
+
+# ---- 类型别名 ----
+# `CurrentUser`：**只用于"登录者的基本权利"**（/me、改密、登出）——
+#   这类接口不该被权限点挡住，否则角色映射配错会让用户连密码都改不了。
+# `AdminUser`：存量兼容，新接口请用 `Depends(require_permission(PERM_XXX))`。
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminUser = Annotated[User, Depends(require_admin)]
 

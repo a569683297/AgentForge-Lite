@@ -21,11 +21,23 @@
 """
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+    status,
+)
 
 from app.config import settings
-from app.deps import AdminUser
+from app.core.permissions import PERM_TOOLS_MANAGE
+from app.deps import require_permission
+from app.models.user import User
 from app.schemas.tool_server import (
     ToolCallRequest,
     ToolServerListResponse,
@@ -54,7 +66,7 @@ def _http(exc: ToolServerError) -> HTTPException:
     response_model=ToolServerListResponse,
     summary="用户上传的工具 server 列表",
 )
-async def list_tool_servers_api(admin: AdminUser) -> dict:
+async def list_tool_servers_api(admin: Annotated[User, Depends(require_permission(PERM_TOOLS_MANAGE))]) -> dict:
     servers = await tool_server_service.list_all()
     return {"total": len(servers), "servers": servers}
 
@@ -66,7 +78,7 @@ async def list_tool_servers_api(admin: AdminUser) -> dict:
     summary="上传一个 MCP Server 程序（.py）",
 )
 async def upload_tool_server_api(
-    admin: AdminUser,
+    admin: Annotated[User, Depends(require_permission(PERM_TOOLS_MANAGE))],
     file: UploadFile = File(..., description="MCP Server 源码，只接受 .py"),
     name: str = Form(..., description="机器名（3-32 位小写字母/数字/下划线，作工具名前缀）"),
     display_name: str = Form("", description="显示名（留空 = 用 name）"),
@@ -101,7 +113,7 @@ async def upload_tool_server_api(
             filename=file.filename or "",
             content=content,
             # 记上传者（审计用）。注意：**这不是**准入控制 ——
-            # 能走到这里的都已经是管理员（依赖 AdminUser 在函数签名里）
+            # 能走到这里的都已有 tools.manage 权限（依赖在函数签名里）
             owner_id=admin.id,
         )
     except ToolServerError as e:
@@ -124,7 +136,7 @@ async def upload_tool_server_api(
     response_model=ToolServerOut,
     summary="重新拉起一台工具 server",
 )
-async def reconnect_tool_server_api(tool_id: uuid.UUID, admin: AdminUser) -> dict:
+async def reconnect_tool_server_api(tool_id: uuid.UUID, admin: Annotated[User, Depends(require_permission(PERM_TOOLS_MANAGE))]) -> dict:
     try:
         return await tool_server_service.reconnect(tool_id)
     except ToolServerError as e:
@@ -137,7 +149,7 @@ async def reconnect_tool_server_api(tool_id: uuid.UUID, admin: AdminUser) -> dic
     summary="启用 / 停用一台工具 server",
 )
 async def update_tool_server_api(
-    tool_id: uuid.UUID, payload: ToolServerUpdate, admin: AdminUser
+    tool_id: uuid.UUID, payload: ToolServerUpdate, admin: Annotated[User, Depends(require_permission(PERM_TOOLS_MANAGE))]
 ) -> dict:
     """
     停用的语义是"断开并摘掉工具"，不是"删除"：
@@ -154,7 +166,7 @@ async def update_tool_server_api(
     summary="试跑这台 server 的一个工具",
 )
 async def call_tool_api(
-    tool_id: uuid.UUID, payload: ToolCallRequest, admin: AdminUser
+    tool_id: uuid.UUID, payload: ToolCallRequest, admin: Annotated[User, Depends(require_permission(PERM_TOOLS_MANAGE))]
 ) -> dict:
     """
     与 Agent 调用走**同一条**路径（`execute_tool` → stub → 沙箱）。
@@ -174,7 +186,7 @@ async def call_tool_api(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除一台工具 server",
 )
-async def delete_tool_server_api(tool_id: uuid.UUID, admin: AdminUser) -> Response:
+async def delete_tool_server_api(tool_id: uuid.UUID, admin: Annotated[User, Depends(require_permission(PERM_TOOLS_MANAGE))]) -> Response:
     try:
         await tool_server_service.delete(tool_id)
     except ToolServerError as e:

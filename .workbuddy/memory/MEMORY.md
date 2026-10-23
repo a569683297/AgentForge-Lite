@@ -15,6 +15,43 @@
 - `admin` 的三条自锁规则在 `app/api/admin.py`：不能禁用自己、不能降级最后一个 admin、改自己角色也走规则 2。
 - bcrypt `rounds=12`（本机实测 166ms/次）。测试建账号用 `rounds=4`（0.7ms）。
 
+## 权限体系（2026-10-23，与账号体系同一分界线）
+
+- **三层分离，不能互相替代**：认证（你是谁 = JWT+users）/ 权限（能用哪些功能 = 权限点）/
+  数据归属（能看哪几行 = owner_id）。只有 owner_id 没有权限点 → 普通用户能调管理接口；
+  只有权限点没有 owner_id → 有 doc.read 的人看到全公司文档。
+- **权限点目录在 `app/core/permissions.py`**，命名 `<资源>.<动作>`，15 项；admin 显式持有全集
+  （不用 `*` 通配：通配会让新权限点自动给 admin 且无人 review，审计时也算不清）。
+  模块级 `_self_check()` 在 import 时校验"无重复 / 无未声明 / 无孤儿"，配错即启动失败。
+- **后端每个接口声明权限点**：`user: Annotated[User, Depends(require_permission(PERM_XXX))]`。
+  `CurrentUser` 只留给**登录者的基本权利**（/me、改密、登出）—— 否则角色配错时用户连密码都改不了。
+  `AdminUser` 保留兼容，新接口一律用 `require_permission`。
+- **清单由后端下发**：`UserOut.from_user()` 填 `permissions`，出口是登录 / 刷新 / `/auth/me` / admin 用户列表。
+  ⚠ 直接 `UserOut.model_validate(user)` 会让 permissions 落成空列表 → 登录 200 但菜单全没、日志无异常。
+- **前端不推导 role→权限**：`lib/routes.ts` 的 `PAGE_PERMISSIONS` 是"页面要什么权限"的唯一真源，
+  侧栏过滤与 `RequirePermission` 守卫共用。前端只消费后端清单。
+- **`hasPermissionOf` 的三种状态**：未登录（user 为 null）→ false；
+  已登录但 `permissions` 缺失（旧 session）→ true（还不知道，由启动 `/auth/me` 补齐）；
+  空数组 → false（后端明确说没有）。把后两者合并会在角色配错时静默放行整个应用。
+- **`tools.list` ≠ `tools.manage`**：前者是对话运行时依赖（普通用户必须有），后者是注册表管理页。
+  合成一个就逼出"能对话就能改全局工具配置"或"不能对话"。
+- 角色改动**立刻生效**（`get_current_user` 每请求回查库）；有用例
+  `test_role_change_takes_effect_on_next_request` 钉住。别改成只信 token claims。
+- 验证基线：后端 **526 passed / 3 skipped**（+40），前端 **60 passed**（+13）。
+
+## 微信入口（2026-10-23 用户明确，**尚未实施**）
+
+- 用户要的是 **微信 ClawBot**（官方 AI 助手插件，昵称"小龙虾"）——不是公众号、也不是企业微信自建应用。
+  链路是：微信 ClawBot → **OpenClaw**（本机/服务器的智能体）→ **MCP** → AgentForge。
+- ClawBot 是**私人通道**：只能本人添加、不能进群、不读聊天记录。所以它解决不了"给别人用"。
+- OpenClaw 支持 MCP，配置在 `~/.openclaw/openclaw.json` 的 `mcpServers`，
+  支持 `transport: "http"` + `url` + `headers.Authorization`（改完可能要 `openclaw gateway restart`）。
+- AgentForge 目前只有 MCP **客户端**（`app/mcp/client.py` / `manager.py`），**没有 server 端**。
+  要接这一跳，需补一个 Streamable HTTP 的 `/mcp` 端点，暴露 `search_knowledge` 一类工具。
+- 已讨论但**未采纳**的方向：企业微信智能机器人长连接（我误判用户意图，已完整回滚）、
+  公众号/小程序（需公网 IP + 备案 + 内容安全）。
+- ⚠ 协作教训：用户问"可行吗"时**只做分析**，不要动代码；「开始做」要单独确认。
+
 ## 前端登录态的两条铁律（2026-10-21 用户实测暴露，各修过一次）
 
 - **登录态是订阅源，不是一次性快照**：`lib/auth.ts` 的 5 个写入点统一调 `emit()`，
@@ -78,8 +115,11 @@
 - ⚠ **`APP_ENV=dev` + 未配 SMTP 时，`/api/auth/forgot-password` 直接返回可用的 `dev_link`**
   （`_dev_link_allowed()` 的双条件）。实测能拿到 `reset-password?token=...`，
   **任何人知道邮箱就能改别人密码**。对外暴露前必须同时关掉这两个条件。
-- ⚠ 截至 2026-10-21 15:25：账号体系 + 画像的全部改动**仍未 git 提交**
-  （HEAD = 96fa97b），只在工作区。镜像里有、仓库里没有 —— 换机器就没了。
+- ~~截至 2026-10-21 15:25：账号体系 + 画像的全部改动仍未 git 提交（HEAD = 96fa97b）~~
+  **已过期**：2026-10-23 实测 HEAD = `3a69295 feat: 实现多租户账号体系与用户画像功能`，
+  这两块已经提交。**权限体系仍是工作区改动**（未提交）。
+  ⚠ 教训：这条记忆曾让我以为"全都未提交"，实际只有一部分。
+  判断提交状态前先跑 `git log --oneline -2` + `git status --porcelain`，不要凭记忆。
 
 ## 已知限制
 

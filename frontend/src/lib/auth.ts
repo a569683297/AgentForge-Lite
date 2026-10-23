@@ -32,6 +32,14 @@ export interface AuthUser {
   is_active: boolean;
   created_at: string;
   last_login_at: string | null;
+  /**
+   * 后端下发的权限点清单（`chat.use` / `eval.read` / `admin.users` …）。
+   *
+   * 为什么是可选：
+   *   账号体系升级前存进 localStorage 的 session 没有这个字段。
+   *   读到旧数据时不能崩，由启动时的 `/auth/me` 补齐（见 App.tsx）。
+   */
+  permissions?: string[];
 }
 
 export interface StoredSession {
@@ -189,4 +197,34 @@ export function isAccessExpired(): boolean {
 
 export function isAdmin(): boolean {
   return current?.user?.role === 'admin';
+}
+
+// ============================================================
+// 权限判定
+// ============================================================
+/**
+ * 某个用户是否拥有权限点（纯函数，不读模块状态）。
+ *
+ * 数据来源是**后端下发的 `permissions`**（登录 / 刷新 / GET /auth/me 三处都带）。
+ * 前端**不再根据 role 自己推导**——这是「权限由后端把控」的关键：
+ * 如果前端也维护一份 role → 权限的映射，两张表迟早漂移，而漂移那天不会报错，
+ * 只会出现"菜单显示了但点进去 403"这种最难解释的故障。
+ *
+ * ⚠ `permissions` 缺失（升级前存下的旧 session）时返回 true：
+ *   此刻是"还不知道"而不是"没有权限"。返回 false 会让侧栏瞬间全空（连对话台都没了），
+ *   比多显示几个入口更难理解；而且真实能不能做仍由后端逐接口判定，
+ *   这里只决定"显示什么"。启动时 `/auth/me` 会把它补齐，此后一律以服务端清单为准。
+ */
+export function hasPermissionOf(user: AuthUser | null | undefined, permission: string): boolean {
+  // 未登录 = 什么都不能做。这里不能和"已登录但清单还没到"合并成一个兜底：
+  // 前者是确定没有，后者是还不知道。
+  if (!user) return false;
+  const permissions = user.permissions;
+  if (!Array.isArray(permissions)) return true;
+  return permissions.includes(permission);
+}
+
+/** 用"当前登录态"做权限判定（给路由守卫用）。渲染期间请优先用 `hasPermissionOf`。 */
+export function hasPermission(permission: string): boolean {
+  return hasPermissionOf(current?.user ?? null, permission);
 }

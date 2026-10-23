@@ -21,10 +21,13 @@
 """
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from app.deps import CurrentUser
+from app.core.permissions import PERM_MODEL_READ, PERM_MODEL_WRITE
+from app.deps import require_permission
+from app.models.user import User
 from app.schemas.model import (
     LlmModelCreate,
     LlmModelOut,
@@ -39,7 +42,9 @@ router = APIRouter(tags=["models"])
 
 
 @router.get("/models", response_model=ModelListResponse, summary="模型列表（内置 + 自定义）")
-async def list_models_api(user: CurrentUser) -> dict:
+async def list_models_api(
+    user: Annotated[User, Depends(require_permission(PERM_MODEL_READ))],
+) -> dict:
     """返回 `{"models": [...]}`；每项含 kind（builtin/local/custom）与打码后的 key。
 
     只含**自己的**自定义模型 —— 别人的端点（及其 key）不该出现在你的下拉框里。
@@ -53,13 +58,13 @@ async def list_models_api(user: CurrentUser) -> dict:
     status_code=status.HTTP_201_CREATED,
     summary="新建自定义模型",
 )
-async def create_model_api(payload: LlmModelCreate, user: CurrentUser) -> dict:
+async def create_model_api(payload: LlmModelCreate, user: Annotated[User, Depends(require_permission(PERM_MODEL_WRITE))]) -> dict:
     return await model_service.create_model(payload, owner_id=user.id)
 
 
 @router.patch("/models/{model_id}", response_model=LlmModelOut, summary="编辑自定义模型")
 async def update_model_api(
-    model_id: uuid.UUID, payload: LlmModelUpdate, user: CurrentUser
+    model_id: uuid.UUID, payload: LlmModelUpdate, user: Annotated[User, Depends(require_permission(PERM_MODEL_WRITE))]
 ) -> dict:
     """
     `model_id` 声明为 UUID：非法值（如 "not-a-uuid"）由 FastAPI 直接 422 ——
@@ -76,7 +81,7 @@ async def update_model_api(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除自定义模型",
 )
-async def delete_model_api(model_id: uuid.UUID, user: CurrentUser) -> Response:
+async def delete_model_api(model_id: uuid.UUID, user: Annotated[User, Depends(require_permission(PERM_MODEL_WRITE))]) -> Response:
     """
     只有"删除成功"和"没这条"两种结局 → 204 / 404。
     （"被会话选中却被删"的连带处理在前端：它发现选中项没了就回退默认 —— 见需求稿 §5.2。）
@@ -88,7 +93,7 @@ async def delete_model_api(model_id: uuid.UUID, user: CurrentUser) -> Response:
 
 @router.post("/models/test", response_model=ModelTestResult, summary="连通性测试（表单未保存值）")
 async def test_unsaved_model_api(
-    payload: ModelTestRequest, user: CurrentUser
+    payload: ModelTestRequest, user: Annotated[User, Depends(require_permission(PERM_MODEL_WRITE))]
 ) -> dict:
     """
     对表单里当前的填写值测一次 —— 配错时当场知道，而不是保存后发一条正式消息试错。
@@ -98,7 +103,7 @@ async def test_unsaved_model_api(
 
 
 @router.post("/models/{model_id}/test", response_model=ModelTestResult, summary="连通性测试（已保存模型）")
-async def test_saved_model_api(model_id: uuid.UUID, user: CurrentUser) -> dict:
+async def test_saved_model_api(model_id: uuid.UUID, user: Annotated[User, Depends(require_permission(PERM_MODEL_WRITE))]) -> dict:
     """对库里已保存的模型测一次（前端配置弹窗列表里的"测试"按钮）。"""
     row = await model_service.get_model(model_id, owner_id=user.id)
     if row is None:

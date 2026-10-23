@@ -5,7 +5,7 @@
     PATCH  /api/profile                 改显式字段（PATCH 语义：没传的保持不变，传空串 = 删除）
     DELETE /api/profile/facts/{id}      删一条隐式事实
 
-权限：**全部依赖 `CurrentUser`**，且查询条件一律带 `user.id`。
+权限：**全部声明权限点（profile.read / profile.write）**，且查询条件一律带 `user.id`。
 没有"管理员看别人画像"的接口 —— 画像是最私密的一类数据，
 "管理员能看"这个能力本身就不该存在（真要排障，走数据库而不是接口）。
 
@@ -18,9 +18,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response, status
+from typing import Annotated
 
-from app.deps import CurrentUser
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+
+from app.core.permissions import PERM_PROFILE_READ, PERM_PROFILE_WRITE
+from app.deps import require_permission
+from app.models.user import User
 from app.models.user_profile import EXPLICIT_FIELDS, FACT_KINDS
 from app.schemas.profile import (
     ProfileExplicitPatch,
@@ -53,7 +57,9 @@ def _fact_payload(fact: profile_service.FactItem) -> ProfileFactOut:
 
 
 @router.get("", response_model=ProfileOut)
-async def get_profile(user: CurrentUser) -> ProfileOut:
+async def get_profile(
+    user: Annotated[User, Depends(require_permission(PERM_PROFILE_READ))],
+) -> ProfileOut:
     """
     读当前用户的画像。
 
@@ -72,7 +78,7 @@ async def get_profile(user: CurrentUser) -> ProfileOut:
 
 
 @router.patch("", response_model=ProfileUpdateOut)
-async def patch_profile(body: ProfileExplicitPatch, user: CurrentUser) -> ProfileUpdateOut:
+async def patch_profile(body: ProfileExplicitPatch, user: Annotated[User, Depends(require_permission(PERM_PROFILE_WRITE))]) -> ProfileUpdateOut:
     """
     改显式字段。
 
@@ -100,7 +106,7 @@ async def patch_profile(body: ProfileExplicitPatch, user: CurrentUser) -> Profil
 
 
 @router.delete("/facts/{fact_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_fact(fact_id: int, user: CurrentUser) -> Response:
+async def delete_fact(fact_id: int, user: Annotated[User, Depends(require_permission(PERM_PROFILE_WRITE))]) -> Response:
     """
     删一条事实。
 

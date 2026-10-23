@@ -16,17 +16,23 @@ GET /api/tools —— 列出**全部**已注册工具，标明各自来自哪里
 ⚠ 本文件**不写任何工具名**，全部来自注册表现取。
 """
 
-from fastapi import APIRouter
+from typing import Annotated
 
-from app.deps import CurrentUser
+from fastapi import APIRouter, Depends
+
+from app.core.permissions import PERM_TOOLS_LIST
+from app.deps import require_permission
 from app.mcp.manager import get_manager
+from app.models.user import User
 from app.tools.registry import describe_tools
 
 router = APIRouter(tags=["tools"])
 
 
 @router.get("/tools")
-async def list_tools(user: CurrentUser) -> dict:
+async def list_tools(
+    user: Annotated[User, Depends(require_permission(PERM_TOOLS_LIST))],
+) -> dict:
     """
     返回：
     {

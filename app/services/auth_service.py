@@ -59,6 +59,7 @@ from app.models.audit_log import (
     ACTION_REGISTER,
 )
 from app.models.user import ROLE_ADMIN, ROLE_USER, User
+from app.schemas.auth import UserOut
 from app.services import audit_service
 
 # ---- Redis 键（唯一出处）----
@@ -319,6 +320,11 @@ async def issue_tokens(user: User) -> dict:
 
     Returns:
         可直接塞进 `TokenPairOut` 的 dict（含 user）。
+
+    ⚠ `user` 这里是 `UserOut.from_user(...)` 而不是 ORM 对象：
+      响应里必须带上 `permissions`（前端据此决定显示哪些入口）。
+      交给 Pydantic 从 ORM 自动转换的话，permissions 只会落到默认空值 ——
+      表现为"登录后菜单全没了"，而且后端一切正常、日志无异常。
     """
     access, _, access_exp = create_token(
         user.id, token_type=TOKEN_TYPE_ACCESS, role=user.role
@@ -336,7 +342,7 @@ async def issue_tokens(user: User) -> dict:
         "refresh_token": refresh,
         "token_type": "bearer",
         "expires_in": int((access_exp - _now()).total_seconds()),
-        "user": user,
+        "user": UserOut.from_user(user),
     }
 
 

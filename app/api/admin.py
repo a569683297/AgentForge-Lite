@@ -30,11 +30,12 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 
 from app.core.db import async_session_factory
-from app.deps import AdminUser
+from app.core.permissions import PERM_ADMIN_AUDIT, PERM_ADMIN_USERS
+from app.deps import require_permission
 from app.models.audit_log import (
     ACTION_USER_DISABLED,
     ACTION_USER_ENABLED,
@@ -67,13 +68,19 @@ def _client_ip(request: Request) -> str:
 
 
 def _user_out(user: User) -> dict:
-    """ORM → dict（复用 `UserOut` 的字段定义，**绝不含 password_hash**）。"""
-    return UserOut.model_validate(user).model_dump(mode="json")
+    """
+    ORM → dict（复用 `UserOut` 的字段定义，**绝不含 password_hash**）。
+
+    走 `from_user` 而不是 `model_validate`：管理员看用户列表时，
+    "这个人当前有哪些权限点"是有用信息（比如排查"为什么他看不到某页"），
+    而 model_validate 只会给一个空列表。
+    """
+    return UserOut.from_user(user).model_dump(mode="json")
 
 
 @router.get("/users", summary="用户列表")
 async def list_users_api(
-    admin: AdminUser,
+    admin: Annotated[User, Depends(require_permission(PERM_ADMIN_USERS))],
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     keyword: str = Query("", description="按邮箱/显示名模糊搜索"),
@@ -102,7 +109,7 @@ async def list_users_api(
 async def patch_user_api(
     user_id: uuid.UUID,
     payload: AdminUserPatch,
-    admin: AdminUser,
+    admin: Annotated[User, Depends(require_permission(PERM_ADMIN_USERS))],
     request: Request,
 ) -> dict:
     """
@@ -176,14 +183,16 @@ async def patch_user_api(
 
 
 @router.get("/audit/actions", summary="可选的动作清单")
-async def list_actions_api(admin: AdminUser) -> AuditActionOut:
+async def list_actions_api(
+    admin: Annotated[User, Depends(require_permission(PERM_ADMIN_AUDIT))],
+) -> AuditActionOut:
     """前端筛选下拉从这里取，不硬编码 —— 新增动作时不用改前端。"""
     return AuditActionOut(actions=list(ACTIONS))
 
 
 @router.get("/audit", summary="审计日志")
 async def list_audit_api(
-    admin: AdminUser,
+    admin: Annotated[User, Depends(require_permission(PERM_ADMIN_AUDIT))],
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     action: Annotated[str | None, Query(description="动作前缀，如 auth. / admin.")] = None,

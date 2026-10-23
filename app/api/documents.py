@@ -13,12 +13,15 @@ DELETE /api/documents/{id}    删除（切片由数据库外键级联删除）
 业务逻辑全在 document_service。
 """
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Response, UploadFile, status
 
 from app.core.logging import logger
-from app.deps import CurrentUser
+from app.core.permissions import PERM_DOC_READ, PERM_DOC_WRITE
+from app.deps import require_permission
+from app.models.user import User
 from app.schemas.document import DocumentOut, DocumentPreviewOut
 from app.models.audit_log import ACTION_DOCUMENT_DELETED
 from app.services import audit_service, document_service
@@ -54,7 +57,7 @@ def _duplicate_detail(outcome: str, document) -> str:
 )
 async def upload_document(
     background: BackgroundTasks,
-    user: CurrentUser,
+    user: Annotated[User, Depends(require_permission(PERM_DOC_WRITE))],
     file: UploadFile = File(..., description="要入库的文件：pdf / docx / md / txt"),
 ) -> DocumentOut:
     """
@@ -121,7 +124,7 @@ async def upload_document(
 
 @router.get("/documents", response_model=list[DocumentOut], summary="文档列表")
 async def list_documents(
-    user: CurrentUser,
+    user: Annotated[User, Depends(require_permission(PERM_DOC_READ))],
     limit: int = Query(default=50, ge=1, le=200, description="每页条数"),
     offset: int = Query(default=0, ge=0, description="偏移量（分页）"),
 ) -> list[DocumentOut]:
@@ -136,7 +139,10 @@ async def list_documents(
 
 
 @router.get("/documents/{document_id}/preview", response_model=DocumentPreviewOut, summary="文档详情与文本预览")
-async def preview_document(document_id: UUID, user: CurrentUser) -> DocumentPreviewOut:
+async def preview_document(
+    document_id: UUID,
+    user: Annotated[User, Depends(require_permission(PERM_DOC_READ))],
+) -> DocumentPreviewOut:
     """返回文档元数据和已解析切片；不暴露原始文件或任何凭据。
 
     别人的文档一律按 404 处理（不区分"不存在"与"不是你的"）。
@@ -165,7 +171,10 @@ async def preview_document(document_id: UUID, user: CurrentUser) -> DocumentPrev
     response_class=Response,
     summary="删除文档（级联删除切片）",
 )
-async def delete_document(document_id: UUID, user: CurrentUser) -> Response:
+async def delete_document(
+    document_id: UUID,
+    user: Annotated[User, Depends(require_permission(PERM_DOC_WRITE))],
+) -> Response:
     """
     删除一份文档及其全部切片。
 

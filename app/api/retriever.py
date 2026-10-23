@@ -8,10 +8,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.config import RETRIEVER_CONFIGS, settings
-from app.deps import CurrentUser
+from app.core.permissions import PERM_RETRIEVER_USE
+from app.deps import require_permission
+from app.models.user import User
 from app.schemas.retriever import (
     MAX_TOP_K,
     RetrieverOptionsOut,
@@ -28,7 +32,7 @@ router = APIRouter(tags=["retriever"])
     response_model=RetrieverOptionsOut,
     summary="检索检查器的可选项（配置清单 / 默认值 / k 上限）",
 )
-async def get_options(user: CurrentUser) -> RetrieverOptionsOut:
+async def get_options(user: Annotated[User, Depends(require_permission(PERM_RETRIEVER_USE))]) -> RetrieverOptionsOut:
     """
     把"有哪些配置可选"和"k 能填多大"由后端说出来，而不是前端写死。
 
@@ -50,7 +54,7 @@ async def get_options(user: CurrentUser) -> RetrieverOptionsOut:
     response_model=RetrieverSearchResponse,
     summary="跑一次检索并返回取舍过程（候选池 → 融合 → 重排 → gold 判定）",
 )
-async def search(req: RetrieverSearchRequest, user: CurrentUser) -> RetrieverSearchResponse:
+async def search(req: RetrieverSearchRequest, user: Annotated[User, Depends(require_permission(PERM_RETRIEVER_USE))]) -> RetrieverSearchResponse:
     """
     这个接口**不是** Agent 用的检索入口（那是 `query_metric` / `search_documents` 工具
     背后的 `retrieve()`），它只服务页面：给候选池、给两阶段名次、给 gold 比对。

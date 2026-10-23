@@ -19,10 +19,10 @@ import { Button, Dropdown, Layout, Tag } from 'antd';
 import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { HealthResponse, ModelItem, SessionItem } from '../types/api';
-import type { AuthUser } from '../lib/auth';
+import { hasPermissionOf, type AuthUser } from '../lib/auth';
 import type { ModelSelection } from '../lib/modelMemory';
 import { formatDateTime } from '../lib/format';
-import { PAGE_PATHS, type PageKey } from '../lib/routes';
+import { PAGE_PATHS, PAGE_PERMISSIONS, type PageKey } from '../lib/routes';
 import { useTheme } from '../theme/ThemeProvider';
 import { ModelConfigModal } from './ModelConfigModal';
 import { ModelSwitcher } from './ModelSwitcher';
@@ -32,13 +32,22 @@ import styles from '../styles/shell.module.css';
 const { Sider, Header, Content } = Layout;
 
 /**
- * 导航项。`adminOnly` 决定"普通用户看不看得见"。
+ * 导航项。
  *
- * ⚠ 隐藏入口 ≠ 有权限：后端对这些路径都挂了 `require_admin`（403）。
- *   前端这份清单只是"不把走不通的路摆出来"，任何越权尝试仍由服务端拒绝 ——
- *   把两者搞混（以为前端藏起来就安全）是权限设计里最常见的错误。
+ * **这里不再写"谁能看"** —— 每个页面需要什么权限点由 `PAGE_PERMISSIONS` 声明，
+ * 而"当前这个人有没有"由后端下发的 `permissions` 决定。两端各管一件事：
+ *   · 页面 ↔ 权限点的映射 = 前端的知识（它知道自己有哪些页面）
+ *   · 人 ↔ 权限点的映射   = 后端的知识（role → permission，只在服务端维护）
+ *
+ * 为什么不在这里写 `adminOnly: true`（改造前的做法）：
+ *   那等于前端也维护了一份"role → 能看什么"的映射。只有两个角色时它看起来没问题，
+ *   但一旦出现第三种角色（比如只读运营），前端和后端会各自演化，最后对不上 ——
+ *   表现是"菜单藏着但地址能进"或反之，且不会报错。
+ *
+ * ⚠ 隐藏入口 ≠ 有权限：后端对每个接口都声明了权限点（403）。
+ *   前端这份过滤只是"不把走不通的路摆出来"，任何越权尝试仍由服务端拒绝。
  */
-const navItems: Array<{ key: PageKey; label: string; icon: ReactNode; adminOnly?: boolean }> = [
+const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: 'chat', label: '对话台', icon: <MessageOutlined /> },
   // 我的画像：**不是管理员页**。它决定 Agent 怎么跟你说话（称呼、职业、回答风格），
   // 每个登录用户都该有，且紧挨对话台 —— 放在"设置"里会让人找不到，
@@ -46,15 +55,11 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode; adminOnly?
   { key: 'profile', label: '我的画像', icon: <IdcardOutlined /> },
   { key: 'knowledge', label: '知识库', icon: <DatabaseOutlined /> },
   // 块 4：原「评测看板」与「分析」两页合并为一页（/eval），导航 7 → 6 项。
-  // 两页本就同类（都是"看系统"的数据页），且分析页的四卡/曲线与评测页的指标卡
-  // 是同一套视觉语言——分开反而把"质量"与"成本/延迟"割成两个入口。
-  // 账号体系之后：评测跑的是**平台级语料**，普通用户既没有语料管理权也不该看到全量分数，
-  // 所以整页收成管理员可见（后端同步 403）。
-  { key: 'eval', label: '评测与分析', icon: <ExperimentOutlined />, adminOnly: true },
-  { key: 'tools', label: '工具注册表', icon: <ToolOutlined />, adminOnly: true },
-  { key: 'trace', label: 'Trace 时间线', icon: <FundProjectionScreenOutlined />, adminOnly: true },
+  { key: 'eval', label: '评测与分析', icon: <ExperimentOutlined /> },
+  { key: 'tools', label: '工具注册表', icon: <ToolOutlined /> },
+  { key: 'trace', label: 'Trace 时间线', icon: <FundProjectionScreenOutlined /> },
   { key: 'retriever', label: '检索检查器', icon: <SearchOutlined /> },
-  { key: 'admin', label: '用户与审计', icon: <TeamOutlined />, adminOnly: true },
+  { key: 'admin', label: '用户与审计', icon: <TeamOutlined /> },
 ];
 
 export function AppShell({ page, children, sessions, health, onSessionSelect, selectedSessionId, models, selectedModelId, onModelSelect, onModelsRefresh, user, onLogout, onChangePassword }: {
@@ -80,8 +85,11 @@ export function AppShell({ page, children, sessions, health, onSessionSelect, se
   const status = health?.status === 'ok' ? { tone: 'success' as const, label: 'API 正常' } : health?.status === 'degraded' ? { tone: 'warning' as const, label: '依赖异常' } : { tone: 'danger' as const, label: '连接失败' };
   const activeSession = useMemo(() => selectedSessionId ?? sessions[0]?.id, [selectedSessionId, sessions]);
   const isAdmin = user.role === 'admin';
-  // 普通用户看不到管理页；管理员看到全部（顺序与 navItems 声明一致）
-  const visibleNav = navItems.filter((item) => !item.adminOnly || isAdmin);
+  // 按后端下发的权限清单过滤：普通用户看不到平台级页面，管理员看到全部。
+  // `PAGE_PERMISSIONS` 是"页面要什么"的唯一出处（与路由守卫共用同一张表）。
+  const visibleNav = navItems.filter((item) =>
+    hasPermissionOf(user, PAGE_PERMISSIONS[item.key]),
+  );
 
   return (
     <Layout className={styles.appShell}>

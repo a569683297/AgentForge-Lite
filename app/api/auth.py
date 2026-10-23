@@ -176,12 +176,16 @@ async def logout_api(payload: RefreshRequest) -> dict:
 @router.get("/me", response_model=UserOut, summary="当前用户")
 async def me_api(user: CurrentUser) -> UserOut:
     """
-    前端启动时用它校验本地 token 是否还有效（顺带拿到最新 role）。
+    前端启动时用它校验本地 token 是否还有效（顺带拿到最新 role 与 permissions）。
 
     `user` 是 `deps.get_current_user` 的产物 —— 已经验过签名、
     查过库、确认没过期没被禁用。
+
+    ⚠ 必须走 `UserOut.from_user`：直接 `model_validate` 出来的 permissions 是空的。
+      前端在**每次启动**都靠这个接口刷新权限清单（角色被改后不用重新登录就能生效），
+      漏了它就会出现"角色改了但菜单不变，得退出重进"。
     """
-    return UserOut.model_validate(user)
+    return UserOut.from_user(user)
 
 
 @router.post("/change-password", response_model=MessageOut, summary="修改密码")

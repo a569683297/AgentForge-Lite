@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom';
-import { logout as logoutApi } from './api/auth';
+import { fetchMe, logout as logoutApi } from './api/auth';
 import { getHealth } from './api/health';
 import { listModels } from './api/models';
 import { listSessions } from './api/sessions';
 import { AppShell } from './components/AppShell';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
+import { RequirePermission } from './components/RequirePermission';
 import { AdminPage } from './pages/AdminPage';
 import { ChatPage } from './pages/ChatPage';
 import { EvalPage } from './pages/EvalPage';
@@ -16,10 +17,22 @@ import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { RetrieverPage } from './pages/RetrieverPage';
 import { ToolsPage } from './pages/ToolsPage';
 import { TracePage } from './pages/TracePage';
-import { clearSession, getRefreshToken, getSession, subscribeSession } from './lib/auth';
+import { clearSession, getRefreshToken, getSession, subscribeSession, updateUser } from './lib/auth';
 import { rememberModel, resolveModelForSession, type ModelSelection } from './lib/modelMemory';
-import { pageFromPath } from './lib/routes';
+import { PAGE_PERMISSIONS, pageFromPath, type PageKey } from './lib/routes';
 import type { HealthResponse, ModelItem, SessionItem } from './types/api';
+
+/**
+ * 给页面套上权限守卫。
+ *
+ * 用 `PageKey` 而不是裸权限字符串作参数，是为了**强迫**每个页面都在
+ * `PAGE_PERMISSIONS` 里出现一次 —— 那张表是"页面要什么权限"的唯一出处，
+ * 侧栏过滤读的也是它。两处各写一份权限字符串，改一处忘一处不会有任何报错，
+ * 只会表现成"菜单藏了但地址栏能进"。
+ */
+function guarded(key: PageKey, element: ReactNode) {
+  return <RequirePermission permission={PAGE_PERMISSIONS[key]}>{element}</RequirePermission>;
+}
 
 export default function App() {
   const navigate = useNavigate();
@@ -39,6 +52,40 @@ export default function App() {
   const authSession = useSyncExternalStore(subscribeSession, getSession, getSession);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const authenticated = authSession !== null;
+
+  // ---- 启动时用 /auth/me 校准用户信息（role + permissions）----
+  // 为什么必须做（2026-10-23 加权限体系时补）：
+  //   ① 账号体系升级前存进 localStorage 的 session **没有 permissions** 字段，
+  //      不补齐的话侧栏会按"未知"处理（见 hasPermissionOf 的兜底），
+  //      而管理员在后台改了某人的角色，对方也要等到重新登录才生效。
+  //   ② 登录/刷新拿到的清单是**那一刻**的快照；用户可能已经在别处被改过角色。
+  //
+  // 为什么只在"真的变了"时写回：
+  //   `updateUser` 会 emit → 整个 App 重渲染。每次启动都无条件写回，
+  //   等于每次开页面都多一次全树重渲染（还会把正在编辑的局部状态一起扰动）。
+  // 依赖用 userId 而不是 authenticated：同一用户登录态不变时不重复请求；
+  // 换账号（登出再登录另一个人）时必须重新校准。
+  const userId = authSession?.user.id;
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    void fetchMe()
+      .then((user) => {
+        if (cancelled) return;
+        const prev = getSession()?.user;
+        const changed =
+          !prev ||
+          prev.role !== user.role ||
+          JSON.stringify(prev.permissions ?? []) !== JSON.stringify(user.permissions ?? []);
+        if (changed) updateUser(user);
+      })
+      // 失败什么都不做：401 已由拦截器统一处理（清本地 + 跳登录），
+      // 这里再弹一次错只会让"token 自然过期"这个正常场景看起来像故障
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   // 公开路由：登录页、重置密码页（后者是从邮件里点进来的，**不该**要求先登录）
   const isPublicRoute = pathname === '/login' || pathname.startsWith('/reset-password');
@@ -160,18 +207,18 @@ export default function App() {
         <Route path="/" element={<Navigate to="/chat" replace />} />
         {/* 对话台两个地址：/chat = 新会话；/chat/:sessionId = 打开某个已有会话。
             会话 id 不在这里手动传 —— ChatPage 内部用 useParams 从 URL 取 */}
-        <Route path="/chat" element={<ChatPage onSessionsRefresh={refreshSessions} selectedModelId={selectedModelId} onModelUsed={handleModelUsed} />} />
-        <Route path="/chat/:sessionId" element={<ChatPage onSessionsRefresh={refreshSessions} selectedModelId={selectedModelId} onModelUsed={handleModelUsed} />} />
-        <Route path="/knowledge" element={<KnowledgePage />} />
+        <Route path="/chat" element={guarded('chat', <ChatPage onSessionsRefresh={refreshSessions} selectedModelId={selectedModelId} onModelUsed={handleModelUsed} />)} />
+        <Route path="/chat/:sessionId" element={guarded('chat', <ChatPage onSessionsRefresh={refreshSessions} selectedModelId={selectedModelId} onModelUsed={handleModelUsed} />)} />
+        <Route path="/knowledge" element={guarded('knowledge', <KnowledgePage />)} />
         {/* 我的画像：所有登录用户可见（后端只认自己的画像，没有"看别人"的接口） */}
-        <Route path="/profile" element={<ProfilePage />} />
-        <Route path="/eval" element={<EvalPage />} />
+        <Route path="/profile" element={guarded('profile', <ProfilePage />)} />
+        <Route path="/eval" element={guarded('eval', <EvalPage />)} />
         {/* 块 4：分析页已并入 /eval —— 旧链接重定向（replace：不在历史里留一条死路径） */}
         <Route path="/analytics" element={<Navigate to="/eval" replace />} />
-        <Route path="/tools" element={<ToolsPage />} />
-        <Route path="/trace" element={<TracePage />} />
-        <Route path="/retriever" element={<RetrieverPage />} />
-        <Route path="/admin" element={<AdminPage />} />
+        <Route path="/tools" element={guarded('tools', <ToolsPage />)} />
+        <Route path="/trace" element={guarded('trace', <TracePage />)} />
+        <Route path="/retriever" element={guarded('retriever', <RetrieverPage />)} />
+        <Route path="/admin" element={guarded('admin', <AdminPage />)} />
         {/* 未登录的路由在登录后直接命中这里（例如 /login 已被上面处理） */}
         <Route path="/login" element={<Navigate to="/chat" replace />} />
         {/* 未知路径统一回对话台 */}

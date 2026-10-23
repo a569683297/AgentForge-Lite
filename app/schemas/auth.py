@@ -22,8 +22,14 @@
 import re
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.core.permissions import permissions_for_role
+
+if TYPE_CHECKING:  # 只为类型标注；运行时不导入 ORM，避免 schema 层反向依赖模型层
+    from app.models.user import User
 
 # 邮箱校验：不用 email-validator（多一个依赖、且它接受一堆我们不想处理的形态）。
 # 这条正则只保证"有一个 @、两边非空、域名带点"——够用，且不会误杀企业邮箱。
@@ -111,8 +117,35 @@ class UserOut(BaseModel):
     is_active: bool
     created_at: datetime
     last_login_at: datetime | None = None
+    permissions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "该账号当前的权限点清单（由 role 推导，**不是**存在库里的字段）。"
+            "前端只用它决定「显示什么」；能不能做某件事，仍由后端逐接口判定。"
+        ),
+    )
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_user(cls, user: "User") -> "UserOut":
+        """
+        ORM User → UserOut，并填上权限清单。
+
+        为什么单独一个工厂而不是让调用方自己补字段：
+          `issue_tokens` / `refresh_tokens` / `/me` / 管理员用户列表**四处**都要
+          这份输出。任何一处忘了补 permissions，那个入口的权限清单就是空的 ——
+          而空清单在前端表现为"菜单全没了"，排查时会以为是前端丢了数据。
+          集中到一处，就不存在"漏了某一处"这种问题。
+
+        为什么 permissions 不落库：
+          它是 role 的**纯函数**。落库意味着两份真相，改角色时得记得同步刷；
+          忘了刷就出现"库里写的权限"和"实际能做的事"不一致，而这种不一致
+          不会有任何报错，只会在某天被用户发现。
+        """
+        out = cls.model_validate(user)
+        out.permissions = sorted(permissions_for_role(user.role))
+        return out
 
 
 class TokenPairOut(BaseModel):
